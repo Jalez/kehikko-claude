@@ -1,6 +1,7 @@
-import { answered, ask } from 'kehikot-module-protocol/client'
+import { answered, ask, follow, ticket } from 'kehikot-module-protocol/client'
 
 import type { Listing } from '../doors.ts'
+import type { Notice, Stated } from '../live.ts'
 
 /**
  * This module's own `/api`, as the page calls it. `ask` carries the ticket —
@@ -19,6 +20,13 @@ export interface Api {
   end(session: string): Promise<void>
   /** Take a session off a place. The session itself is kept. */
   detach(projectPath: string, key: string, session: string): Promise<void>
+  /**
+   * Follow what changes while the page is open: every running session's
+   * state, and — when `notices` says a host is there to pass them to — the
+   * notices raised for a person who is not looking. Returns the function that
+   * stops following.
+   */
+  feed?(notices: boolean, heard: { state(stated: Stated): void; notice(notice: Notice): void }): () => void
 }
 
 export const api: Api = {
@@ -33,5 +41,13 @@ export const api: Api = {
   },
   async detach(projectPath, key, session) {
     answered(await ask('./api/detach', { body: { projectPath, key, session } }))
+  },
+  feed(notices, heard) {
+    return follow<Stated | Notice>(
+      './api/feed',
+      (event, name) => (name === 'notice' ? heard.notice(event as Notice) : heard.state(event as Stated)),
+      /* An EventSource sends no header, so the ticket rides the query (see `stream` in doors.ts). */
+      { query: { ticket: ticket() ?? '', notices: notices ? '1' : '0' }, events: ['notice'] },
+    )
   },
 }

@@ -1,12 +1,28 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { held, probeServer } from 'kehikot-module-protocol/client'
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react'
+import type { HeaderItemInput } from 'kehikot-module-protocol'
+import { held, probeServer, type PressAnswer } from 'kehikot-module-protocol/client'
 import { Cover, coverFor, useFocus, useHost, useServerStanding, type CoverState } from 'kehikot-module-protocol/client/react'
 
 import type { Listing } from '../doors.ts'
-import { ID } from '../manifest.ts'
+import { ID, NOTICES } from '../manifest.ts'
+import type { State } from '../program.ts'
 import { api as realApi, type Api } from './api.ts'
 import { Chooser } from './view/chooser.tsx'
-import { MOST_VIEWS, SETTLE_MS, brief, decide, placeId, standing, surplus, type Standing as Place, type View } from './view/places.ts'
+import {
+  MARKS,
+  MOST_VIEWS,
+  SETTLE_MS,
+  brief,
+  decide,
+  named,
+  noticeLine,
+  placeId,
+  since,
+  standing,
+  surplus,
+  type Standing as Place,
+  type View,
+} from './view/places.ts'
 import { TerminalView, type Said, type Standing } from './view/terminal-view.tsx'
 import { Button } from '@/components/ui/button'
 
@@ -35,7 +51,26 @@ const knock = () => void probeServer()
  */
 const remembered = held<string>('kehikot.claude.showing', (stored) => (typeof stored === 'string' && stored ? stored : null))
 
+/** A press on one of this module's header items, as the page takes it. */
+type Press = (press: { item: string; value?: string | boolean }) => PressAnswer
+
+/**
+ * What the page asks of a host beyond being told where it stands: carry a
+ * notice, and draw the way to the sessions in the container's own menus.
+ * Handed to `Sessions` whole, so that a test can stand one in and a page
+ * nothing is framing has none.
+ */
+export interface Hosted {
+  /** Send one extension payload through the host (`events.emit`). */
+  emit(extension: string, payload: Record<string, unknown>): Promise<unknown>
+  /** Declare the header items, whole. */
+  header(items: HeaderItemInput[]): void
+  /** Where the page puts what takes a press. */
+  presses: MutableRefObject<Press | null>
+}
+
 export function App() {
+  const presses = useRef<Press | null>(null)
   const host = useHost(ID, {
     /* Answered at once and always no: a terminal holds a session, not a
        document with anchors, and silence would make every reference pointing
@@ -43,6 +78,7 @@ export function App() {
     onGoto: (_goto, answer) => {
       answer(false, 'A terminal holds a session, not a document: there is nothing here to walk to.')
     },
+    onPress: (press) => (presses.current ? presses.current(press) : 'There is no session here to go to yet.'),
   })
   /* The parts as one steady value: the same array until the list changes by
      value, so the place below moves when a part is picked and not every time
@@ -59,7 +95,12 @@ export function App() {
   )
   const server = useServerStanding()
   const cover = coverFor({ where, projectPath, server })
-  return <Sessions theme={host.theme} at={at} cover={cover} />
+  const { request, header } = host
+  const hosted = useMemo<Hosted | null>(
+    () => (where === 'hosted' ? { emit: (extension, payload) => request('events.emit', { extension, payload }), header, presses } : null),
+    [where, request, header],
+  )
+  return <Sessions theme={host.theme} at={at} cover={cover} hosted={hosted} canvasEpic={epic} />
 }
 
 /**
@@ -92,6 +133,27 @@ export function App() {
  * A strip appears along the bottom only when there is nothing running to
  * take the space from: the session has ended, the install did not finish, or
  * this module's server has gone.
+ *
+ * ## What a session is doing, and what is done about it
+ *
+ * Its program says — working, needs you, finished (`State` in program.ts) —
+ * and the page is told as it changes, on the view's own socket and, for the
+ * sessions it has no view of, on one feed (`api.feed`). It is drawn as one
+ * glyph: in the corner control, before the label, for the session on screen;
+ * and on each running row of the list, where the word "running" was. Neither
+ * adds a row, a line or a pixel of height.
+ *
+ * When a session nobody has on screen comes to need its person, or finishes,
+ * the server raises a notice and ONE framed page passes it to the host, in
+ * the protocol's own format, for whatever on the canvas shows such lines.
+ * The line names the session and its place in words. Pressing it goes
+ * nowhere: the format carries an epic and no place, and a line on somebody
+ * else's panel is not this module's to make pressable.
+ *
+ * The same sessions are declared as a Go item for the container's header, so
+ * a host that draws headers offers them in its own menu. The corner control
+ * stays: a page cannot tell whether its host draws headers, and without it a
+ * host that does not would leave no way to the list.
  */
 export function Sessions({
   theme,
@@ -99,6 +161,8 @@ export function Sessions({
   cover = null,
   api = realApi,
   settleMs = SETTLE_MS,
+  hosted = null,
+  canvasEpic = null,
 }: {
   theme: 'light' | 'dark'
   /** The place the canvas is about, or null when there is nothing to open. */
@@ -108,12 +172,18 @@ export function Sessions({
   api?: Api
   /** How long a place is stood on before a new session is started for it. */
   settleMs?: number
+  /** The host, for the two things asked of it; null when nothing is framing the page. */
+  hosted?: Hosted | null
+  /** The epic the canvas is on, which is not always the epic of the session a notice is about. */
+  canvasEpic?: string | null
 }) {
   const [views, setViews] = useState<View[]>([])
   /** Which view each place shows, by `placeId`. */
   const [shownBy, setShownBy] = useState<Record<string, number>>({})
   const [standings, setStandings] = useState<Record<number, Standing>>({})
   const [labels, setLabels] = useState<Record<string, string>>({})
+  /** What each running session's program last said it is doing. Null is "said, and taken back". */
+  const [states, setStates] = useState<Record<string, { state: State | null; since: number }>>({})
   const [listing, setListing] = useState<{ id: string; value: Listing } | null>(null)
   const [refusal, setRefusal] = useState<string | null>(null)
   /** The person opened the list over a running terminal. */
@@ -128,7 +198,19 @@ export function Sessions({
   standingOn.current = at
 
   const id = at ? placeId(at) : null
-  const here = listing && listing.id === id ? listing.value : null
+  const read = listing && listing.id === id ? listing.value : null
+  /* The list as it was read, with what has been said since laid over it: a
+     state changes far more often than the list is asked for. */
+  const here = useMemo<Listing | null>(() => {
+    if (!read) return null
+    const now = (row: Listing['sessions'][number]) => {
+      const said = Object.hasOwn(states, row.id) ? states[row.id] : undefined
+      if (!said || !row.running) return row
+      const { state: _was, since: _when, ...rest } = row
+      return said.state ? { ...rest, state: said.state, since: said.since } : rest
+    }
+    return { ...read, sessions: read.sessions.map(now), others: read.others.map(now) }
+  }, [read, states])
   const view = id !== null ? (views.find((one) => one.n === shownBy[id]) ?? null) : null
 
   /* The canvas moved, or something changed that the list should reflect. */
@@ -257,8 +339,36 @@ export function Sessions({
       setViews((all) => all.map((each) => (each.n === one.n && each.session !== session ? { ...each, session } : each)))
       remembered.at(one.at.projectPath).keep(one.at.key, session)
       if (heard.label) setLabels((all) => ({ ...all, [session]: heard.label! }))
+      if (heard.state !== undefined) setStates((all) => ({ ...all, [session]: { state: heard.state ?? null, since: heard.since ?? Date.now() } }))
+      /* A session that has come to exist since the list was read — a new one somebody has now spoken
+         to — is not in it. Read again, so that the list and the header's menu have it without a press. */
+      if (heard.exists && placeId(one.at) === id && read && !read.sessions.some((row) => row.id === session)) setAgain((n) => n + 1)
     }
   }
+
+  /*
+   * The feed: every running session's state as it changes, and — only for a
+   * page a host is framing, which is the only kind that can pass one on —
+   * the notices raised for a person who is not looking. The server hands a
+   * notice to one page, so what arrives here is said once.
+   */
+  const told = useRef({ hosted, canvasEpic })
+  told.current = { hosted, canvasEpic }
+  const framed = hosted !== null
+  useEffect(() => {
+    if (!api.feed) return
+    return api.feed(framed, {
+      state: (stated) => setStates((all) => ({ ...all, [stated.session]: { state: stated.state, since: stated.since } })),
+      notice: (notice) => {
+        const line = noticeLine(notice, told.current.canvasEpic)
+        if (!line) return console.info('A session changed while no epic was open, and a notice is filed under one. Nothing was sent.')
+        void told.current.hosted
+          ?.emit(NOTICES, { ...line, refs: [] })
+          /* The host's word, and worth reading: it is where it says nothing on the canvas shows these. */
+          .catch((error: unknown) => console.info('The host did not carry a notice.', error))
+      },
+    })
+  }, [api, framed])
 
   const step = here && !view ? decide(here, null) : null
   const standingNow = view ? standings[view.n] : undefined
@@ -268,6 +378,46 @@ export function Sessions({
   const wanting = Boolean(at && here && !installing && !view && step?.do === 'install')
   const terminal = Boolean(at && view && !choosing && !installing)
   const label = view ? brief((view.session && (labels[view.session] || here?.sessions.find((one) => one.id === view.session)?.label)) || '') : ''
+  const doing = (view?.session && Object.hasOwn(states, view.session) ? states[view.session] : undefined) ?? null
+  const mark = doing?.state ? MARKS[doing.state] : null
+
+  /*
+   * The same way to the sessions, declared for the container's header: a Go
+   * item with this place's sessions, a new one, and the list. Person-only —
+   * it says nothing about agents, so none can open a session through it.
+   */
+  const offered = at && here && here.program.found && !here.program.lacks && !installing ? here.sessions.filter((one) => !one.missing).slice(0, 60) : null
+  const items = useMemo<HeaderItemInput[]>(() => {
+    if (!offered) return []
+    const worded = (row: (typeof offered)[number]) => {
+      const text = `${row.state ? `${MARKS[row.state].glyph} ` : ''}${labels[row.id] || named(row)}`
+      return text.length > 48 ? `${text.slice(0, 47).trimEnd()}…` : text
+    }
+    return [
+      {
+        kind: 'go',
+        id: 'sessions',
+        label: 'Sessions',
+        options: [...offered.map((row) => ({ id: row.id, label: worded(row) })), { id: 'new', label: 'New session' }, { id: 'list', label: 'All sessions…' }],
+      },
+    ]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(offered?.map((row) => [row.id, row.label, row.state ?? ''])), labels])
+  useEffect(() => {
+    hosted?.header(items)
+  }, [hosted, items])
+  if (hosted) {
+    hosted.presses.current = ({ item, value }) => {
+      if (item !== 'sessions' || typeof value !== 'string') return 'That is not something here to go to.'
+      if (value === 'list') {
+        setAsking(true)
+        setAgain((n) => n + 1)
+      } else if (value === 'new') open(null)
+      else if (offered?.some((one) => one.id === value)) open(value)
+      else return 'That session is no longer one of this place’s.'
+      return true
+    }
+  }
 
   return (
     <div className="bg-background text-foreground relative flex h-dvh min-h-0 flex-col">
@@ -363,6 +513,7 @@ export function Sessions({
                     kehikko: one.at.kehikko,
                     kehikkoName: one.at.kehikkoName,
                     ...(one.at.kehikkoId === null ? {} : { kehikkoId: one.at.kehikkoId }),
+                    ...(Object.keys(one.at.partNames).length ? { partNames: one.at.partNames } : {}),
                   },
                   session: one.session,
                 }}
@@ -382,14 +533,20 @@ export function Sessions({
         <button
           type="button"
           data-sessions
-          aria-label={`Sessions — ${label}`}
-          title="Sessions for this place"
+          aria-label={`Sessions — ${label}${mark ? ` (${mark.word})` : ''}`}
+          title={doing?.state ? `Sessions for this place — this one: ${since(doing.state, doing.since, Date.now())}` : 'Sessions for this place'}
+          data-state={doing?.state ?? undefined}
           className="bg-background/70 text-muted-foreground hover:text-foreground hover:bg-background absolute top-1 right-4 z-10 max-w-[60%] truncate rounded border px-1.5 py-0.5 font-mono text-[10px] opacity-60 backdrop-blur-sm hover:opacity-100 focus-visible:opacity-100"
           onClick={() => {
             setAsking(true)
             setAgain((n) => n + 1)
           }}
         >
+          {mark ? (
+            <span className={`${mark.colour} mr-1`} aria-hidden>
+              {mark.glyph}
+            </span>
+          ) : null}
           {label} ▾
         </button>
       )}

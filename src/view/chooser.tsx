@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import type { Listing, Row } from '../../doors.ts'
-import { ago, named } from './places.ts'
+import { MARKS, ago, named, since } from './places.ts'
 
 /**
  * The list a person chooses a session from, drawn where the terminal would be.
@@ -34,6 +34,13 @@ import { ago, named } from './places.ts'
  * here to resume, and starting the program under its id would be a different
  * conversation. It can still be taken off the place. No row is added to say
  * any of this.
+ *
+ * ## What a running session is doing
+ *
+ * Where a running row said "running" it says what the session's program
+ * last said it is doing — working, needs you, finished — as a glyph and the
+ * word, in the same place on the same line. One that has not said (a copy
+ * too old to, or a session nobody has spoken to) still says "running".
  */
 
 /** Why a row cannot be opened, in the fewest words that are true of both ways it happens. */
@@ -170,10 +177,20 @@ export function Chooser({
               <span className="min-w-0 flex-1 truncate">{named(row)}</span>
               {row.id === current ? <span className="text-muted-foreground shrink-0">on screen</span> : null}
               {row.running ? (
-                <span className="flex shrink-0 items-center gap-1">
-                  <span className="bg-running size-1.5 rounded-full" aria-hidden />
-                  running
-                </span>
+                row.state ? (
+                  /* What its program says it is doing, where "running" was: a glyph and the word, in the same place. */
+                  <span className="flex shrink-0 items-center gap-1" data-state={row.state} title={since(row.state, row.since, now)}>
+                    <span className={MARKS[row.state].colour} aria-hidden>
+                      {MARKS[row.state].glyph}
+                    </span>
+                    {MARKS[row.state].word}
+                  </span>
+                ) : (
+                  <span className="flex shrink-0 items-center gap-1">
+                    <span className="bg-running size-1.5 rounded-full" aria-hidden />
+                    running
+                  </span>
+                )
               ) : null}
               <span className="text-muted-foreground shrink-0">{ago(row.lastActive, now)}</span>
             </button>

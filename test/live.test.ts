@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { CLOSED, Runs, fenced, headless, opening, readPlace, sayable, type Opening, type Pty, type Run, type Viewer } from '../live.ts'
+import { CLOSED, Runs, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
 import { placeKey } from '../place.ts'
 import { PROGRAM, type Program, type Recorded } from '../program.ts'
 import { readPlaces, sessionsAt, type NamedPlace } from '../record.ts'
@@ -177,7 +177,7 @@ class Watcher implements Viewer {
 /** Long enough for the emulator's write queue and the promises behind an open to have run. */
 const settle = () => new Promise((done) => setTimeout(done, 25))
 
-function world(options: { found?: string | null; able?: boolean; line?: string; grace?: number; quiet?: number } = {}) {
+function world(options: { found?: string | null; able?: boolean; tells?: boolean; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number } = {}) {
   const logged: string[] = []
   const ptys: FakePty[] = []
   /* What the stand-in program holds a record for, by folder. */
@@ -187,7 +187,7 @@ function world(options: { found?: string | null; able?: boolean; line?: string; 
   const program: Program = {
     ...PROGRAM,
     find: () => ({ file: found, looked: ['/fake/bin'], usual: [] }),
-    supports: async () => ({ ok: options.able ?? true, missing: options.able === false ? '--session-id' : null }),
+    supports: async () => ({ ok: options.able ?? true, missing: options.able === false ? '--session-id' : null, tells: options.tells ?? false }),
     newId: (() => {
       const ids = [B, '33333333-3333-4333-8333-333333333333', '44444444-4444-4444-8444-444444444444', '55555555-5555-4555-8555-555555555555']
       return () => ids.shift() ?? PROGRAM.newId()
@@ -201,6 +201,9 @@ function world(options: { found?: string | null; able?: boolean; line?: string; 
     program,
     grace: options.grace ?? 60_000,
     quiet: options.quiet ?? 30 * 60_000,
+    stale: options.stale,
+    heldWait: options.heldWait ?? 0,
+    port: () => options.port ?? null,
     /* No clock of its own: a test moves the time and calls `rest`. */
     every: null,
     log: (line) => logged.push(line),
@@ -782,5 +785,537 @@ describe('installing, which only a press in the page can ask for', () => {
     await w.runs.install(press, new Watcher())
     await w.runs.install(press, new Watcher())
     expect(w.ptys.length).toBe(1)
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * What a session is doing: told by its program, never read off a screen
+ * ------------------------------------------------------------------ */
+
+const TELL_PORT = 9590
+const TOLD = { tells: true, port: TELL_PORT }
+const NAMED: NamedPlace = { epic: 'thesis', parts: ['methods', 'results'], kehikko: { key: '4072c9e5' }, kehikkoName: 'writing', partNames: ['Methods', 'Results'] }
+const secretOf = (pty: FakePty) => String(pty.options.env[TELL_ENV.secret])
+
+/** Something following along, as a page's feed is. */
+function follower(notices = true) {
+  const states: Stated[] = []
+  const got: Notice[] = []
+  const one: Follower = { notices, state: (stated) => states.push(stated), notice: (notice) => got.push(notice) }
+  return { one, states, got }
+}
+
+describe('asking the program to say what it is doing', () => {
+  test('a copy that can is given its hooks on the command line and a secret in the environment, and nothing else', async () => {
+    const dir = project()
+    const w = world(TOLD)
+    await w.runs.open(ask(dir, null), new Watcher())
+    const pty = w.ptys[0]!
+    expect(pty.args.slice(0, 2)).toEqual(['--session-id', B])
+    expect(pty.args[2]).toBe('--settings')
+    expect(pty.args.length).toBe(4)
+    const settings = JSON.parse(pty.args[3]!) as { hooks: Record<string, { hooks: { type: string; command: string; timeout: number }[] }[]> }
+    /* Hooks, and no other setting: nothing about permissions, models or tools. */
+    expect(Object.keys(settings)).toEqual(['hooks'])
+    for (const [event, entries] of Object.entries(settings.hooks)) {
+      expect(PROGRAM.signal(event)).not.toBeNull()
+      expect(entries).toEqual([{ hooks: [{ type: 'command', command: tellLine(event), timeout: 5 }] }])
+      /* This module's own script, by its whole path, and the event's name: nothing else is on the line. */
+      expect(entries[0]!.hooks[0]!.command).toMatch(/^\/bin\/sh '[^']+\/tell\.sh' [A-Za-z]+$/)
+    }
+    expect(Object.keys(settings.hooks).sort()).toEqual(['Elicitation', 'ElicitationResult', 'PermissionRequest', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'StopFailure', 'UserPromptSubmit'])
+
+    const secret = secretOf(pty)
+    expect(secret).toMatch(/^[0-9a-f]{48}$/)
+    expect(pty.options.env[TELL_ENV.port]).toBe(String(TELL_PORT))
+    expect(pty.options.env[TELL_ENV.session]).toBe(B)
+    /* Never where another process on the machine could list it, and never in the log. */
+    expect(pty.args.join(' ')).not.toContain(secret)
+    expect(w.logged.join('\n')).not.toContain(secret)
+  })
+
+  test('each run has a secret of its own', async () => {
+    const dir = project()
+    const w = world(TOLD)
+    await w.runs.open(ask(dir, null), new Watcher())
+    await w.runs.open(ask(dir, null, { ...HERE, parts: ['results'] }), new Watcher())
+    expect(secretOf(w.ptys[0]!)).not.toBe(secretOf(w.ptys[1]!))
+  })
+
+  test('a resumed session is asked the same way, under the id it is resumed by', async () => {
+    const dir = project()
+    const w = world(TOLD)
+    w.records(dir, A)
+    await w.runs.open(ask(dir, A), new Watcher())
+    expect(w.ptys[0]!.args.slice(0, 3)).toEqual(['--resume', A, '--settings'])
+    expect(w.ptys[0]!.options.env[TELL_ENV.session]).toBe(A)
+  })
+
+  test('a copy too old for it is started exactly as before, and has no state', async () => {
+    const dir = project()
+    const w = world({ tells: false, port: TELL_PORT })
+    const run = (await w.runs.open(ask(dir, null), new Watcher())) as Run
+    expect(w.ptys[0]!.args).toEqual(['--session-id', B])
+    expect(Object.keys(w.ptys[0]!.options.env).filter((name) => name.startsWith('KEHIKOT_TELL'))).toEqual([])
+    expect(run.state).toBeNull()
+    /* And nothing can be said about it: there is no secret to say it with. */
+    expect(w.runs.heard(B, '', 'Stop')).toBe(false)
+    expect(w.runs.heard(B, null, 'Stop')).toBe(false)
+  })
+
+  test('with nowhere to report to, nothing is asked', async () => {
+    const dir = project()
+    const w = world({ tells: true, port: null })
+    await w.runs.open(ask(dir, null), new Watcher())
+    expect(w.ptys[0]!.args).toEqual(['--session-id', B])
+  })
+
+  test('a path with a quote in it is still one word to the shell', () => {
+    expect(quoted("/Users/o'brien/mod/tell.sh")).toBe(`'/Users/o'\\''brien/mod/tell.sh'`)
+    expect(tellLine('Stop', '/a b/tell.sh')).toBe(`/bin/sh '/a b/tell.sh' Stop`)
+  })
+})
+
+describe('what the program says', () => {
+  async function told() {
+    const dir = project()
+    const w = world(TOLD)
+    const viewer = new Watcher()
+    const run = (await w.runs.open(ask(dir, null, NAMED), viewer)) as Run
+    await settle()
+    const secret = secretOf(w.ptys[0]!)
+    return { dir, w, viewer, run, secret, hear: (event: string) => w.runs.heard(B, secret, event) }
+  }
+
+  test('nothing is known until it says something', async () => {
+    const { run, viewer } = await told()
+    expect(run.state).toBeNull()
+    expect(viewer.said[0]).toMatchObject({ opened: 'new', state: null })
+  })
+
+  test('every change, in the order the real program reports them', async () => {
+    const { run, viewer, hear, w } = await told()
+    const seen: unknown[] = []
+    for (const [event, state] of [
+      ['UserPromptSubmit', 'working'],
+      ['PermissionRequest', 'needs-you'],
+      ['PostToolUse', 'working'],
+      ['Stop', 'finished'],
+      ['UserPromptSubmit', 'working'],
+      ['StopFailure', 'needs-you'],
+      ['UserPromptSubmit', 'working'],
+      ['Elicitation', 'needs-you'],
+      ['ElicitationResult', 'working'],
+      ['PostToolUseFailure', 'working'],
+    ] as const) {
+      w.later(1000)
+      expect(hear(event)).toBe(true)
+      expect(run.state).toBe(state)
+      seen.push(run.state)
+    }
+    /* The viewer is told each CHANGE, with since when — the last report changed nothing and said nothing. */
+    const changes = viewer.said.filter((one) => 'since' in one && !('opened' in one))
+    expect(changes.map((one) => one.state)).toEqual(['working', 'needs-you', 'working', 'finished', 'working', 'needs-you', 'working', 'needs-you', 'working'])
+    expect(changes.every((one) => one.session === B && typeof one.since === 'number')).toBe(true)
+  })
+
+  test('the same thing said twice is one change: since when does not move', async () => {
+    const { run, hear, w } = await told()
+    hear('Stop')
+    const since = run.stateSince
+    w.later(5000)
+    hear('Stop')
+    expect(run.stateSince).toBe(since)
+  })
+
+  test('an event this program does not use is heard and changes nothing', async () => {
+    const { run, hear } = await told()
+    hear('UserPromptSubmit')
+    for (const event of ['PreToolUse', 'Notification', 'SessionStart', 'constructor', '__proto__', '', 'stop']) {
+      expect(hear(event)).toBe(true)
+      expect(run.state).toBe('working')
+    }
+  })
+
+  test('a report is believed only with that session’s own secret', async () => {
+    const { dir, run, secret, w } = await told()
+    const other = (await w.runs.open(ask(dir, null, { ...HERE, parts: ['results'] }), new Watcher())) as Run
+    for (const wrong of [null, '', 'x', secret.slice(1), `${secret}0`, secretOf(w.ptys[1]!), TICKET]) {
+      expect(w.runs.heard(B, wrong, 'Stop')).toBe(false)
+    }
+    expect(run.state).toBeNull()
+    /* The right secret under another session's id is no better, and a session that is not running has none. */
+    expect(w.runs.heard(other.id, secret, 'Stop')).toBe(false)
+    expect(w.runs.heard(A, secret, 'Stop')).toBe(false)
+    expect(w.runs.heard('install', secret, 'Stop')).toBe(false)
+    expect(other.state).toBeNull()
+    expect(w.runs.heard(B, secret, 'Stop')).toBe(true)
+    expect(run.state).toBe('finished')
+  })
+
+  test('once it has ended nothing more is believed about it, and what was said is taken back', async () => {
+    const { run, viewer, hear, w } = await told()
+    hear('UserPromptSubmit')
+    const feed = follower()
+    w.runs.subscribe(feed.one)
+    w.ptys[0]!.ends(0)
+    await settle()
+    expect(hear('Stop')).toBe(false)
+    expect(run.state).toBeNull()
+    expect(feed.states.at(-1)).toMatchObject({ session: B, state: null })
+    expect(viewer.closed?.code).toBe(CLOSED.ended)
+  })
+
+  test('a person typing into a session that was waiting for them has answered it; a lone Esc and the emulator’s own replies have not', async () => {
+    const { run, hear, w } = await told()
+    hear('UserPromptSubmit')
+    hear('PermissionRequest')
+    w.runs.type(run, '\x1b[?1;2c')
+    w.runs.type(run, '\x1b[I')
+    expect(run.state).toBe('needs-you')
+    /* Esc puts the question away without answering it. */
+    w.runs.type(run, '\x1b')
+    expect(run.state).toBe('needs-you')
+    w.runs.type(run, '1')
+    expect(run.state).toBe('working')
+    /* And typing into one that is finished, or working, says nothing about its state. */
+    hear('Stop')
+    w.runs.type(run, 'next')
+    expect(run.state).toBe('finished')
+  })
+
+  test('working, and nothing printed for two minutes: the turn ended without a word, and nothing is known again', async () => {
+    const { run, hear, w } = await told()
+    w.ptys[0]!.says('thinking\r\n')
+    hear('UserPromptSubmit')
+    w.later(119_000)
+    w.runs.rest()
+    expect(run.state).toBe('working')
+    /* Still printing: still working, however long. */
+    w.ptys[0]!.says('.')
+    w.later(119_000)
+    w.runs.rest()
+    expect(run.state).toBe('working')
+    w.later(2_000)
+    w.runs.rest()
+    expect(run.state).toBeNull()
+    expect(w.logged.some((line) => line.includes('its state is no longer known'))).toBe(true)
+    /* Only `working` is taken back this way: a question on screen is silent by nature. */
+    hear('PermissionRequest')
+    w.later(60 * 60_000)
+    w.runs.rest()
+    expect(run.state).toBe('needs-you')
+  })
+})
+
+describe('telling a person who is not looking', () => {
+  async function unwatched(place: NamedPlace = NAMED) {
+    const dir = project()
+    const w = world(TOLD)
+    const viewer = new Watcher()
+    const run = (await w.runs.open(ask(dir, null, place), viewer)) as Run
+    await settle()
+    w.records(dir, B, 'tighten the methods section')
+    await w.runs.settle(run)
+    const secret = secretOf(w.ptys[0]!)
+    const feed = follower()
+    w.runs.subscribe(feed.one)
+    return { dir, w, viewer, run, feed, hear: (event: string) => w.runs.heard(B, secret, event) }
+  }
+
+  test('a session on nobody’s screen that finishes is noticed once, by name and by place', async () => {
+    const { w, viewer, run, feed, hear, dir } = await unwatched()
+    hear('UserPromptSubmit')
+    w.runs.look(run, viewer, false)
+    expect(feed.got).toEqual([])
+    w.later(60_000)
+    hear('Stop')
+    expect(feed.got).toEqual([
+      { seq: 1, session: B, state: 'finished', label: 'tighten the methods section', projectPath: dir, epic: 'thesis', parts: ['Methods', 'Results'], kehikko: 'writing', at: run.stateSince },
+    ])
+    /* Reported again, as a program that retries a hook would: not a change, and not said again. */
+    hear('Stop')
+    expect(feed.got.length).toBe(1)
+  })
+
+  test('one that stops to ask is the other kind', async () => {
+    const { w, viewer, run, feed, hear } = await unwatched()
+    w.runs.look(run, viewer, false)
+    hear('UserPromptSubmit')
+    hear('PermissionRequest')
+    expect(feed.got.map((one) => one.state)).toEqual(['needs-you'])
+  })
+
+  test('never for the one on screen, and looking away afterwards does not raise it late', async () => {
+    const { w, viewer, run, feed, hear } = await unwatched()
+    hear('UserPromptSubmit')
+    hear('PermissionRequest')
+    hear('PostToolUse')
+    hear('Stop')
+    expect(feed.got).toEqual([])
+    w.runs.look(run, viewer, false)
+    w.later(60_000)
+    w.runs.rest()
+    expect(feed.got).toEqual([])
+    /* A view mounted behind another is not somebody looking: with a second viewer that is, still nothing. */
+    const second = new Watcher()
+    w.runs.attach(run, second, 100, 30, 'attached')
+    hear('UserPromptSubmit')
+    hear('Stop')
+    expect(feed.got).toEqual([])
+  })
+
+  test('working is not news', async () => {
+    const { w, viewer, run, feed, hear } = await unwatched()
+    w.runs.look(run, viewer, false)
+    hear('UserPromptSubmit')
+    hear('PostToolUse')
+    expect(feed.got).toEqual([])
+  })
+
+  test('finishing and then stopping to ask a moment later are two things, and both are said', async () => {
+    const { w, viewer, run, feed, hear } = await unwatched()
+    w.runs.look(run, viewer, false)
+    hear('UserPromptSubmit')
+    hear('Stop')
+    /* The prompt queued behind it starts at once, and asks. */
+    w.later(3_000)
+    hear('UserPromptSubmit')
+    hear('PermissionRequest')
+    expect(feed.got.map((one) => one.state)).toEqual(['finished', 'needs-you'])
+  })
+
+  test('a session that reports in a loop cannot fill a panel: four, then one every quarter of a minute', async () => {
+    const { w, viewer, run, feed, hear } = await unwatched()
+    w.runs.look(run, viewer, false)
+    for (let n = 0; n < 200; n += 1) {
+      hear('UserPromptSubmit')
+      hear('Stop')
+      w.later(10)
+    }
+    expect(feed.got.length).toBe(4)
+    w.later(15_000)
+    for (let n = 0; n < 50; n += 1) {
+      hear('UserPromptSubmit')
+      hear('Stop')
+    }
+    expect(feed.got.length).toBe(5)
+    /* Left alone, it has its whole ration again, and no more than that. */
+    w.later(60 * 60_000)
+    for (let n = 0; n < 50; n += 1) {
+      hear('UserPromptSubmit')
+      hear('Stop')
+    }
+    expect(feed.got.length).toBe(9)
+  })
+
+  test('parts with no name are named by their ids, and a place with nothing picked names none', async () => {
+    const { w, viewer, run, feed, hear } = await unwatched({ epic: 'thesis', parts: [], kehikko: { id: 3 }, kehikkoName: 'writing' })
+    w.runs.look(run, viewer, false)
+    hear('Stop')
+    expect(feed.got[0]).toMatchObject({ epic: 'thesis', parts: [], kehikko: 'writing' })
+    expect(readPlace({ epic: 'thesis', parts: ['b', 'a'], kehikko: { id: 3 }, partNames: { a: 'Alpha', zzz: 'not a part', b: 7 } })?.partNames).toEqual(['Alpha', ''])
+    expect(readPlace({ epic: 'thesis', parts: ['a'], kehikko: { id: 3 }, partNames: ['Alpha'] })).not.toHaveProperty('partNames')
+    expect(readPlace({ epic: 'thesis', parts: ['a'], kehikko: { id: 3 }, partNames: { a: 'x'.repeat(500) } })?.partNames?.[0]?.length).toBe(120)
+  })
+
+  test('exactly one page is handed a notice, and only one that can pass it on', async () => {
+    const { w, viewer, run, feed, hear } = await unwatched()
+    const unframed = follower(false)
+    const later = follower()
+    w.runs.subscribe(unframed.one)
+    const stop = w.runs.subscribe(later.one)
+    w.runs.look(run, viewer, false)
+    hear('Stop')
+    expect([feed.got.length, unframed.got.length, later.got.length]).toEqual([0, 0, 1])
+    /* Every one of them is told the state. */
+    expect([feed.states.at(-1)?.state, unframed.states.at(-1)?.state, later.states.at(-1)?.state]).toEqual(['finished', 'finished', 'finished'])
+    stop()
+    w.later(6_000)
+    hear('UserPromptSubmit')
+    hear('PermissionRequest')
+    expect([feed.got.length, unframed.got.length, later.got.length]).toEqual([1, 0, 1])
+  })
+
+  test('with no page to take it, a notice waits — and is handed over only while it is still true', async () => {
+    const dir = project()
+    const w = world(TOLD)
+    const viewer = new Watcher()
+    const run = (await w.runs.open(ask(dir, null, NAMED), viewer)) as Run
+    await settle()
+    const secret = secretOf(w.ptys[0]!)
+    w.runs.look(run, viewer, false)
+    w.runs.heard(B, secret, 'Stop')
+    /* A page nothing is framing cannot pass it on, and is not given it. */
+    const unframed = follower(false)
+    w.runs.subscribe(unframed.one)
+    expect(unframed.got).toEqual([])
+    expect(unframed.states).toEqual([{ session: B, state: 'finished', since: run.stateSince }])
+    const framed = follower()
+    w.runs.subscribe(framed.one)
+    expect(framed.got.map((one) => [one.session, one.state])).toEqual([[B, 'finished']])
+    /* Handed over once. */
+    const again = follower()
+    w.runs.subscribe(again.one)
+    expect(again.got).toEqual([])
+
+    /* One that is no longer true by the time somebody arrives is dropped: the person went and looked. */
+    const fresh = world(TOLD)
+    const other = new Watcher()
+    const second = (await fresh.runs.open(ask(project(), null, NAMED), other)) as Run
+    await settle()
+    fresh.runs.look(second, other, false)
+    fresh.runs.heard(B, secretOf(fresh.ptys[0]!), 'PermissionRequest')
+    fresh.runs.look(second, other, true)
+    const late = follower()
+    fresh.runs.subscribe(late.one)
+    expect(late.got).toEqual([])
+  })
+})
+
+describe('a page that has just arrived', () => {
+  test('is not told that the session it is about to show has finished: what was held waits a moment, and is checked again', async () => {
+    const dir = project()
+    const w = world({ ...TOLD, heldWait: 40 })
+    const viewer = new Watcher()
+    const run = (await w.runs.open(ask(dir, null, NAMED), viewer)) as Run
+    await settle()
+    w.runs.detach(run, viewer)
+    w.runs.heard(B, secretOf(w.ptys[0]!), 'Stop')
+    /* The page loads and begins following… */
+    const page = follower()
+    w.runs.subscribe(page.one)
+    expect(page.got).toEqual([])
+    /* …and a moment later has the session on screen. */
+    w.runs.attach(run, new Watcher(), 100, 30, 'attached')
+    await new Promise((done) => setTimeout(done, 80))
+    expect(page.got).toEqual([])
+
+    /* One that is still on nobody's screen when the moment is up is said. */
+    const other = world({ ...TOLD, heldWait: 40 })
+    const second = new Watcher()
+    const away = (await other.runs.open(ask(project(), null, NAMED), second)) as Run
+    await settle()
+    other.runs.detach(away, second)
+    other.runs.heard(B, secretOf(other.ptys[0]!), 'Stop')
+    const late = follower()
+    const stop = other.runs.subscribe(late.one)
+    await new Promise((done) => setTimeout(done, 80))
+    expect(late.got.map((one) => one.state)).toEqual(['finished'])
+    stop()
+  })
+})
+
+describe('putting away only what is finished', () => {
+  const QUIET = 30 * 60_000
+  async function left(event: string | null) {
+    const dir = project()
+    const w = world({ ...TOLD, stale: 365 * 24 * 60 * 60_000 })
+    const viewer = new Watcher()
+    const run = (await w.runs.open(ask(dir, null), viewer)) as Run
+    await settle()
+    w.runs.type(run, 'do the thing\r')
+    const secret = secretOf(w.ptys[0]!)
+    if (event) w.runs.heard(B, secret, event)
+    w.runs.look(run, viewer, false)
+    return { w, run, viewer, pty: w.ptys[0]!, hear: (said: string) => w.runs.heard(B, secret, said) }
+  }
+
+  test('a working session is never put away, however quiet and however long', async () => {
+    const { w, pty } = await left('UserPromptSubmit')
+    w.later(24 * 60 * 60_000)
+    expect(w.runs.rest()).toEqual([])
+    expect(pty.killed).toBe(false)
+  })
+
+  test('neither is one waiting for an answer: the question exists nowhere else', async () => {
+    const { w, pty } = await left('PermissionRequest')
+    w.later(24 * 60 * 60_000)
+    expect(w.runs.rest()).toEqual([])
+    expect(pty.killed).toBe(false)
+  })
+
+  test('a finished one is, once it has been finished and left alone for the whole time', async () => {
+    const { w, run, pty, viewer } = await left('Stop')
+    w.later(QUIET - 1)
+    expect(w.runs.rest()).toEqual([])
+    w.later(1)
+    expect(w.runs.rest()).toEqual([run])
+    expect(pty.killed).toBe(true)
+    await settle()
+    expect(viewer.closed?.code).toBe(CLOSED.rested)
+    expect(w.logged.some((line) => line.includes('had been finished for 30 min'))).toBe(true)
+  })
+
+  test('counted from when it finished, not from when it was left', async () => {
+    const { w, hear } = await left('UserPromptSubmit')
+    w.later(QUIET * 2)
+    hear('Stop')
+    expect(w.runs.rest()).toEqual([])
+    w.later(QUIET - 1)
+    expect(w.runs.rest()).toEqual([])
+    w.later(1)
+    expect(w.runs.rest().length).toBe(1)
+  })
+
+  test('what a finished session prints at its prompt does not start the clock again; somebody looking does', async () => {
+    const { w, run, viewer, pty } = await left('Stop')
+    w.later(QUIET - 60_000)
+    pty.says('\x07')
+    w.later(60_000)
+    expect(w.runs.rest().length).toBe(1)
+
+    const again = await left('Stop')
+    again.w.later(QUIET - 60_000)
+    again.w.runs.look(again.run, again.viewer, true)
+    again.w.later(QUIET)
+    /* On screen: not put away at all. */
+    expect(again.w.runs.rest()).toEqual([])
+    again.w.runs.look(again.run, again.viewer, false)
+    again.w.later(QUIET - 1)
+    expect(again.w.runs.rest()).toEqual([])
+    again.w.later(1)
+    expect(again.w.runs.rest().length).toBe(1)
+    void run
+    void viewer
+  })
+
+  test('one that has said nothing falls under the rule there was before: silence for the whole time', async () => {
+    const { w, pty } = await left(null)
+    w.later(QUIET - 60_000)
+    pty.says('.')
+    w.later(60_000)
+    expect(w.runs.rest()).toEqual([])
+    w.later(QUIET)
+    expect(w.runs.rest().length).toBe(1)
+    expect(w.logged.some((line) => line.includes('had printed nothing for 31 min'))).toBe(true)
+  })
+
+  test('a copy too old to say anything is under that rule too', async () => {
+    const dir = project()
+    const w = world({ tells: false, port: TELL_PORT })
+    const viewer = new Watcher()
+    const run = (await w.runs.open(ask(dir, null), viewer)) as Run
+    await settle()
+    w.runs.type(run, 'x')
+    w.runs.look(run, viewer, false)
+    w.later(QUIET)
+    expect(w.runs.rest()).toEqual([run])
+  })
+
+  test('a working session whose turn ended without a word goes back under the silence rule, and no sooner', async () => {
+    const dir = project()
+    const w = world(TOLD)
+    const viewer = new Watcher()
+    const run = (await w.runs.open(ask(dir, null), viewer)) as Run
+    await settle()
+    w.runs.type(run, 'do the thing\r')
+    w.runs.heard(B, secretOf(w.ptys[0]!), 'UserPromptSubmit')
+    w.runs.look(run, viewer, false)
+    w.later(10 * 60_000)
+    expect(w.runs.rest()).toEqual([])
+    expect(run.state).toBeNull()
+    w.later(20 * 60_000)
+    expect(w.runs.rest()).toEqual([run])
   })
 })

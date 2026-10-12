@@ -32,13 +32,20 @@ import { delimiter, join } from 'node:path'
  *  5. **Which sessions does it hold for a folder?** (`sessions`) With a label
  *     — the first thing the person said — and when each was last active.
  *  6. **How is it installed?** (`install`) The vendor's own command, as data.
+ *  7. **Can it say what it is doing?** (`reports`, `signal`) Whether it is
+ *     working, waiting for the person, or done with its turn — said by the
+ *     program itself as it happens, never read off its screen. A program that
+ *     cannot is still a program this module opens; its sessions simply have
+ *     no state.
  *
  * ## What is never here
  *
  * A prompt. Nothing in this module sends one: the person types. And no flag
- * that widens what the program may do — `fresh` and `resume` name a session
- * and nothing else, so a session opened here has exactly the permissions the
- * same command would have in any terminal.
+ * that widens what the program may do. `fresh` and `resume` name a session;
+ * `reports` adds, for a copy that can take it, the one other thing on the
+ * command line — the program's own hooks, pointed at this module — and that
+ * is the whole command. A session opened here has exactly the permissions
+ * the same command would have in any terminal.
  */
 
 export interface Found {
@@ -54,7 +61,24 @@ export interface Able {
   ok: boolean
   /** What this copy lacks, for the sentence on screen. Null when ok, or when nothing could be told. */
   missing: string | null
+  /**
+   * Whether this copy can be made to say what it is doing (`reports`). False
+   * for one too old for it and for one whose help could not be read: the
+   * session is opened exactly as it always was, and has no state.
+   */
+  tells: boolean
 }
+
+/**
+ * What a session is doing, as far as its program says.
+ *
+ *  - `working`: a turn is under way.
+ *  - `needs-you`: the program has stopped to ask the person something and
+ *    will not go on until it is answered.
+ *  - `finished`: the turn is over and the program is at its prompt.
+ */
+export type State = 'working' | 'needs-you' | 'finished'
+export const STATES: readonly State[] = ['working', 'needs-you', 'finished']
 
 /** One session as the program's own records describe it. */
 export interface Recorded {
@@ -103,6 +127,14 @@ export interface Program {
   install(env?: NodeJS.ProcessEnv): Install
   /** The environment a session is started in. */
   environment(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv
+  /**
+   * The arguments that make the program say what it is doing: for each event
+   * worth hearing, `command(event)` is the line it is to run when that
+   * happens. Only ever given to a copy whose `supports()` said `tells`.
+   */
+  reports(command: (event: string) => string): string[]
+  /** What an event the program reported says about the session, or null for one that says nothing. */
+  signal(event: string): State | null
 }
 
 /* ------------------------------------------------------------------------ *
@@ -178,6 +210,14 @@ function find(env: NodeJS.ProcessEnv = process.env): Found {
  */
 const NEEDS = ['--session-id', '--resume']
 
+/**
+ * The flag state is told through. Not needed: a copy without it is opened as
+ * before and has no state. From the same help text:
+ *
+ *     --settings <file-or-json>  Path to a settings JSON file or a JSON string to load additional settings from
+ */
+const TELLS = '--settings'
+
 const able = new Map<string, Able>()
 
 /**
@@ -200,9 +240,11 @@ async function supports(file: string): Promise<Able> {
   if (known) return known
   const said = await new Promise<Able>((done) => {
     execFile(file, ['--help'], { timeout: 8000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
-      if (error || !stdout) return done({ ok: true, missing: null })
+      /* Nothing was learned, so nothing extra is passed either: a flag this copy
+         turned out not to have would stop it from starting at all. */
+      if (error || !stdout) return done({ ok: true, missing: null, tells: false })
       const missing = NEEDS.find((flag) => !stdout.includes(flag)) ?? null
-      done({ ok: missing === null, missing })
+      done({ ok: missing === null, missing, tells: stdout.includes(TELLS) })
     })
   })
   able.set(stamp, said)
@@ -405,6 +447,78 @@ function environment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   return out
 }
 
+/**
+ * What Claude Code is asked to report, and what each report means.
+ *
+ * ## How it is asked
+ *
+ * Claude Code runs a command of the caller's choosing when certain things
+ * happen — its hooks. They are normally written in a settings file; this
+ * module writes in nobody's. `--settings <json>` hands the program ADDITIONAL
+ * settings for this one process, as a string on its command line: nothing is
+ * put in the person's `~/.claude`, nothing in the project, and no file exists
+ * anywhere. Checked on 2.1.296 with a hook of the person's own on the same
+ * event: both ran. It adds; it does not replace.
+ *
+ * ## Which events, measured on 2.1.296 against a stand-in for the model
+ *
+ *     the person sends a prompt           UserPromptSubmit
+ *     a tool is about to run              PreToolUse          (before any question about it)
+ *     a permission question is on screen  PermissionRequest   (at once; and for the question tool, which asks through the same dialog)
+ *     … six seconds later                 Notification        permission_prompt
+ *     the tool has run                    PostToolUse
+ *     the turn is over                    Stop
+ *     … sixty seconds later               Notification        idle_prompt
+ *     the turn died on an API error       StopFailure         (instead of Stop, once its retries are spent: three minutes on a refused key)
+ *
+ * Read as: a prompt sent or a tool finished is `working`; a question on
+ * screen is `needs-you`; `Stop` is `finished`. A turn that ended on an error
+ * is `needs-you` as well — nothing is finished, and nothing further happens
+ * until a person looks.
+ *
+ * ## What cannot be told, and it is said rather than guessed at
+ *
+ *  - **A question asked in prose.** "Shall I go on?" as the last line of a
+ *    turn is a turn that ended: `Stop`, like any other. Only what the program
+ *    itself puts up as a question — a permission dialog, the question tool,
+ *    an MCP server's form — is `needs-you`.
+ *  - **A question being answered.** Nothing is reported when a person says
+ *    yes; the next report is the tool finishing, which may be a long while.
+ *    `live.ts` covers that from its own side: a person typing into a session
+ *    that was waiting for them has answered it.
+ *  - **An interrupt.** Esc during a turn reports nothing at all — no `Stop`,
+ *    and no idle notification after it. `live.ts` covers that too, from what
+ *    was measured: a working session prints several times a second, focused
+ *    or not, tool running or not, so one that has printed nothing for minutes
+ *    is not working, and its state goes back to unknown.
+ *
+ * `Elicitation` and `ElicitationResult` — an MCP server's form going up and
+ * being answered — are in this copy's list of events and were not seen
+ * happen: nothing here could make a server ask.
+ *
+ * `PreToolUse` and both `Notification`s are left alone on purpose. The first
+ * says nothing the others do not, and would run a process before every tool.
+ * The second arrives seconds after the fact, so a late "needs you" could land
+ * on a session that has already been answered and gone on.
+ */
+const SIGNALS: Record<string, State> = {
+  UserPromptSubmit: 'working',
+  PostToolUse: 'working',
+  PostToolUseFailure: 'working',
+  ElicitationResult: 'working',
+  PermissionRequest: 'needs-you',
+  Elicitation: 'needs-you',
+  StopFailure: 'needs-you',
+  Stop: 'finished',
+}
+
+function reports(command: (event: string) => string): string[] {
+  const hooks = Object.fromEntries(
+    Object.keys(SIGNALS).map((event) => [event, [{ hooks: [{ type: 'command', command: command(event), timeout: 5 }] }]]),
+  )
+  return [TELLS, JSON.stringify({ hooks })]
+}
+
 export const PROGRAM: Program = {
   name: 'Claude Code',
   binary: BINARY,
@@ -413,12 +527,14 @@ export const PROGRAM: Program = {
   newId: () => randomUUID(),
   isId: (id) => SESSION_ID.test(id),
   /* A session id and nothing else. No prompt, and no flag about permissions:
-     see "What is never here" at the top. */
+     see "What is never here" at the top. `reports` is added by whoever starts it. */
   fresh: (id) => ['--session-id', id],
   resume: (id) => ['--resume', id],
   settled,
   sessions,
   install,
   environment,
+  reports,
+  signal: (event) => (Object.hasOwn(SIGNALS, event) ? SIGNALS[event]! : null),
 }
 

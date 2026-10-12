@@ -4,6 +4,13 @@ export const ID = 'kehikot.claude'
 export const VERSION = '0.1.0'
 
 /**
+ * The format a notice is sent in: the protocol's own, by its name. Whatever
+ * on the canvas says it shows these is who hears — this module does not know
+ * what that is, and names no module.
+ */
+export const NOTICES = 'kehikot.notifications@1'
+
+/**
  * Where this module would like to answer. Said once, here, and read by
  * `vite.config.ts` and `register.ts`. Modules on this machine sit ten apart
  * (7820 to 8000 are taken), so a drift up from one never lands on a
@@ -40,8 +47,14 @@ export const PREFERRED_PORT = 8010
  *   outside the focus — the session on screen is the whole answer.
  * - **`scope: 'epic'`.** Told which epic is open and told again on every
  *   switch, which is the other half of a place.
- * - **`uses: []`.** It asks the host for nothing. Reading the context is not
- *   a capability.
+ * - **`uses: ['events:emit']`, `emits: [NOTICES]`.** The one thing it asks a
+ *   host: to carry a line saying that a session a person is not looking at
+ *   has finished, or has stopped to wait for them. Reading the context is not
+ *   a capability, and it asks for nothing else.
+ * - **`mcp.as: 'kehikko-claude'`.** What an agent host registers the door
+ *   under. The id would derive `claude`, which is the name of the program an
+ *   agent is most likely to be, and a door called that reads as the agent's
+ *   own.
  * - **`prompt: false`.** Nothing here sends a prompt to anything. The person
  *   types.
  * - **`storage: true`.** The page opens a WebSocket to its own origin, and
@@ -68,21 +81,23 @@ export const MANIFEST: Manifest = manifestSchema.parse({
     'A person on this canvas has a Claude Code session open in a terminal, kept for exactly the epic, the picked '
     + 'parts and the kehikko in front of them. It is theirs: they type in it, and nothing here lets you type into it, '
     + 'start one or end one. Call `sessions` with the project path to see which sessions belong to which place — '
-    + 'their first prompt and when each was last active — before starting work that one of them may already hold.',
+    + 'their first prompt, when each was last active, and whether a running one is working, waiting for its person '
+    + 'or finished — before starting work that one of them may already hold.',
   entry: '/app',
   modes: [{ id: 'claude', label: 'Claude', scope: 'epic' }],
   mcp: {
     url: '/mcp',
     transport: 'http',
+    as: 'kehikko-claude',
     about:
-      'Read which Claude Code sessions a person keeps for which place (epic, picked parts, kehikko) in a project. '
-      + 'Read-only: nothing here starts, ends or types into a session.',
+      'Which Claude Code sessions a person keeps for which place (epic, picked parts, kehikko), and whether'
+      + ' a running one is working, waiting for them or finished. Read-only: starts, ends and types nothing.',
   },
-  extensions: { emits: [], consumes: [] },
+  extensions: { emits: [NOTICES], consumes: [] },
   reacts: ['parts'],
   declares: {
     protocol: `>=${PROTOCOL} <${PROTOCOL + 1}`,
-    uses: [],
+    uses: ['events:emit'],
     storage: true,
     prompt: false,
   },

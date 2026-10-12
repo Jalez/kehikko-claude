@@ -1,9 +1,9 @@
-import { establishBuild, refuseTicket, type Reply } from 'kehikot-module-protocol/serve'
+import { establishBuild, refuseTicket, sameTicket, type Reply, type Stream } from 'kehikot-module-protocol/serve'
 
-import { TICKET, theRuns, type Runs } from './live.ts'
+import { TICKET, theRuns, type Run, type Runs } from './live.ts'
 import { ID, MANIFEST, VERSION } from './manifest.ts'
 import { isKehikkoKey, readPlaceKey } from './place.ts'
-import { PROGRAM, home, type Program } from './program.ts'
+import { PROGRAM, home, type Program, type State } from './program.ts'
 import { WHERE, detach, projectRoot, readPlaces, rekey, sessionsAt } from './record.ts'
 
 /**
@@ -33,6 +33,16 @@ import { WHERE, detach, projectRoot, readPlaces, rekey, sessionsAt } from './rec
  * A session is started by the socket's first frame, from the page, and the
  * installer by a press in the page. No door below runs a program, and the MCP
  * door has one tool, which reads.
+ *
+ * ## One door is not the page's
+ *
+ * `POST /api/state` is where a session's own program says what it is doing
+ * (see "Told, not read" in live.ts). It carries no page ticket and is not
+ * asked for one: what it must carry is the secret of the one session it
+ * speaks for, in the same header. It answers 204 to a report it took and 403
+ * to everything else — a wrong secret, no secret, a session that is not
+ * running — in one sentence that does not say which. It reads no body, and
+ * nothing in a report is stored or shown.
  */
 
 export { TICKET }
@@ -52,6 +62,13 @@ export interface Row {
   lastActive: number | null
   /** Whether this module is running it now. */
   running: boolean
+  /**
+   * What its program last said it is doing, and since when — for one that is
+   * running and has said. Absent otherwise: a copy too old to say, a session
+   * nobody has spoken to yet, one that is not running.
+   */
+  state?: State
+  since?: number
   /**
    * Set when the record lists it for this place and Claude Code has nothing
    * by that id on this computer: it ran on another one, or its transcript has
@@ -83,8 +100,11 @@ export interface Listing {
    * Everything running, in any project. Said, and not counted against
    * anything: there is no number of sessions at which an open is refused.
    */
-  running: { id: string; label: string; projectPath: string; place: string | null; here: boolean; startedAt: number }[]
+  running: { id: string; label: string; projectPath: string; place: string | null; here: boolean; startedAt: number; state?: State; since?: number }[]
 }
+
+/** A running session's state, as the fields a row carries: nothing when nothing is known. */
+const stated = (run: Run | undefined): { state?: State; since?: number } => (run?.state ? { state: run.state, since: run.stateSince } : {})
 
 /**
  * What the page draws a place from.
@@ -107,7 +127,7 @@ export async function listing(
   if (!read.ok) return read
 
   const found = program.find()
-  const able = found.file ? await program.supports(found.file) : { ok: true, missing: null }
+  const able = found.file ? await program.supports(found.file) : { ok: true, missing: null, tells: false }
   const live = runs.sessions()
   /* A running session that had not been recorded, or named, the last time the
      program spoke may have been since: somebody is about to read the list. */
@@ -124,6 +144,7 @@ export async function listing(
       label: known.get(id)?.label || run?.label || kept?.label || '',
       lastActive: known.get(id)?.lastActive ?? (Number.isFinite(keptAt) ? keptAt : (run?.startedAt ?? null)),
       running: Boolean(run),
+      ...stated(run),
       /* Neither the program's nor running: all there is of it here is the row in the record. */
       ...(known.has(id) || run ? {} : { missing: true as const }),
     }
@@ -156,6 +177,7 @@ export async function listing(
       place: run.key,
       here: run.projectPath === root.value && run.key === key,
       startedAt: run.startedAt,
+      ...stated(run),
     })),
   }
 }
@@ -182,7 +204,10 @@ function tools() {
         `The ${PROGRAM.name} sessions a person keeps in a project, by place. A place is an epic, the set of parts picked `
         + 'out of it and a kehikko; each lists its sessions with the first line of their first prompt, when each was '
         + 'last active, whether it is running now, and `missing: true` when Claude Code has no record of it on this '
-        + `computer (sessions stay on the computer they ran on). Read from ${WHERE}. Give the absolute project directory as `
+        + 'computer (sessions stay on the computer they ran on). A running session that has said so also has `state` — '
+        + '`working` (a turn is under way), `needs-you` (it has stopped at a question only its person can answer) or '
+        + '`finished` (its turn is over and it is at its prompt) — and `since`. No `state` means it has not said, not that '
+        + `it is idle. Read from ${WHERE}. Give the absolute project directory as `
         + 'projectPath, and an epic slug to see only that epic’s places. Reads only: nothing here starts, ends or types '
         + 'into a session.',
       inputSchema: {
@@ -217,12 +242,14 @@ async function call(name: string, args: Record<string, unknown>): Promise<string
       sessions: place.sessions.map((id) => {
         const kept = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id] : undefined
         const at = held.get(id)?.lastActive
-        const running = live.some((run) => run.id === id || run.settled === id)
+        const run = live.find((one) => one.id === id || one.settled === id)
+        const running = Boolean(run)
         return {
           id,
           firstPrompt: held.get(id)?.label || kept?.label || '',
           lastActive: at ? new Date(at).toISOString() : (kept?.lastActive ?? null),
           running,
+          ...(run?.state ? { state: run.state, since: new Date(run.stateSince).toISOString() } : {}),
           ...(held.has(id) || running ? {} : { missing: true }),
         }
       }),
@@ -286,7 +313,15 @@ export async function answer(
 
   if (!path.startsWith('/api/')) return null
 
-  /* Every door under /api, the read included: see "Reads carry the ticket too". */
+  /* A session's program saying what it is doing. Before the page's ticket is
+     asked for, because it does not have one: see "One door is not the page's". */
+  if (path === '/api/state') {
+    if (method !== 'POST') return bad('this door takes POST', 405)
+    const took = theRuns().heard(query.get('session') ?? '', ticket, query.get('event') ?? '')
+    return took ? { status: 204, body: null } : bad('that is not a running session’s own report', 403)
+  }
+
+  /* Every other door under /api, the read included: see "Reads carry the ticket too". */
   const refused = refuseTicket(ticket, TICKET)
   if (refused) return refused
 
@@ -328,6 +363,31 @@ export async function answer(
   }
 
   return bad('not here', 404)
+}
+
+/**
+ * `GET /api/feed`: what changes while a page is open, as server-sent events.
+ *
+ * Every change of a running session's state (an unnamed event), and — for a
+ * page that says a host is framing it — the notices raised for a person who
+ * is not looking (`notice`), which only a framed page can pass on. The page
+ * opens it instead of asking on a clock.
+ *
+ * Ticketed like the read it sits beside, since a notice carries a session's
+ * label. An `EventSource` cannot send a header, so the ticket is in the
+ * query; the address is this module's own origin and is asked by its own
+ * page, and nothing logs it.
+ */
+export const stream: Stream = (method, path, query, emit, ticket) => {
+  if (path !== '/api/feed') return null
+  if (method !== 'GET') return { reply: bad('this door takes GET', 405) }
+  if (!sameTicket(ticket ?? query.get('ticket'), TICKET)) return { reply: refuseTicket(null, TICKET)! }
+  const close = theRuns().subscribe({
+    notices: query.get('notices') === '1',
+    state: (stated) => emit(stated),
+    notice: (notice) => emit(notice, 'notice'),
+  })
+  return { close }
 }
 
 export { MANIFEST }

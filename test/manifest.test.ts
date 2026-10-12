@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { MODULE_ID, manifestSchema, moduleFolder, partsDeclaration } from 'kehikot-module-protocol'
+import { DOOR_NAME, MODULE_ID, known, manifestSchema, moduleFolder, partsDeclaration } from 'kehikot-module-protocol'
 
-import { ID, MANIFEST, PREFERRED_PORT } from '../manifest.ts'
+import { ID, MANIFEST, NOTICES, PREFERRED_PORT } from '../manifest.ts'
 
 describe('the manifest', () => {
   test('is one a host accepts', () => {
@@ -37,8 +37,17 @@ describe('the manifest', () => {
     expect(partsDeclaration(MANIFEST)).toEqual([])
   })
 
-  test('asks the host for nothing, and takes no prompt', () => {
-    expect(MANIFEST.declares.uses).toEqual([])
+  test('asks the host for one thing — to carry a notice — and takes no prompt', () => {
+    expect(MANIFEST.declares.uses).toEqual(['events:emit'])
     expect(MANIFEST.declares.prompt).toBe(false)
+    /* In the protocol's own format, by its name: no module is named, and whatever shows these hears. */
+    expect(MANIFEST.extensions.emits).toEqual([NOTICES])
+    expect(known(NOTICES)).toBe(true)
+    expect(MANIFEST.extensions.consumes).toEqual([])
+  })
+
+  test('says what its MCP door is to be registered as, in a shape the protocol takes', () => {
+    expect(MANIFEST.mcp?.as).toBe('kehikko-claude')
+    expect(DOOR_NAME.test(MANIFEST.mcp?.as ?? '')).toBe(true)
   })
 })

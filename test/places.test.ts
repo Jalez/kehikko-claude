@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import { notificationPayload } from 'kehikot-module-protocol'
 
 import type { Listing, Row } from '../doors.ts'
-import { ago, brief, decide, placeId, standing, surplus, type View } from '../src/view/places.ts'
+import { STATES } from '../program.ts'
+import { MARKS, ago, brief, decide, noticeLine, placeId, placeWords, since, standing, surplus, type View } from '../src/view/places.ts'
 
 /**
  * What the page does when the canvas names a place. Pure, so the rule that
@@ -75,6 +77,7 @@ describe('the place the canvas is about', () => {
       parts: ['methods', 'results'],
       kehikko: { id: 3 },
       kehikkoName: 'writing',
+      partNames: {},
       kehikkoId: 3,
       key: 'epic=thesis;parts=methods+results;kehikko=3',
     })
@@ -88,6 +91,7 @@ describe('the place the canvas is about', () => {
       parts: ['methods', 'results'],
       kehikko: { key: '4072c9e5' },
       kehikkoName: 'writing',
+      partNames: {},
       kehikkoId: 3,
       key: 'epic=thesis;parts=methods+results;kehikko=key:4072c9e5',
     })
@@ -154,5 +158,58 @@ describe('the small words', () => {
     expect(ago(now - 3 * 3_600_000, now)).toBe('3 h ago')
     expect(ago(now - 2 * 86_400_000, now)).toBe('2 d ago')
     expect(ago(Date.parse('2026-07-01T00:00:00Z'), now)).toBe('2026-07-01')
+  })
+})
+
+describe('a notice, as the line a panel draws', () => {
+  const notice = { state: 'finished' as const, label: 'tighten the methods section', epic: 'thesis', parts: ['Methods', 'Results'], kehikko: 'writing' }
+
+  test('says which of the two it is, which session, and where — in a person’s words', () => {
+    expect(noticeLine(notice, null)).toEqual({ epic: 'thesis', level: 'done', message: 'Finished: “tighten the methods section” — thesis · Methods + Results · writing' })
+    expect(noticeLine({ ...notice, state: 'needs-you' }, null)).toEqual({ epic: 'thesis', level: 'attention', message: 'Waiting for you: “tighten the methods section” — thesis · Methods + Results · writing' })
+  })
+
+  test('names only what there is: no parts picked, no kehikko, no prompt yet', () => {
+    expect(noticeLine({ ...notice, parts: [] }, null)?.message).toBe('Finished: “tighten the methods section” — thesis · writing')
+    expect(noticeLine({ ...notice, parts: [], kehikko: '' }, null)?.message).toBe('Finished: “tighten the methods section” — thesis')
+    expect(noticeLine({ ...notice, label: '' }, null)?.message).toBe('Finished: a session with no prompt yet — thesis · Methods + Results · writing')
+    expect(placeWords({ epic: null, parts: [], kehikko: '' })).toBe('')
+  })
+
+  test('is filed under the session’s own epic, and under the canvas’s only when the session has none', () => {
+    expect(noticeLine(notice, 'another')?.epic).toBe('thesis')
+    expect(noticeLine({ ...notice, epic: null }, 'another')).toMatchObject({ epic: 'another', message: 'Finished: “tighten the methods section” — Methods + Results · writing' })
+    /* Nothing true to file it under: nothing is invented. */
+    expect(noticeLine({ ...notice, epic: null }, null)).toBeNull()
+  })
+
+  test('is a payload the protocol’s own format accepts', () => {
+    const line = noticeLine(notice, null)!
+    expect(notificationPayload.safeParse({ ...line, refs: [] }).success).toBe(true)
+  })
+})
+
+describe('the mark for what a session is doing', () => {
+  test('three states, three shapes, three words', () => {
+    expect(new Set(Object.values(MARKS).map((one) => one.glyph)).size).toBe(3)
+    expect(Object.keys(MARKS).sort()).toEqual([...STATES].sort())
+    expect(since('needs-you', 1_000_000 - 10 * 60_000, 1_000_000)).toBe('needs you · 10 min ago')
+    expect(since('working', 1_000_000, 1_000_000)).toBe('working')
+    expect(since('finished', null, 1_000_000)).toBe('finished')
+  })
+
+  test('the picked parts go with a place by what a person calls them', () => {
+    const at = standing({
+      where: 'hosted',
+      projectPath: '/p',
+      epic: 'thesis',
+      parts: [
+        { id: 'methods', heading: 'Methods', picked: true },
+        { id: 'intro', heading: 'Introduction', picked: false },
+        { id: 'results', heading: '', picked: true },
+      ],
+      kehikko: { id: 3, name: 'writing' },
+    })
+    expect(at?.partNames).toEqual({ methods: 'Methods' })
   })
 })

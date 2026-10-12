@@ -145,6 +145,12 @@ export interface NamedPlace extends Place {
   kehikkoName?: string
   /** The host's row number for it today. Stored beside a key as a note, never compared. */
   kehikkoId?: number
+  /**
+   * What a person calls each of `parts`, in the same order. Never stored and
+   * never compared: it is carried so that a notice can name the place in
+   * words (see `Notice` in live.ts).
+   */
+  partNames?: string[]
 }
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string }

@@ -7,6 +7,7 @@ import { probeServer, ticket } from 'kehikot-module-protocol/client'
 
 import { typedByPerson } from '../../input.ts'
 import type { Kehikko } from '../../place.ts'
+import type { State } from '../../program.ts'
 
 /**
  * One view of one run: xterm in the page, and a socket to the session the
@@ -60,6 +61,9 @@ export interface Said {
   /** Whether the program has a record of the session yet. */
   exists?: boolean
   typed?: boolean
+  /** What the session's program says it is doing, when it has said; null takes back what was said. */
+  state?: State | null
+  since?: number
 }
 
 /** What this view asks the server to put it on. Fixed for the life of the view. */
@@ -68,7 +72,7 @@ export type Target =
   | {
       what: 'session'
       projectPath: string
-      place: { epic: string | null; parts: string[]; kehikko: Kehikko | null; kehikkoName: string; kehikkoId?: number }
+      place: { epic: string | null; parts: string[]; kehikko: Kehikko | null; kehikkoName: string; kehikkoId?: number; partNames?: Record<string, string> }
       /** Null is a new session. */
       session: string | null
     }

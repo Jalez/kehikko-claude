@@ -9,13 +9,28 @@
 # `/work` makes it print a dot a second from then on, as a program that is
 # busy does and one waiting at its prompt does not.
 #
+# It reports as the real one does. Given `--settings <json>` it runs the
+# command that JSON names for an event when that event happens, in the order
+# measured on Claude Code 2.1.296 (see program.ts):
+#
+#   a line typed          UserPromptSubmit, the echo, then Stop
+#   /later                UserPromptSubmit, three seconds of dots, then Stop
+#   /ask                  UserPromptSubmit, PreToolUse, PermissionRequest; the next
+#                         line typed is the answer: PostToolUse, then Stop
+#   /asklater             the same, three seconds after the prompt
+#   /work                 UserPromptSubmit and no Stop: a turn that goes on
+#   /interrupt            stops /work's dots and reports NOTHING, as Esc does
+#   /fail                 UserPromptSubmit, then StopFailure
+#
 # STANDIN_OLD=1 makes its --help that of a copy too old to take a session id.
+# STANDIN_MUTE=1 makes it one that takes a session id and has no --settings.
 
 if [ "$1" = "--help" ]; then
   echo "Usage: claude [options] [command] [prompt]"
   if [ -z "$STANDIN_OLD" ]; then
     echo "  -r, --resume [value]     Resume a conversation by session ID"
     echo "  --session-id <uuid>      Use a specific session ID for the conversation"
+    [ -z "$STANDIN_MUTE" ] && echo "  --settings <file-or-json>  Path to a settings JSON file or a JSON string to load additional settings from"
   fi
   exit 0
 fi
@@ -26,6 +41,21 @@ dir="$config/projects/$folder"
 mode="$1"
 id="$2"
 record="$dir/$id.jsonl"
+settings=""
+if [ "$3" = "--settings" ]; then
+  if [ -n "$STANDIN_MUTE" ]; then echo "error: unknown option '--settings'"; exit 1; fi
+  settings="$4"
+fi
+
+# Run what the settings name for an event, handing it what a hook is handed.
+# The settings are the ones `reports` in program.ts writes: one command per
+# event, with no quote or backslash in it that JSON would have had to escape.
+fire() {
+  [ -n "$settings" ] || return 0
+  hook=$(printf '%s' "$settings" | sed -n 's/.*"'"$1"'":\[{"hooks":\[{"type":"command","command":"\([^"]*\)".*/\1/p')
+  [ -n "$hook" ] || return 0
+  printf '{"session_id":"%s","hook_event_name":"%s","prompt":"not for the hook to read"}' "$id" "$1" | /bin/sh -c "$hook"
+}
 
 case "$mode" in
   --session-id)
@@ -37,16 +67,29 @@ case "$mode" in
   *)
     echo "stand-in claude: started with no session id: $*"; exit 2 ;;
 esac
-echo "args: $*"
+echo "args: $1 $2${settings:+ --settings (${#settings} characters)}"
 echo "cwd: $(pwd -P)"
 
-trap 'echo "stand-in claude: hung up"; exit 0' HUP TERM
+busy=""
+quiet() { [ -n "$busy" ] && kill "$busy" 2>/dev/null; busy=""; }
+dots() { n=$1; while [ "$n" -gt 0 ]; do printf '.'; sleep 1; n=$((n - 1)); done; echo; }
+ask() { fire PreToolUse; fire PermissionRequest; echo "stand-in claude: may I? (the next line is the answer)"; IFS= read -r answer || exit 0; echo "answered: $answer"; fire PostToolUse; fire Stop; }
+
+trap 'quiet; echo "stand-in claude: hung up"; exit 0' HUP TERM
 while printf '> ' && IFS= read -r line; do
-  [ "$line" = "/exit" ] && { echo "bye"; exit 0; }
-  [ "$line" = "/work" ] && { (trap - HUP TERM; while printf '.'; do sleep 1; done) & echo "working"; continue; }
+  [ "$line" = "/exit" ] && { quiet; echo "bye"; exit 0; }
+  [ "$line" = "/interrupt" ] && { quiet; echo "interrupted"; continue; }
   [ -z "$line" ] && continue
   mkdir -p "$dir"
   safe=$(printf '%s' "$line" | sed 's/\\/\\\\/g; s/"/\\"/g')
   printf '{"type":"user","isSidechain":false,"sessionId":"%s","cwd":"%s","message":{"role":"user","content":"%s"}}\n' "$id" "$(pwd -P)" "$safe" >> "$record"
-  echo "you said: $line"
+  fire UserPromptSubmit
+  case "$line" in
+    /work) (trap - HUP TERM; while printf '.'; do sleep 1; done) & busy=$!; echo "working" ;;
+    /later) dots 3; echo "done"; fire Stop ;;
+    /ask) ask ;;
+    /asklater) dots 3; ask ;;
+    /fail) echo "API error"; fire StopFailure ;;
+    *) echo "you said: $line"; fire Stop ;;
+  esac
 done

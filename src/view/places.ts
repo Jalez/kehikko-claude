@@ -1,5 +1,7 @@
 import type { Listing, Row } from '../../doors.ts'
+import type { Notice } from '../../live.ts'
 import { kehikkoOf, placeKey, type Place } from '../../place.ts'
+import type { State } from '../../program.ts'
 
 /**
  * What the page does when the canvas names a place, decided from what the
@@ -63,6 +65,8 @@ export function decide(listing: Listing, showing: string | null = null): Step {
 export interface Standing extends Place {
   projectPath: string
   kehikkoName: string
+  /** What a person calls each picked part, by id. For a notice's words; never compared. */
+  partNames: Record<string, string>
   /** The host's row number for the kehikko today: a note beside a key, and all there is without one. */
   kehikkoId: number | null
   key: string
@@ -83,7 +87,7 @@ export function standing(host: {
   where: 'listening' | 'unhosted' | 'hosted'
   projectPath: string | null
   epic: string | null
-  parts: readonly { id: string; picked: boolean }[]
+  parts: readonly { id: string; picked: boolean; heading?: string }[]
   kehikko: { id: number; name: string; key?: string } | null
 }): Standing | null {
   if (host.where !== 'hosted' || !host.projectPath) return null
@@ -96,6 +100,7 @@ export function standing(host: {
     ...place,
     projectPath: host.projectPath,
     kehikkoName: host.kehikko?.name ?? '',
+    partNames: Object.fromEntries(host.parts.filter((part) => part.picked && part.heading).map((part) => [part.id, part.heading!])),
     kehikkoId: host.kehikko?.id ?? null,
     key: placeKey(place),
   }
@@ -158,4 +163,58 @@ export function ago(at: number | null, now: number): string {
   const days = Math.round(hours / 24)
   if (days < 30) return `${days} d ago`
   return new Date(at).toISOString().slice(0, 10)
+}
+
+/**
+ * A session's state as a mark: one glyph, the word for it, and a colour.
+ *
+ * Three shapes and not three colours of one dot, because a colour is a claim
+ * a person with any kind of colour blindness cannot read; and a glyph in the
+ * text it sits in, because it then costs the width of a character and no
+ * height at all. The word is the `title`, and is written out wherever there
+ * is room for a word.
+ *
+ * Nothing known is no mark: a session that has not said what it is doing is
+ * not drawn as idle.
+ */
+export const MARKS: Record<State, { glyph: string; word: string; colour: string }> = {
+  working: { glyph: '●', word: 'working', colour: 'text-running' },
+  'needs-you': { glyph: '◆', word: 'needs you', colour: 'text-needs-you' },
+  finished: { glyph: '○', word: 'finished', colour: 'text-muted-foreground' },
+}
+
+/** The mark's `title`: the word, and since when. */
+export function since(state: State, at: number | null | undefined, now: number): string {
+  const when = at ? ago(at, now) : ''
+  return when && when !== 'just now' ? `${MARKS[state].word} · ${when}` : MARKS[state].word
+}
+
+/** A place in a person's words: the epic, the picked parts, the kehikko — whichever of them there are. */
+export function placeWords(at: Pick<Notice, 'epic' | 'parts' | 'kehikko'>): string {
+  return [at.epic, at.parts.join(' + '), at.kehikko].filter(Boolean).join(' · ')
+}
+
+/**
+ * A notice as the line a panel draws and the level it draws it at, in the
+ * protocol's own format. Null when it cannot be filed: the format files
+ * every line under an epic, and a session in a place with no epic, noticed
+ * while the canvas is on none, has nothing true to be filed under.
+ *
+ * It says which of the two it is first, then which session, then where —
+ * and nothing about who is speaking: the panel says that itself.
+ */
+export function noticeLine(
+  notice: Pick<Notice, 'state' | 'label' | 'epic' | 'parts' | 'kehikko'>,
+  canvasEpic: string | null,
+): { epic: string; message: string; level: 'attention' | 'done' } | null {
+  const epic = notice.epic ?? canvasEpic
+  if (!epic) return null
+  const what = notice.state === 'finished' ? 'Finished' : 'Waiting for you'
+  const which = notice.label ? `“${notice.label}”` : 'a session with no prompt yet'
+  const where = placeWords(notice)
+  return {
+    epic,
+    message: `${what}: ${which}${where ? ` — ${where}` : ''}`,
+    level: notice.state === 'finished' ? 'done' : 'attention',
+  }
 }
