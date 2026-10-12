@@ -27,6 +27,17 @@ describe('opening the module on a place', () => {
     expect(decide(listing([row('a')]))).toEqual({ do: 'open', session: 'a' })
   })
 
+  test('a session the record lists and this computer does not have is not opened, and is not a reason to ask', () => {
+    const away = row('away', { label: 'started on the laptop', missing: true })
+    /* The only one recorded is somewhere else: a new session, as if the place were empty. */
+    expect(decide(listing([away]))).toEqual({ do: 'open', session: null })
+    /* One here and one elsewhere is exactly one that can be opened. */
+    expect(decide(listing([away, row('a')]))).toEqual({ do: 'open', session: 'a' })
+    expect(decide(listing([away, row('a'), row('b')]))).toEqual({ do: 'choose' })
+    /* Not even on the strength of what this page was showing. */
+    expect(decide(listing([away, row('a'), row('b')]), 'away')).toEqual({ do: 'choose' })
+  })
+
   test('more than one: ask, and open nothing', () => {
     expect(decide(listing([row('a'), row('b')]))).toEqual({ do: 'choose' })
     /* Not even the one that is running, and not the most recent: the owner wants to be asked. */
@@ -63,10 +74,43 @@ describe('the place the canvas is about', () => {
       projectPath: '/p/thesis',
       epic: 'thesis',
       parts: ['methods', 'results'],
-      kehikko: 3,
+      kehikko: { id: 3 },
       kehikkoName: 'writing',
+      kehikkoId: 3,
       key: 'epic=thesis;parts=methods+results;kehikko=3',
     })
+  })
+
+  test('by the kehikko’s key when the host sends one: the row number changing moves nothing', () => {
+    const keyed = { ...host, kehikko: { id: 3, name: 'writing', key: '4072c9e5' } }
+    expect(standing(keyed)).toEqual({
+      projectPath: '/p/thesis',
+      epic: 'thesis',
+      parts: ['methods', 'results'],
+      kehikko: { key: '4072c9e5' },
+      kehikkoName: 'writing',
+      kehikkoId: 3,
+      key: 'epic=thesis;parts=methods+results;kehikko=key:4072c9e5',
+    })
+    /* Removed from the host and added again: 3, then 28. The same place. */
+    const again = standing({ ...host, kehikko: { id: 28, name: 'writing', key: '4072c9e5' } })!
+    expect(again.key).toBe(standing(keyed)!.key)
+    expect(again.kehikkoId).toBe(28)
+    /* Another key is another kehikko, whatever its number. */
+    expect(standing({ ...host, kehikko: { id: 3, name: 'writing', key: 'review-2' } })!.key).not.toBe(again.key)
+  })
+
+  test('a key that is all digits is still a key, and never the place a row number names', () => {
+    const keyed = standing({ ...host, kehikko: { id: 9, name: 'writing', key: '12345678' } })!
+    const numbered = standing({ ...host, kehikko: { id: 12345678, name: 'writing' } })!
+    expect(keyed.key).toBe('epic=thesis;parts=methods+results;kehikko=key:12345678')
+    expect(numbered.key).toBe('epic=thesis;parts=methods+results;kehikko=12345678')
+  })
+
+  test('a host that sends no key — an older one — is still a place, by the row number', () => {
+    expect(standing(host)!.kehikko).toEqual({ id: 3 })
+    /* And a key that is not spelled like one is not stored: the place falls back rather than inventing a spelling. */
+    expect(standing({ ...host, kehikko: { id: 3, name: 'writing', key: 'Not A Key' } })!.key).toBe(standing(host)!.key)
   })
 
   test('moves when the epic, the picked parts or the kehikko does, and not when a name does', () => {

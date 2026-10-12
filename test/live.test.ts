@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { CLOSED, Runs, fenced, headless, opening, readPlace, sayable, type Opening, type Pty, type Run, type Viewer } from '../live.ts'
 import { placeKey } from '../place.ts'
 import { PROGRAM, type Program, type Recorded } from '../program.ts'
-import { readPlaces, sessionsAt } from '../record.ts'
+import { readPlaces, sessionsAt, type NamedPlace } from '../record.ts'
 
 /**
  * The fence, and the runs behind it, without a socket or a real pty.
@@ -22,7 +22,7 @@ const PORT = 8010
 const OK = { origin: `http://127.0.0.1:${PORT}`, host: `127.0.0.1:${PORT}` }
 const A = '11111111-1111-4111-8111-111111111111'
 const B = '22222222-2222-4222-8222-222222222222'
-const HERE = { epic: 'thesis', parts: ['methods'], kehikko: 3, kehikkoName: 'writing' }
+const HERE = { epic: 'thesis', parts: ['methods'], kehikko: { id: 3 }, kehikkoName: 'writing' }
 
 const made: string[] = []
 const project = () => {
@@ -74,8 +74,8 @@ describe('the opening frame', () => {
   test('a session id that is not one, a place that is not one and a missing project are refused', () => {
     expect(typeof opening(frame({ session: '--dangerously-skip-permissions' }), 'T')).toBe('string')
     expect(typeof opening(frame({ session: '../x' }), 'T')).toBe('string')
-    expect(typeof opening(frame({ place: { epic: 'Thesis', parts: [], kehikko: 3 } }), 'T')).toBe('string')
-    expect(typeof opening(frame({ place: { epic: 'thesis', parts: ['a;b'], kehikko: 3 } }), 'T')).toBe('string')
+    expect(typeof opening(frame({ place: { epic: 'Thesis', parts: [], kehikko: { id: 3 } } }), 'T')).toBe('string')
+    expect(typeof opening(frame({ place: { epic: 'thesis', parts: ['a;b'], kehikko: { id: 3 } } }), 'T')).toBe('string')
     expect(typeof opening(frame({ place: null }), 'T')).toBe('string')
     expect(typeof opening(frame({ projectPath: '' }), 'T')).toBe('string')
   })
@@ -88,7 +88,30 @@ describe('the opening frame', () => {
   test('sizes are clamped rather than trusted, and the parts arrive as a set', () => {
     expect(opening(frame({ cols: 1, rows: 100000 }), 'T')).toMatchObject({ cols: 20, rows: 200 })
     expect(opening(frame({ cols: 'x', rows: null }), 'T')).toMatchObject({ cols: 80, rows: 24 })
-    expect(readPlace({ epic: 'thesis', parts: ['results', 'methods', 'results'], kehikko: 3 })?.parts).toEqual(['methods', 'results'])
+    expect(readPlace({ epic: 'thesis', parts: ['results', 'methods', 'results'], kehikko: { id: 3 } })?.parts).toEqual(['methods', 'results'])
+  })
+
+  test('the kehikko arrives by its key or by its row number, told apart by the field and never by its looks', () => {
+    const place = (kehikko: unknown, more: Record<string, unknown> = {}) => readPlace({ epic: 'thesis', parts: [], kehikko, ...more })
+    expect(place({ key: '4072c9e5' })?.kehikko).toEqual({ key: '4072c9e5' })
+    expect(place({ id: 3 })?.kehikko).toEqual({ id: 3 })
+    /* As a page older than the key sent it. */
+    expect(place(3)?.kehikko).toEqual({ id: 3 })
+    expect(place(null)?.kehikko).toBeNull()
+    /* An all-digit key is a key; a string is never read as a number. */
+    expect(place({ key: '12345678' })?.kehikko).toEqual({ key: '12345678' })
+    expect(placeKey(place({ key: '12345678' })!)).toBe('epic=thesis;parts=-;kehikko=key:12345678')
+    expect(placeKey(place(12345678)!)).toBe('epic=thesis;parts=-;kehikko=12345678')
+    for (const not of ['4072c9e5', '3', 3.5, Number.MAX_SAFE_INTEGER + 1, {}, { key: 'Not A Key' }, { key: 'a' }, { key: 3 }, { id: '3' }, { key: '4072c9e5', id: 3 }, { key: 'x;kehikko=1' }, []]) {
+      expect(place(not)).toBeNull()
+    }
+    /* The row number rides beside a key as a note, and only beside a key. */
+    expect(place({ key: '4072c9e5' }, { kehikkoId: 28, kehikkoName: 'writing' })).toEqual({ epic: 'thesis', parts: [], kehikko: { key: '4072c9e5' }, kehikkoName: 'writing', kehikkoId: 28 })
+    expect(place({ id: 3 }, { kehikkoId: 28 })).not.toHaveProperty('kehikkoId')
+    expect(place({ key: '4072c9e5' }, { kehikkoId: '28' })).not.toHaveProperty('kehikkoId')
+    expect(opening(frame({ place: { epic: 'thesis', parts: ['methods'], kehikko: { key: '4072c9e5' }, kehikkoName: 'writing' } }), 'T')).toMatchObject({
+      place: { kehikko: { key: '4072c9e5' } },
+    })
   })
 
   test('the installer is asked for by one word, and still needs the ticket', () => {
@@ -199,7 +222,7 @@ function world(options: { most?: number; found?: string | null; able?: boolean; 
   }
 }
 
-const ask = (projectPath: string, session: string | null, place = HERE): Extract<Opening, { what: 'session' }> => ({ what: 'session', projectPath, place, session, cols: 100, rows: 30 })
+const ask = (projectPath: string, session: string | null, place: NamedPlace = HERE): Extract<Opening, { what: 'session' }> => ({ what: 'session', projectPath, place, session, cols: 100, rows: 30 })
 const isRun = (opened: unknown): opened is Run => typeof opened === 'object' && opened !== null && 'pty' in opened
 const listed = (dir: string, place = HERE) => {
   const read = readPlaces(dir)
@@ -254,7 +277,7 @@ describe('opening a session', () => {
     expect(w.runs.sessions()).toEqual([])
   })
 
-  test('one the program holds a record for is resumed; one it does not is started under the same id', async () => {
+  test('one the program holds a record for is resumed', async () => {
     const dir = project()
     const w = world()
     w.records(dir, A, 'an earlier conversation')
@@ -265,16 +288,52 @@ describe('opening a session', () => {
     /* Opening it here is what attaches it here: it is on this place's list now. */
     expect(listed(dir)).toEqual([A])
 
-    /* Recorded for a place, and the program's own record has since gone: the same id, started fresh. */
-    const other = project()
-    const w2 = world()
-    w2.records(other, A)
-    await w2.runs.open(ask(other, A), new Watcher())
-    w2.ptys[0]!.ends(0)
+  })
+
+  test('one the record lists and the program has nothing for on this computer is refused — never started under the old id', async () => {
+    /* places.json came with the project, from the computer where the session ran. */
+    const dir = project()
+    const w = world()
+    w.records(dir, A, 'started on the other computer')
+    await w.runs.open(ask(dir, A), new Watcher())
+    w.ptys[0]!.ends(0)
     await settle()
-    const w3 = world()
-    await w3.runs.open(ask(other, A), new Watcher())
-    expect(w3.ptys[0]!.args).toEqual(['--session-id', A])
+    expect(listed(dir)).toEqual([A])
+
+    /* The same project folder, on a machine whose Claude Code has never heard of A. */
+    const elsewhere = world()
+    const viewer = new Watcher()
+    const refused = await elsewhere.runs.open(ask(dir, A), viewer)
+    expect(refused).toMatchObject({ code: CLOSED.refused })
+    expect((refused as { why: string }).why).toContain('on this computer')
+    /* Nothing started: not `--resume`, which the program would refuse, and not `--session-id`, which would be another conversation. */
+    expect(elsewhere.ptys.length).toBe(0)
+    /* And it is still in the record, for the computer that has it. */
+    expect(listed(dir)).toEqual([A])
+    const read = readPlaces(dir)
+    expect(read.ok && read.value.sessions[A]?.label).toBe('started on the other computer')
+  })
+
+  test('a place named by its kehikko’s key is recorded under the key, with the row number beside it as a note', async () => {
+    const dir = project()
+    const keyed = { epic: 'thesis', parts: ['methods'], kehikko: { key: '4072c9e5' }, kehikkoName: 'writing', kehikkoId: 3 }
+    const w = world()
+    w.records(dir, A)
+    await w.runs.open(ask(dir, A, keyed), new Watcher())
+    const read = readPlaces(dir)
+    expect(read.ok && read.value.places).toEqual({
+      'epic=thesis;parts=methods;kehikko=key:4072c9e5': { epic: 'thesis', parts: ['methods'], kehikko: { key: '4072c9e5', id: 3, name: 'writing' }, sessions: [A] },
+    })
+    /* The host renumbers it: the same place, the same session, and only the note changes. */
+    w.ptys[0]!.ends(0)
+    await settle()
+    const again = world()
+    again.records(dir, A)
+    await again.runs.open(ask(dir, A, { ...keyed, kehikkoId: 28 }), new Watcher())
+    expect(again.ptys[0]!.args).toEqual(['--resume', A])
+    const after = readPlaces(dir)
+    expect(after.ok && Object.keys(after.value.places)).toEqual(['epic=thesis;parts=methods;kehikko=key:4072c9e5'])
+    expect(after.ok && after.value.places['epic=thesis;parts=methods;kehikko=key:4072c9e5']?.kehikko).toEqual({ key: '4072c9e5', id: 28, name: 'writing' })
   })
 
   test('an id nothing knows — not running, not recorded, not the program’s — is refused, and nothing is started', async () => {
@@ -372,7 +431,7 @@ describe('a session outlives whoever is looking at it', () => {
     const one = new Watcher()
     const two = new Watcher()
     await w.runs.open(ask(dir, A), one)
-    await w.runs.open(ask(dir, A, { epic: 'thesis', parts: [], kehikko: 3, kehikkoName: 'writing' }), two)
+    await w.runs.open(ask(dir, A, { epic: 'thesis', parts: [], kehikko: { id: 3 }, kehikkoName: 'writing' }), two)
     await settle()
     w.ptys[0]!.says('to both\r\n')
     await settle()
@@ -380,7 +439,7 @@ describe('a session outlives whoever is looking at it', () => {
     expect(two.out).toContain('to both')
     expect(w.ptys.length).toBe(1)
     /* Attaching is recorded for the second place too. */
-    expect(listed(dir, { epic: 'thesis', parts: [], kehikko: 3, kehikkoName: 'writing' })).toEqual([A])
+    expect(listed(dir, { epic: 'thesis', parts: [], kehikko: { id: 3 }, kehikkoName: 'writing' })).toEqual([A])
   })
 
   test('when the program exits, everyone watching is told, and it is no longer running', async () => {

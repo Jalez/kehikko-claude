@@ -48,10 +48,13 @@ export function App() {
      the host speaks. */
   const { parts } = useFocus(host)
   const { where, projectPath, epic, kehikko } = host
+  /* The kehikko by its `key` when the host sends one, and by its `id` when it
+     does not (see `standing`). All three are dependencies: the key is what the
+     place is, and the id and the name are written beside it. */
   const at = useMemo(
     () => standing({ where, projectPath, epic, parts, kehikko }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [where, projectPath, epic, parts, kehikko?.id, kehikko?.name],
+    [where, projectPath, epic, parts, kehikko?.key, kehikko?.id, kehikko?.name],
   )
   const server = useServerStanding()
   const cover = coverFor({ where, projectPath, server })
@@ -112,6 +115,10 @@ export function Sessions({
   const [installing, setInstalling] = useState<{ n: number; failed: string | null } | null>(null)
   const [again, setAgain] = useState(0)
   const count = useRef(0)
+  /** The kehikot whose older entries this page has already asked the server to bring across to their key. */
+  const brought = useRef(new Map<string, Promise<void>>())
+  const standingOn = useRef(at)
+  standingOn.current = at
 
   const id = at ? placeId(at) : null
   const here = listing && listing.id === id ? listing.value : null
@@ -124,8 +131,28 @@ export function Sessions({
     if (!project || !key) return
     let live = true
     setRefusal(null)
-    api
-      .place(project, key)
+    /*
+     * A host that names the kehikko by key: before the first read of a place
+     * on it, what an older release filed under its row number is brought
+     * across (`rekey` in record.ts). Asked once per kehikko and name for the
+     * life of the page, and BEFORE the read, so that the place is not found
+     * empty — and a new session started in it — a moment before its own
+     * sessions arrive.
+     */
+    const on = standingOn.current
+    const keyed = on?.kehikko && 'key' in on.kehikko ? on.kehikko.key : null
+    let ready: Promise<void> = Promise.resolve()
+    if (on && keyed) {
+      const which = `${project}\n${keyed}\n${on.kehikkoName}`
+      const asked = brought.current.get(which) ?? api.rekey(project, { key: keyed, name: on.kehikkoName, ...(on.kehikkoId === null ? {} : { id: on.kehikkoId }) })
+      if (!brought.current.has(which)) {
+        brought.current.set(which, asked)
+        asked.catch(() => brought.current.delete(which))
+      }
+      ready = asked
+    }
+    ready
+      .then(() => api.place(project, key))
       .then((value) => live && setListing({ id: placeId({ projectPath: project, key }), value }))
       .catch((error: unknown) => live && setRefusal(error instanceof Error ? error.message : String(error)))
     return () => {
@@ -329,7 +356,13 @@ export function Sessions({
                 target={{
                   what: 'session',
                   projectPath: one.at.projectPath,
-                  place: { epic: one.at.epic, parts: one.at.parts, kehikko: one.at.kehikko, kehikkoName: one.at.kehikkoName },
+                  place: {
+                    epic: one.at.epic,
+                    parts: one.at.parts,
+                    kehikko: one.at.kehikko,
+                    kehikkoName: one.at.kehikkoName,
+                    ...(one.at.kehikkoId === null ? {} : { kehikkoId: one.at.kehikkoId }),
+                  },
                   session: one.session,
                 }}
                 shown={shown}

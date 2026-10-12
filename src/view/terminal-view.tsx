@@ -5,6 +5,8 @@ import '@xterm/xterm/css/xterm.css'
 
 import { probeServer, ticket } from 'kehikot-module-protocol/client'
 
+import type { Kehikko } from '../../place.ts'
+
 /**
  * One view of one run: xterm in the page, and a socket to the session the
  * server is holding.
@@ -63,7 +65,7 @@ export type Target =
   | {
       what: 'session'
       projectPath: string
-      place: { epic: string | null; parts: string[]; kehikko: number | null; kehikkoName: string }
+      place: { epic: string | null; parts: string[]; kehikko: Kehikko | null; kehikkoName: string; kehikkoId?: number }
       /** Null is a new session. */
       session: string | null
     }

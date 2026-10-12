@@ -41,6 +41,9 @@ Opening the module on a place:
   session's first prompt, when it was last active and whether it is running, plus *New session* and
   *Attach an existing session*. Arrows (or `j`/`k`) and Enter, a digit, or the pointer.
 
+Only sessions that are on this computer count towards that (see [What is shared between
+computers](#what-is-shared-between-computers-and-what-is-not)).
+
 Nothing is remembered as a default. One narrower thing is: which session *this page* was showing for a
 place, for as long as its tab lives — so a page that reloads (the plumbing does that by itself when its
 server restarts) comes back to what was on screen. A page opened afresh asks.
@@ -93,10 +96,10 @@ the next open of each place **resumes** its session by id.
 {
   "version": 1,
   "places": {
-    "epic=thesis;parts=methods+results;kehikko=3": {
+    "epic=thesis;parts=methods+results;kehikko=key:4072c9e5": {
       "epic": "thesis",
       "parts": ["methods", "results"],
-      "kehikko": { "id": 3, "name": "writing" },
+      "kehikko": { "key": "4072c9e5", "id": 3, "name": "writing" },
       "sessions": ["6f0c2a1e-…"]
     }
   },
@@ -106,19 +109,93 @@ the next open of each place **resumes** its session by id.
 }
 ```
 
-- The **key** holds ids only — sorted part ids, the kehikko by its id — so renaming a part or a kehikko
-  moves nothing. The names beside it are for reading the file and are never compared.
+- The **key** holds ids only — sorted part ids, the kehikko by its stable key — so renaming a part or a
+  kehikko moves nothing. The names beside it are for reading the file and are never compared.
 - A session is written here **once it exists**: when Claude Code has a record for it, which is when the
   person first says something. A session that was opened, shown a sign-in screen and closed was never a
   session, and leaves no row.
 - When a **part or a kehikko is deleted**, its key can no longer be reached. Nothing is deleted: the
   entry stays in the file, and its sessions are listed under *Attach an existing session* for every
   other place in the project.
-- **The kehikko's id is the host's own number for it**, which is all `context.kehikko` carries
-  (`{ id, name }`). The host renumbers a project's kehikot when the project is forgotten and added
-  again, and numbers them afresh on another machine; after either, the old places are unreachable and
-  their sessions are attachable rather than opened by themselves. The host does keep a stable `key` per
-  kehikko in `.kehikot/kehikko/kehikot.json`; a protocol that carried it would close this.
+- **The kehikko is named by its `key`, not its number.** `context.kehikko` carries both
+  (`{ id, name, key }`, protocol 1.1.0). The `key` is the one the host writes in the project's own
+  `.kehikot/kehikko/kehikot.json`: the same after a rename, after the project is removed from the host
+  and added again, and on another computer. The `id` is a row in one host's database — one kehikko was
+  2, then 9, then 28 without anybody touching it — so it is written beside the key as a note
+  (`"id": 3`, the number it last went by) and never compared or looked up.
+- **In the key a kehikko's key is always spelled `kehikko=key:<key>`**, and a bare `kehikko=3` is a row
+  number and nothing else. The two are told apart by which field they came from and never by how they
+  look: a key may be all digits, and `kehikko=key:12345678` and `kehikko=12345678` are different places.
+- **A host that sends no `key`** (one from before protocol 1.1.0) leaves this module the number, and the place is
+  filed as `kehikko=3`, as it always was — and is exactly as fragile as it always was: when that host
+  renumbers the kehikko, the place is unreachable and its sessions are attachable rather than opened
+  by themselves.
+
+### Files written before the key
+
+A `places.json` from before this — every place filed under `kehikko=<number>` — still reads. The first
+time a host names the kehikko you are standing on by key, the page asks the server, once, to bring
+that kehikko's entries across (`POST /api/rekey`, before the place is read):
+
+- an entry still filed under a number is moved when the kehikko **name** stored beside it equals the
+  open kehikko's name. It becomes `kehikko=key:<key>`; its epic and parts do not change;
+- **never by the number.** Numbers are handed out again, so `kehikko=3` in an old file says nothing
+  about which kehikko is 3 today. The name is the only thing in an old entry that still means what it
+  meant — which also brings back together a kehikko that renumbering had split across 2, 9 and 28;
+- where the key already has an entry for that epic and those parts, the two session lists are merged
+  as a set;
+- if an entry filed under a key already carries that name, the name is taken — the migration has run,
+  or another kehikko is called the same — and entries under numbers are left alone rather than guessed
+  at. So it happens once per kehikko;
+- an entry that matches nothing stays exactly as it is. It is not deleted, and its sessions are under
+  *Attach an existing session* at every place. When nothing matches, the file is not written.
+
+Reading never migrates: `GET /api/place` and the MCP tool return what the file says. A kehikko that
+was renamed between the old file being written and the first open with a key is not matched; attach
+its sessions by hand, or rename it back for one open.
+
+### What is shared between computers, and what is not
+
+| | where it is | travels with the project? |
+|---|---|---|
+| the epic, its parts, the kehikko and its `key` | the project (`.kehikot/…`), written by the host | yes, so a place is the same place everywhere |
+| which session belongs to which place | `<project>/.kehikot/claude/places.json` | **not by default** — see below |
+| the sessions themselves | Claude Code's folder on the computer where they ran (`~/.claude/projects/…`) | **no, never** |
+
+A session is a transcript on one computer. Nothing here copies one, and Claude Code has no way to
+resume a session another computer holds. So even with `places.json` shared, a second computer gets the
+*names* of the first one's sessions and not the sessions.
+
+**`places.json` is ignored by git by default.** The first time this module writes the record it puts a
+`.gitignore` beside it, in its own `.kehikot/claude/` folder, naming `places.json` — the way the host
+does for its tracker reading in `.kehikot/kehikko/`. The reasons: the list means little where the
+sessions are not, and it holds the first line of what was asked in each session, which is not
+something to publish into a repository's history without being asked. The `.gitignore` is written only
+when there is none, so to share the record anyway, delete the rule lines and keep the file; this
+module will not put them back. (A `places.json` that is *already* committed stays tracked — an ignore
+rule does not untrack a file. `git rm --cached .kehikot/claude/places.json` does.) A project whose own
+`.gitignore` covers `.kehikot/` was never sharing it.
+
+**When the record does arrive somewhere its sessions are not** — shared on purpose, a folder synced
+between computers, or simply this computer after Claude Code cleaned an old transcript away — a
+recorded session that Claude Code has nothing for here is:
+
+- **shown, not hidden**: in the list it is a muted row with its first prompt, *not on this computer*
+  where "running" would be, and when it was last active. No extra row or notice says so. (Hiding it
+  was the other choice. It was not taken because the list would then disagree with the file, and a
+  person who remembers the conversation would have no way to learn why it is not offered.)
+- **not openable**: the row does not open, by pointer, Enter or digit. It can be taken off the place
+  (`×`), which is the person's choice and removes it from that place only.
+- **not counted**: a place whose only recorded session is elsewhere opens a new one at once, as an
+  empty place does, and one session here plus one elsewhere opens the one here without asking.
+- **never started under its old id**: the server refuses to open an id Claude Code has no record of
+  on this computer. `claude --session-id <that id>` would be a new, empty conversation wearing the old
+  one's id, and would collide with the real one if the two computers' records ever met.
+- **never deleted from the record**: the other computer still has it, and there it opens as before.
+
+The words are *not on this computer* rather than *from another computer* because the module cannot
+tell the two causes apart, and the second would be false for a transcript that was cleaned away here.
+The MCP tool marks the same sessions `missing: true`.
 
 Read, never written: Claude Code's own records for the folder,
 `~/.claude/projects/<folder>/<session id>.jsonl` (or under `CLAUDE_CONFIG_DIR`, which Claude Code
@@ -133,16 +210,17 @@ itself honours) — the list of a project's sessions, their first prompt, and wh
 | `GET /healthz` | which module, which build |
 | `WS /session` | the terminal. Origin and Host are checked on the upgrade; the ticket rides the first frame; nothing starts before it is read |
 | `GET /api/place?projectPath&key` | what a place holds: its sessions, the project's others, what is running, whether the program is installed. **Ticketed**, since it says what somebody worked on |
+| `POST /api/rekey` | bring the entries an older release filed under a kehikko's row number across to its key. Ticketed; the only thing that migrates |
 | `POST /api/end` | end a running session, because a person chose that one. Ticketed |
 | `POST /api/detach` | take a session off a place. Ticketed |
-| `POST /mcp` | one tool, `sessions { projectPath, epic? }`: the places of a project and their sessions (`readOnlyHint: true`) |
+| `POST /mcp` | one tool, `sessions { projectPath, epic? }`: the places of a project and their sessions, `missing: true` on one that is not on this computer (`readOnlyHint: true`) |
 
 There is no door that starts a session, types into one or installs anything, and no MCP tool that
 does. A session is started by the socket's first frame, from this module's own page.
 
 What the socket will start is narrower than Terminal's shell: this one program, in a folder that
-exists, on a session id this module minted or Claude Code already holds for that folder. No argument
-arrives over the wire. The fence is the same as Terminal's and has the same limit — it keeps other
+exists, on a session id this module minted just now or Claude Code already holds for that folder on
+this computer. No argument arrives over the wire. The fence is the same as Terminal's and has the same limit — it keeps other
 pages out, and does not keep out a program already running as you.
 
 ## When Claude Code is not installed
@@ -185,8 +263,8 @@ installed. A module for another agent is that file again plus a manifest.
 
 | file | what is in it |
 |---|---|
-| `place.ts` | the key of a place. Pure; shared by the page and the server |
-| `record.ts` | `places.json`: read-modify-write with nothing awaited in between |
+| `place.ts` | the key of a place, and a kehikko as a key or a row number. Pure; shared by the page and the server |
+| `record.ts` | `places.json`: read-modify-write with nothing awaited in between, the migration to keys, and the `.gitignore` beside it |
 | `program.ts` | the adapter: everything that knows it is Claude Code |
 | `live.ts` | the running sessions, the headless emulators, the socket and its fence |
 | `doors.ts` | the HTTP doors and the MCP tool |

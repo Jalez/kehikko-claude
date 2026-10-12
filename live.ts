@@ -3,9 +3,9 @@ import type { Duplex } from 'node:stream'
 
 import { mintTicket, sameTicket } from 'kehikot-module-protocol/serve'
 
-import { placeKey, sortedParts } from './place.ts'
+import { isKehikkoKey, placeKey, sortedParts, type Kehikko } from './place.ts'
 import { PROGRAM, home, type Program } from './program.ts'
-import { attach, note, projectRoot, readPlaces, type NamedPlace } from './record.ts'
+import { attach, note, projectRoot, type NamedPlace } from './record.ts'
 
 /**
  * The sessions that are running, and the socket a page watches one through.
@@ -155,21 +155,38 @@ const size = (raw: unknown, least: number, most: number, otherwise: number) => {
 
 const SLUG = /^[a-z0-9-]{1,80}$/
 
-/** A place off the wire, or null. Ids are checked; the kehikko's name is a label and only bounded. */
+/**
+ * Which kehikko, off the wire: `{ key }`, `{ id }`, or — as pages older than
+ * the key sent it — a bare number, which is an id. `undefined` for anything
+ * else. Told apart by the field it came in and never by how it looks: a key
+ * may be all digits, and a string is never read as a number here.
+ */
+function readKehikko(raw: unknown): Kehikko | null | undefined {
+  if (raw === null || raw === undefined) return null
+  if (typeof raw === 'number') return Number.isSafeInteger(raw) ? { id: raw } : undefined
+  if (typeof raw !== 'object') return undefined
+  const said = raw as { key?: unknown; id?: unknown }
+  if (said.key !== undefined) return isKehikkoKey(said.key) && said.id === undefined ? { key: said.key } : undefined
+  return typeof said.id === 'number' && Number.isSafeInteger(said.id) ? { id: said.id } : undefined
+}
+
+/** A place off the wire, or null. Ids and the kehikko's key are checked; the kehikko's name is a label and only bounded. */
 export function readPlace(raw: unknown): NamedPlace | null {
   if (typeof raw !== 'object' || raw === null) return null
-  const said = raw as { epic?: unknown; parts?: unknown; kehikko?: unknown; kehikkoName?: unknown }
+  const said = raw as { epic?: unknown; parts?: unknown; kehikko?: unknown; kehikkoName?: unknown; kehikkoId?: unknown }
   const epic = said.epic ?? null
   if (epic !== null && (typeof epic !== 'string' || !SLUG.test(epic))) return null
   const parts = said.parts ?? []
   if (!Array.isArray(parts) || parts.length > 200 || parts.some((one) => typeof one !== 'string' || !SLUG.test(one))) return null
-  const kehikko = said.kehikko ?? null
-  if (kehikko !== null && !(typeof kehikko === 'number' && Number.isSafeInteger(kehikko))) return null
+  const kehikko = readKehikko(said.kehikko)
+  if (kehikko === undefined) return null
   return {
     epic,
     parts: sortedParts(parts as string[]),
     kehikko,
     kehikkoName: typeof said.kehikkoName === 'string' ? said.kehikkoName.slice(0, 120) : undefined,
+    /* The host's row number, carried only to be written beside a key as a note. */
+    ...(kehikko && 'key' in kehikko && typeof said.kehikkoId === 'number' && Number.isSafeInteger(said.kehikkoId) ? { kehikkoId: said.kehikkoId } : {}),
   }
 }
 
@@ -315,11 +332,15 @@ export class Runs {
    * Open a session for a viewer: attach to it if it is running, start it if
    * it is not. `session: null` is a new one.
    *
-   * Which of `fresh` and `resume` starts it is decided by whether the program
-   * holds a record for the id, and by nothing else. A session that was opened
-   * and never spoken to left no record, so "resume" would be refused by the
-   * program; starting it fresh under the same id is the same session as far
-   * as anybody can tell.
+   * A new one is started `fresh` under an id minted here. An id that was
+   * ASKED for is opened only if the program holds a record for it on this
+   * machine, and then it is `resume`d. One it holds nothing for is refused —
+   * whatever `places.json` says about it. That file travels with the project
+   * and a transcript does not: the id may be a session on another computer,
+   * or one whose transcript has been cleaned away here, and starting the
+   * program fresh under it would be a new, empty conversation wearing the
+   * old one's id — and, back on the other computer, a clash with the real
+   * one.
    */
   async open(asked: Extract<Opening, { what: 'session' }>, viewer: Viewer): Promise<Run | Refusal> {
     const root = projectRoot(asked.projectPath)
@@ -352,8 +373,8 @@ export class Runs {
     if (!found.file) return { code: CLOSED.missing, why: `${this.program.name} is not installed.` }
 
     const settled = await this.program.settled(projectPath, id, 0)
-    if (asked.session && !settled && !this.recorded(projectPath, id)) {
-      return { code: CLOSED.refused, why: `${this.program.name} holds no session by that id for this project.` }
+    if (asked.session && !settled) {
+      return { code: CLOSED.refused, why: `${this.program.name} has no session by that id for this project on this computer.` }
     }
     if (this.sessions().length >= this.most) {
       return { code: CLOSED.full, why: `${this.most} sessions are running, which is as many as this module keeps.` }
@@ -398,12 +419,6 @@ export class Runs {
     if (settled) this.remember(run, asked.place)
     this.follow(run)
     return run
-  }
-
-  /** Is this id one a place in this project lists? */
-  private recorded(projectPath: string, id: string): boolean {
-    const read = readPlaces(projectPath)
-    return read.ok && Object.values(read.value.places).some((place) => place.sessions.includes(id))
   }
 
   /**

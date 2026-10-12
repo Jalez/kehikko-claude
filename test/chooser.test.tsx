@@ -115,6 +115,35 @@ describe('the list of a place’s sessions', () => {
     expect(list.querySelector('[data-session="a"]')?.textContent).not.toContain('End')
   })
 
+  test('a session that is not on this computer is listed, muted, and cannot be opened — by pointer, by Enter or by its digit', () => {
+    const away = row('away', { label: 'started on the laptop', lastActive: NOW - 2 * 86_400_000, missing: true })
+    const { list, opened, detached } = drawn({ listing: listing({ sessions: [away, row('a', { label: 'the one that is here' })] }) })
+    const there = list.querySelector('[data-session="away"]') as HTMLElement
+    expect(there.getAttribute('data-row')).toBe('missing')
+    expect(there.textContent).toContain('started on the laptop')
+    expect(there.textContent).toContain('not on this computer')
+    expect(there.textContent).toContain('2 d ago')
+    expect(there.getAttribute('aria-disabled')).toBe('true')
+    /* No notice row: the rows are the two sessions, New session and the way to attach. */
+    expect([...list.querySelectorAll('[data-row]')].map((one) => one.getAttribute('data-row'))).toEqual(['missing', 'session', 'new', 'attach'])
+
+    /* The keyboard starts on the first row that can be opened, not on this one. */
+    expect(list.querySelector('[aria-selected="true"]')?.getAttribute('data-session')).toBe('a')
+    fireEvent.click(there)
+    fireEvent.keyDown(list, { key: 'ArrowUp' })
+    expect(list.querySelector('[aria-selected="true"]')?.getAttribute('data-session')).toBe('away')
+    fireEvent.keyDown(list, { key: 'Enter' })
+    fireEvent.keyDown(list, { key: '1' })
+    expect(opened).toEqual([])
+    /* The one press it has: off this place. The record keeps the session. */
+    expect(there.querySelectorAll('button').length).toBe(1)
+    fireEvent.click(there.querySelector('[aria-label="Remove from this place"]') as HTMLElement)
+    expect(detached).toEqual(['away'])
+    /* And the one that is here opens as ever. */
+    fireEvent.keyDown(list, { key: '2' })
+    expect(opened).toEqual(['a'])
+  })
+
   test('opened over a running terminal it marks the one on screen, and Escape goes back', () => {
     const { list, closed } = drawn({ mode: 'sessions', current: 'b' })
     expect(list.querySelector('[data-session="b"]')?.textContent).toContain('on screen')

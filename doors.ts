@@ -2,9 +2,9 @@ import { establishBuild, refuseTicket, type Reply } from 'kehikot-module-protoco
 
 import { MOST_RUNNING, TICKET, theRuns, type Runs } from './live.ts'
 import { ID, MANIFEST, VERSION } from './manifest.ts'
-import { readPlaceKey } from './place.ts'
+import { isKehikkoKey, readPlaceKey } from './place.ts'
 import { PROGRAM, home, type Program } from './program.ts'
-import { WHERE, detach, projectRoot, readPlaces, sessionsAt } from './record.ts'
+import { WHERE, detach, projectRoot, readPlaces, rekey, sessionsAt } from './record.ts'
 
 /**
  * The HTTP doors, as one function: `answer` takes a request and returns a
@@ -52,6 +52,13 @@ export interface Row {
   lastActive: number | null
   /** Whether this module is running it now. */
   running: boolean
+  /**
+   * Set when the record lists it for this place and Claude Code has nothing
+   * by that id on this computer: it ran on another one, or its transcript has
+   * been cleaned away here. It cannot be opened, and is shown so that the
+   * list agrees with the file.
+   */
+  missing?: true
 }
 
 export interface Listing {
@@ -116,6 +123,8 @@ export async function listing(
       label: known.get(id)?.label || run?.label || kept?.label || '',
       lastActive: known.get(id)?.lastActive ?? (Number.isFinite(keptAt) ? keptAt : (run?.startedAt ?? null)),
       running: Boolean(run),
+      /* Neither the program's nor running: all there is of it here is the row in the record. */
+      ...(known.has(id) || run ? {} : { missing: true as const }),
     }
   }
 
@@ -172,7 +181,8 @@ function tools() {
       description:
         `The ${PROGRAM.name} sessions a person keeps in a project, by place. A place is an epic, the set of parts picked `
         + 'out of it and a kehikko; each lists its sessions with the first line of their first prompt, when each was '
-        + `last active and whether it is running now. Read from ${WHERE}. Give the absolute project directory as `
+        + 'last active, whether it is running now, and `missing: true` when Claude Code has no record of it on this '
+        + `computer (sessions stay on the computer they ran on). Read from ${WHERE}. Give the absolute project directory as `
         + 'projectPath, and an epic slug to see only that epic’s places. Reads only: nothing here starts, ends or types '
         + 'into a session.',
       inputSchema: {
@@ -207,11 +217,13 @@ async function call(name: string, args: Record<string, unknown>): Promise<string
       sessions: place.sessions.map((id) => {
         const kept = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id] : undefined
         const at = held.get(id)?.lastActive
+        const running = live.some((run) => run.id === id || run.settled === id)
         return {
           id,
           firstPrompt: held.get(id)?.label || kept?.label || '',
           lastActive: at ? new Date(at).toISOString() : (kept?.lastActive ?? null),
-          running: live.some((run) => run.id === id || run.settled === id),
+          running,
+          ...(held.has(id) || running ? {} : { missing: true }),
         }
       }),
     }))
@@ -281,6 +293,20 @@ export async function answer(
   if (path === '/api/place' && method === 'GET') {
     const said = await listing(query.get('projectPath') ?? '', query.get('key') ?? '')
     return said.ok ? ok(said) : bad(said.error)
+  }
+
+  /* Bring the entries an older release filed under this kehikko's row number
+     across to its key (see `rekey` in record.ts). A write, so a POST: the read
+     above never moves anything. */
+  if (path === '/api/rekey' && method === 'POST') {
+    const said = (typeof body?.kehikko === 'object' && body.kehikko !== null ? body.kehikko : {}) as { key?: unknown; name?: unknown; id?: unknown }
+    if (!isKehikkoKey(said.key)) return bad('that is not a kehikko’s key')
+    const written = rekey(typeof body?.projectPath === 'string' ? body.projectPath : null, {
+      key: said.key,
+      name: typeof said.name === 'string' ? said.name.slice(0, 120) : '',
+      id: typeof said.id === 'number' && Number.isSafeInteger(said.id) ? said.id : undefined,
+    })
+    return written.ok ? ok({ ok: true, moved: written.value.moved }) : bad(written.error)
   }
 
   /* End a running session, because a person chose that one. The only way a
