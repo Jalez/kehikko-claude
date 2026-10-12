@@ -1,10 +1,14 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
+import { headerItemsSchema } from 'kehikot-module-protocol'
 import { resetServerStanding } from 'kehikot-module-protocol/client'
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 
 import type { Listing, Row } from '../doors.ts'
+import type { Notice, Stated } from '../live.ts'
+import { NOTICES } from '../manifest.ts'
 import type { Api } from '../src/api.ts'
+import type { Hosted } from '../src/app.tsx'
 import { standing } from '../src/view/places.ts'
 import type { Standing, Target } from '../src/view/terminal-view.tsx'
 
@@ -26,7 +30,7 @@ import type { Standing, Target } from '../src/view/terminal-view.tsx'
 interface Mounted {
   target: Target
   tell: (standing: Standing) => void
-  say: (said: { session?: string | null; label?: string; exists?: boolean; typed?: boolean }) => void
+  say: (said: { session?: string | null; label?: string; exists?: boolean; typed?: boolean; state?: 'working' | 'needs-you' | 'finished' | null; since?: number }) => void
 }
 const mounted: Mounted[] = []
 const unmounted: Target[] = []
@@ -35,8 +39,11 @@ const naming = (target: Target) => (target.what === 'install' ? 'install' : `${t
 
 mock.module('../src/view/terminal-view.tsx', () => ({
   TerminalView: ({ target, shown, watched, onStanding, onSaid }: { target: Target; shown: boolean; watched?: boolean; onStanding?: (s: Standing) => void; onSaid?: (s: object) => void }) => {
+    /* The callbacks as they are NOW, as the real view holds them: it reads them from a ref on every call. */
+    const latest = useRef({ onStanding, onSaid })
+    latest.current = { onStanding, onSaid }
     useEffect(() => {
-      const mine: Mounted = { target, tell: (next) => onStanding?.(next), say: (said) => onSaid?.(said) }
+      const mine: Mounted = { target, tell: (next) => latest.current.onStanding?.(next), say: (said) => latest.current.onSaid?.(said) }
       mounted.push(mine)
       return () => {
         unmounted.push(target)
@@ -573,5 +580,233 @@ describe('when the program is not installed', () => {
     act(() => view('whole@3:new').tell({ at: 'closed', code: 4404, why: 'Claude Code is not installed.' }))
     await flush()
     expect(container.textContent).toContain('is not installed')
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * What a session is doing: the mark, the notice, the header
+ * ------------------------------------------------------------------ */
+
+/** A server whose feed the test drives, and a host that writes down what it is asked. */
+function told(start: Record<string, Row[]> = {}) {
+  const s = server(start)
+  const feeds: { notices: boolean; heard: { state(stated: Stated): void; notice(notice: Notice): void }; stopped: boolean }[] = []
+  s.api.feed = (notices, heard) => {
+    const one = { notices, heard, stopped: false }
+    feeds.push(one)
+    return () => {
+      one.stopped = true
+    }
+  }
+  const emitted: { extension: string; payload: Record<string, unknown> }[] = []
+  const headers: unknown[][] = []
+  const hosted: Hosted = {
+    emit: async (extension, payload) => void emitted.push({ extension, payload }),
+    header: (items) => void headers.push(items),
+    presses: { current: null },
+  }
+  return { ...s, feeds, emitted, headers, hosted }
+}
+const NOTICE: Notice = { seq: 1, session: 'far', state: 'finished', label: 'draft the results', projectPath: P, epic: 'thesis', parts: ['Results'], kehikko: 'writing', at: 1 }
+const height = (container: HTMLElement) => [...(container.firstElementChild as HTMLElement).children].filter((one) => !(one as HTMLElement).className.includes('absolute')).length
+
+describe('what the session on screen is doing', () => {
+  test('is one glyph in the corner control, before the label, with the word as its title — and no row', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'tighten the methods' })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    const control = () => container.querySelector('[data-sessions]') as HTMLElement
+    const rows = height(container)
+    expect(control().textContent).toBe('tighten the methods ▾')
+    expect(control().getAttribute('data-state')).toBeNull()
+
+    act(() => view('whole@3:a').say({ session: 'a', state: 'needs-you', since: Date.now() }))
+    expect(control().textContent).toBe('◆tighten the methods ▾')
+    expect(control().getAttribute('data-state')).toBe('needs-you')
+    expect(control().getAttribute('title')).toBe('Sessions for this place — this one: needs you')
+    expect(control().getAttribute('aria-label')).toBe('Sessions — tighten the methods (needs you)')
+    /* Still over the terminal, and nothing was added beside it. */
+    expect(control().className).toContain('absolute')
+    expect(height(container)).toBe(rows)
+
+    act(() => view('whole@3:a').say({ session: 'a', state: 'working', since: Date.now() }))
+    expect(control().textContent).toBe('●tighten the methods ▾')
+    act(() => view('whole@3:a').say({ session: 'a', state: 'finished', since: Date.now() }))
+    expect(control().textContent).toBe('○tighten the methods ▾')
+    /* Taken back: no mark, rather than a mark that says idle. */
+    act(() => view('whole@3:a').say({ session: 'a', state: null }))
+    expect(control().textContent).toBe('tighten the methods ▾')
+    expect(height(container)).toBe(rows)
+  })
+
+  test('the list shows what the feed has said since it was read, for sessions this page has no view of', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'one', running: true }), row('b', { label: 'two', running: true, state: 'working', since: 1 })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    expect(container.querySelector('[data-session="a"] [data-state]')).toBeNull()
+    expect(container.querySelector('[data-session="b"] [data-state]')?.getAttribute('data-state')).toBe('working')
+    act(() => s.feeds[0]!.heard.state({ session: 'a', state: 'needs-you', since: Date.now() }))
+    act(() => s.feeds[0]!.heard.state({ session: 'b', state: 'finished', since: Date.now() }))
+    expect(container.querySelector('[data-session="a"] [data-state]')?.getAttribute('data-state')).toBe('needs-you')
+    expect(container.querySelector('[data-session="b"] [data-state]')?.getAttribute('data-state')).toBe('finished')
+    act(() => s.feeds[0]!.heard.state({ session: 'b', state: null, since: Date.now() }))
+    expect(container.querySelector('[data-session="b"] [data-state]')).toBeNull()
+    expect(container.querySelector('[data-session="b"]')?.textContent).toContain('running')
+  })
+})
+
+describe('a notice for a person who is not looking', () => {
+  test('a framed page asks for notices and passes one to the host, in the protocol’s format, once', async () => {
+    const s = told()
+    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} canvasEpic="thesis" />)
+    await flush()
+    expect(s.feeds.map((one) => one.notices)).toEqual([true])
+    act(() => s.feeds[0]!.heard.notice(NOTICE))
+    await flush()
+    expect(s.emitted).toEqual([{ extension: NOTICES, payload: { epic: 'thesis', level: 'done', message: 'Finished: “draft the results” — thesis · Results · writing', refs: [] } }])
+    act(() => s.feeds[0]!.heard.notice({ ...NOTICE, seq: 2, state: 'needs-you' }))
+    expect(s.emitted[1]?.payload).toMatchObject({ level: 'attention', message: 'Waiting for you: “draft the results” — thesis · Results · writing' })
+    expect(s.emitted.length).toBe(2)
+  })
+
+  test('nothing is drawn for it here: no banner, no row', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'one' })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} canvasEpic="thesis" />)
+    await flush()
+    const before = container.innerHTML
+    act(() => s.feeds[0]!.heard.notice(NOTICE))
+    await flush()
+    expect(container.innerHTML).toBe(before)
+  })
+
+  test('a page nothing is framing follows the states and asks for no notices', async () => {
+    const s = told()
+    const { unmount } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    expect(s.feeds.map((one) => one.notices)).toEqual([false])
+    unmount()
+    expect(s.feeds[0]!.stopped).toBe(true)
+  })
+
+  test('one about a place with no epic is filed under the canvas’s, and under nothing when there is none', async () => {
+    const s = told()
+    const { rerender } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} canvasEpic="another" />)
+    await flush()
+    act(() => s.feeds[0]!.heard.notice({ ...NOTICE, epic: null }))
+    expect(s.emitted[0]?.payload.epic).toBe('another')
+    rerender(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} canvasEpic={null} />)
+    act(() => s.feeds[0]!.heard.notice({ ...NOTICE, epic: null }))
+    expect(s.emitted.length).toBe(1)
+    /* The canvas moving does not open a second feed. */
+    expect(s.feeds.length).toBe(1)
+  })
+
+  test('a host that will not carry it is not an error anybody sees', async () => {
+    const s = told()
+    s.hosted.emit = async () => {
+      throw new Error('nothing on this canvas shows these')
+    }
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} canvasEpic="thesis" />)
+    await flush()
+    /* It is said to the console, which is where whoever can act on it looks. */
+    const info = console.info
+    const said: unknown[][] = []
+    console.info = (...words: unknown[]) => void said.push(words)
+    try {
+      act(() => s.feeds[0]!.heard.notice(NOTICE))
+      await flush()
+    } finally {
+      console.info = info
+    }
+    expect(said.length).toBe(1)
+    expect(container.querySelector('[data-terminal]')).not.toBeNull()
+  })
+})
+
+describe('the sessions, declared for the container’s header', () => {
+  const last = (s: ReturnType<typeof told>) => s.headers.at(-1) as { kind: string; id: string; label: string; agents?: boolean; options: { id: string; label: string }[] }[]
+
+  test('a Go item: this place’s sessions with their marks, a new one, and the list', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'tighten the methods', running: true, state: 'needs-you', since: 1 }), row('b', { label: 'draft the results' }), row('gone', { label: 'elsewhere', missing: true })] })
+    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    const items = last(s)
+    expect(items.length).toBe(1)
+    expect(items[0]).toMatchObject({ kind: 'go', id: 'sessions', label: 'Sessions' })
+    expect(items[0]!.options).toEqual([
+      { id: 'a', label: '◆ tighten the methods' },
+      { id: 'b', label: 'draft the results' },
+      { id: 'new', label: 'New session' },
+      { id: 'list', label: 'All sessions…' },
+    ])
+    /* Nothing says an agent may press it, so none may. */
+    expect(items[0]!.agents).toBeUndefined()
+    expect(headerItemsSchema.safeParse(items).success).toBe(true)
+    /* And it follows the state as it changes. */
+    act(() => s.feeds[0]!.heard.state({ session: 'a', state: 'finished', since: 2 }))
+    expect(last(s)[0]!.options[0]).toEqual({ id: 'a', label: '○ tighten the methods' })
+  })
+
+  test('a new session that comes to exist is in the menu without anybody opening the list', async () => {
+    const s = told()
+    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    expect(last(s)[0]!.options.map((one) => one.id)).toEqual(['new', 'list'])
+    const reads = s.asked.length
+    /* The server's word that the program now has a record of it; by then the place lists it. */
+    s.held[KEY()] = [row('x', { label: 'what was first asked', running: true })]
+    act(() => view('whole@3:new').say({ session: 'x', exists: true }))
+    await flush()
+    expect(s.asked.length).toBe(reads + 1)
+    expect(last(s)[0]!.options.map((one) => one.id)).toEqual(['x', 'new', 'list'])
+    /* Said again, it is already there and nothing is read. */
+    act(() => view('whole@3:new').say({ session: 'x', exists: true }))
+    await flush()
+    expect(s.asked.length).toBe(reads + 1)
+  })
+
+  test('a long label is cut to what the protocol takes', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'x'.repeat(80) }), row('b', { label: 'two' })] })
+    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    expect(last(s)[0]!.options[0]!.label.length).toBe(48)
+    expect(headerItemsSchema.safeParse(last(s)).success).toBe(true)
+  })
+
+  test('a press opens that session, a new one, or the list — and refuses what is not this place’s', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'one' }), row('b', { label: 'two' })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    const press = (value: string | boolean, item = 'sessions') => {
+      let answer: unknown
+      act(() => {
+        answer = s.hosted.presses.current?.({ item, value })
+      })
+      return answer
+    }
+    expect(press('b')).toBe(true)
+    await flush()
+    expect(shown(container)).toEqual(['whole@3:b'])
+    expect(press('list')).toBe(true)
+    await flush()
+    expect(container.querySelector('[data-chooser]')?.getAttribute('data-chooser')).toBe('sessions')
+    expect(press('new')).toBe(true)
+    await flush()
+    expect(shown(container)).toEqual(['whole@3:new'])
+    expect(typeof press('zzz')).toBe('string')
+    expect(typeof press(true)).toBe('string')
+    expect(typeof press('a', 'other')).toBe('string')
+  })
+
+  test('with nothing to offer — no project, or the program missing — the header is withdrawn', async () => {
+    const s = told()
+    s.state.found = null
+    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    expect(s.headers.at(-1)).toEqual([])
+    const none = told()
+    render(<Sessions theme="dark" at={null} cover="no-project" api={none.api} hosted={none.hosted} />)
+    await flush()
+    expect(none.headers.at(-1)).toEqual([])
   })
 })

@@ -74,13 +74,13 @@ describe('finding the binary', () => {
 
 describe('whether a copy can do what is asked of it', () => {
   test('one with both flags can', async () => {
-    expect(await PROGRAM.supports(STAND_IN)).toEqual({ ok: true, missing: null })
+    expect(await PROGRAM.supports(STAND_IN)).toEqual({ ok: true, missing: null, tells: true })
   })
 
   test('one whose help has no --session-id is too old, and the flag is named', async () => {
     const bin = scratch('old')
     writeFileSync(join(bin, 'claude'), `#!/bin/sh\nSTANDIN_OLD=1 exec "${STAND_IN}" "$@"\n`, { mode: 0o755 })
-    expect(await PROGRAM.supports(join(bin, 'claude'))).toEqual({ ok: false, missing: '--session-id' })
+    expect(await PROGRAM.supports(join(bin, 'claude'))).toEqual({ ok: false, missing: '--session-id', tells: false })
   })
 
   test('one whose help cannot be read is not called too old: nothing was learned', async () => {

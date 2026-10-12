@@ -58,6 +58,16 @@ the way to the list sit in the terminal's own top-right corner, over it. A strip
 bottom only when nothing is running to take the space from: the session ended (**Resume**,
 **Sessions**), the install did not finish, or this module's server has gone.
 
+What a session is doing is one glyph, with the word as its `title`: before the label in the corner
+control for the session on screen, and on each running row of the list, where the word "running" was.
+`●` working, `◆` needs you, `○` finished — three shapes, so it does not rest on colour. A session that
+has not said what it is doing has no mark. It adds no row, no line and no height (measured in WebKit:
+the terminal the same 40 rows and the corner control the same 21 px tall, with and without it).
+
+A host that draws headers (protocol 1.1.0) also offers the place's sessions in the container's own
+**Go** menu — each with its mark, then *New session* and *All sessions…* — in the header row the host
+already draws. The corner control stays as well: a page cannot tell whether its host draws headers.
+
 From the list a session can be opened, a running one **End**ed, and one taken off the place (`×`): the
 session and its transcript are kept, and it goes back among the ones that can be attached.
 
@@ -86,17 +96,24 @@ What keeps the number of processes down happens by itself, and neither thing los
   viewer left. A place is opened by looking at it, and without this a walk through the parts of an
   epic would leave a process at every stop. For the same reason a *new* session waits 0.6 s for the
   canvas to stop moving before it starts; an existing one is opened at once.
-- **A waiting session nobody is looking at has its process put away:** one that is on no screen and
-  whose program has printed nothing for thirty minutes (`KEHIKOT_CLAUDE_QUIET_MS` moves it). Claude
-  Code prints nothing while it waits at its prompt (measured: twenty minutes at the prompt of 2.1.296,
-  its last byte eleven seconds in) and draws a spinner and a clock while it works, so silence is what
-  "waiting" looks like from outside. The session is not ended — it is Claude Code's record,
-  and the next visit to the place resumes it by id, with no question and no message. Never one that is
-  on screen, and never one that is printing. One line in this server's log says when it happens.
+- **A finished session nobody is looking at has its process put away:** one that is on no screen, whose
+  turn is over, and that has been left alone for thirty minutes since (`KEHIKOT_CLAUDE_QUIET_MS` moves
+  it) — counted from the turn ending, the last thing a person typed into it, or the last person looking
+  away, whichever is latest. The session is not ended — it is Claude Code's record, and the next visit
+  to the place resumes it by id, with no question and no message. One line in this server's log says
+  when it happens.
+
+  **Never one that is working, and never one that is waiting for an answer** — not after an hour and
+  not after a day. And never one that is on screen.
 
   What does not come back with a resumed session is what lived only in the process: a line typed at
-  the prompt and not sent, a question the agent had been waiting half an hour for an answer to, and
-  anything the agent had left running in the background.
+  the prompt and not sent, and anything the agent had left running in the background after its turn
+  ended.
+
+  A session that has not said what it is doing — a copy of Claude Code too old to, or one whose
+  reports do not arrive — falls under the rule there was before: thirty minutes in which the program
+  prints nothing at all. That rule cannot tell a question on screen from a prompt, which is why it is
+  only the fallback.
 
 "Typed" means by a person. A program asks its terminal questions, and the emulator in the page
 answers them on the channel the keyboard uses: Claude Code is told what kind of terminal it is in a
@@ -104,12 +121,86 @@ third of a second after it starts, hears of the page giving its terminal the key
 asked for the pointer — of the mouse crossing it. None of that is typing (`input.ts` is the list), and
 all of it still reaches the program.
 
+### Working, needs you, finished
+
+Each running session is in one of three states, or in none:
+
+| | means | Claude Code said |
+|---|---|---|
+| `working` | a turn is under way | `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure`, `ElicitationResult` |
+| `needs-you` | it has stopped at a question and will not go on until it is answered | `PermissionRequest`, `Elicitation`, `StopFailure` |
+| `finished` | its turn is over and it is at its prompt | `Stop` |
+
+**Told, not read.** Claude Code runs a command of the caller's choosing when those things happen — its
+hooks. This module attaches them to the sessions it starts, and to nothing else, by adding one thing to
+the command line: `--settings '<json>'`, which hands Claude Code *additional* settings for that one
+process. Nothing is written into `~/.claude`, into the project, or anywhere: there is no file. The
+person's own hooks still run (checked on 2.1.296 with one of each on `Stop`: both ran).
+
+The command each hook runs is `/bin/sh '<this module>/tell.sh' <Event>`. `tell.sh` posts one request
+to this module's own server on loopback — the event's name and the session's id, with a secret in a
+header — and exits 0 whatever happens, within two seconds, printing nothing. It never reads what a
+hook is handed (the prompt, a tool's input, the last answer).
+
+- **The secret is per run**: minted when the pty is started and handed to it in the environment
+  (`KEHIKOT_TELL_SECRET`, with `KEHIKOT_TELL_PORT` and `KEHIKOT_TELL_SESSION`) — never on a command
+  line, never in a file. A report is believed only when it carries the secret of the session it names.
+- **What a project could do with it.** Everything Claude Code starts inherits that environment, so
+  the agent itself, and any hook a project ships, can read the secret. The most it is good for is
+  misstating the state of the one session it came from: a dot, a rationed handful of notices
+  about that session (four, then one every fifteen seconds), and its own process not being put away. It names no other session, opens no
+  other door (it is not the page's ticket), and nothing a report carries is stored, shown or logged —
+  only an event's name out of a fixed list is acted on. A project's settings can set variables for
+  the program, so `tell.sh` takes no address from the environment, only a port number, and speaks to
+  `127.0.0.1` and nowhere else, by `/usr/bin/curl` and through no proxy.
+- **A copy too old for `--settings`** is started with the two words it always was, and its sessions
+  have no state. Everything else works as before.
+
+Measured against the real 2.1.296, with a stand-in for the model API so that it could hold a whole
+conversation with nobody's account:
+
+- **What can be told apart:** a question Claude Code itself puts up — a permission dialog, the
+  question tool (which asks through the same dialog), an MCP server's form — from a turn that ended.
+  Each is reported the moment it is on screen.
+- **What cannot:** a question asked in prose. "Shall I go on?" as the last line of a turn is a turn
+  that ended, and is `finished` like any other.
+- **Nothing is reported when a question is answered**; the next report is the tool finishing, which
+  may be twenty minutes later. So a person typing into a session that was waiting for them is taken
+  as the answer, and it is `working` from then (a lone Esc is not: that dismisses the question).
+- **Nothing is reported when a turn is interrupted** with Esc — no `Stop`, and no idle notification
+  afterwards. A working session prints several times a second (2834 bytes in ten seconds mid-turn; the
+  same unfocused, and while a tool runs), so one called `working` that has printed nothing for two
+  minutes is called nothing again, and falls under the silence rule above.
+- A turn with **background work still running** when it ends is `finished`, and is put away with the
+  rest after thirty minutes on no screen.
+
+### Being told when you are not looking
+
+When a session that is on nobody's screen comes to need its person, or finishes, the host is handed
+one line for whatever on the canvas shows such lines — the protocol's `kehikot.notifications@1`, level
+`attention` or `done`:
+
+> Waiting for you: “tighten the methods…” — thesis · Methods · writing
+
+It says which of the two it is, the session by its first prompt, and the place in words: the epic,
+the picked parts by their headings, the kehikko by its name. Once per change, never for a session
+somebody has on screen, and nothing is drawn in this module about it. A change that happens while no
+page of this module is framed is held and said when one is, if it is still true.
+
+Pressing the line goes nowhere, and cannot from here: the format carries an epic and no place (no
+parts, no kehikko), a line on another module's panel is not this module's to make pressable, and the
+one way a module can ask a host to move (`view.goto`) moves to an epic and cannot pick parts or
+switch kehikko. A line filed under the session's epic is the most that exists.
+
 ### What it never does
 
 - It never sends a prompt. The person types.
 - It never passes a flag that widens what Claude may do. A new session is `claude --session-id <uuid>`
-  and a resumed one `claude --resume <uuid>`, in the project's folder, and that is the whole command.
+  and a resumed one `claude --resume <uuid>`, in the project's folder — followed, for a copy that can
+  take it, by `--settings` and the hooks above, which is the whole command. The settings hold hooks and
+  nothing else: nothing about permissions, models or tools.
 - It never reads or shows a transcript beyond the first line of the first prompt, used as a label.
+- It never reads the screen to decide anything, and never reads what a hook is handed.
 
 ## Where its data lives
 
@@ -236,7 +327,12 @@ itself honours) — the list of a project's sessions, their first prompt, and wh
 | `POST /api/rekey` | bring the entries an older release filed under a kehikko's row number across to its key. Ticketed; the only thing that migrates |
 | `POST /api/end` | end a running session, because a person chose that one. Ticketed |
 | `POST /api/detach` | take a session off a place. Ticketed |
-| `POST /mcp` | one tool, `sessions { projectPath, epic? }`: the places of a project and their sessions, `missing: true` on one that is not on this computer (`readOnlyHint: true`) |
+| `GET /api/feed` | server-sent events: each running session's state as it changes, and the notices for a framed page to pass on. Ticketed (in the query: an `EventSource` sends no header) |
+| `POST /api/state?event&session` | a session's own program saying what it is doing. Not the page's: it must carry that session's secret, reads no body, and answers 204 or one 403 that does not say why |
+| `POST /mcp` | one tool, `sessions { projectPath, epic? }`: the places of a project and their sessions, `missing: true` on one that is not on this computer, and `state` and `since` on a running one that has said what it is doing (`readOnlyHint: true`). The door asks to be registered as `kehikko-claude` (`mcp.as`) |
+
+An agent host that reads `mcp.as` (protocol 1.3.0) names the server `kehikko-claude`, so the tool is
+`mcp__kehikko-claude__sessions`; the id alone would have derived `claude`.
 
 There is no door that starts a session, types into one or installs anything, and no MCP tool that
 does. A session is started by the socket's first frame, from this module's own page.
@@ -279,8 +375,8 @@ things. The socket refuses the installer outright while a usable copy is install
 
 Everything that is specific to Claude Code is `program.ts`, one value of one interface: where the
 binary is, whether a copy is usable, the arguments that start and resume a session, whether a started
-session exists yet and under which id, which sessions the program holds for a folder, and how it is
-installed. A module for another agent is that file again plus a manifest.
+session exists yet and under which id, which sessions the program holds for a folder, how it is
+installed, and how it is made to say what it is doing and what each thing it says means. A module for another agent is that file again plus a manifest.
 
 ## Layout
 
@@ -290,7 +386,8 @@ installed. A module for another agent is that file again plus a manifest.
 | `record.ts` | `places.json`: read-modify-write with nothing awaited in between, the migration to keys, and the `.gitignore` beside it |
 | `program.ts` | the adapter: everything that knows it is Claude Code |
 | `input.ts` | which of what a page's emulator sends is a person typing, and which is the emulator answering the program. Pure; shared by the page and the server |
-| `live.ts` | the running sessions, the headless emulators, the socket and its fence, and the two things ended without anybody choosing |
+| `live.ts` | the running sessions and what each is doing, the headless emulators, the socket and its fence, the notices, and the two things ended without anybody choosing |
+| `tell.sh` | what a session's program runs to say what it is doing: one request to this server, and nothing else |
 | `doors.ts` | the HTTP doors and the MCP tool |
 | `src/view/places.ts` | what the page does when the canvas names a place. Pure |
 | `src/view/chooser.tsx` | the list |
@@ -300,15 +397,16 @@ installed. A module for another agent is that file again plus a manifest.
 ## Checks
 
 ```bash
-bun test                    # the key, the record, the adapter against a stand-in claude, the runs, the list, the page
+bun test                    # the key, the record, the adapter against a stand-in claude, the runs and their states, the report, the list, the page
 bun run typecheck
 bunx kehikot-check-parts .
 ```
 
 The tests give themselves a machine of their own (`test/setup.ts`): a scratch home, a scratch
 `CLAUDE_CONFIG_DIR`, a scratch registry and a bare PATH, so none of them can read real sessions, find
-a real binary or write a registration. `test/stand-in/claude` is a script that takes the two flags,
-echoes what is typed and keeps a record where Claude Code keeps one; `test/stand-in/install.sh` is the
+a real binary or write a registration. `test/stand-in/claude` is a script that takes the flags,
+echoes what is typed, keeps a record where Claude Code keeps one, and runs the hooks it is given in the
+order the real program was measured to (`/ask`, `/later`, `/work`, `/interrupt`, `/fail`); `test/stand-in/install.sh` is the
 installer's stand-in, named to a running server with `KEHIKOT_CLAUDE_INSTALL_LINE`. The pty itself is
 not under `bun test` — `node-pty` does not run under bun — and is verified in a browser.
 

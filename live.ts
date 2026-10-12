@@ -1,11 +1,13 @@
+import { randomBytes } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
+import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 
 import { mintTicket, sameTicket } from 'kehikot-module-protocol/serve'
 
 import { typedByPerson } from './input.ts'
 import { isKehikkoKey, placeKey, sortedParts, type Kehikko } from './place.ts'
-import { PROGRAM, home, type Program } from './program.ts'
+import { PROGRAM, home, type Program, type State } from './program.ts'
 import { attach, note, projectRoot, type NamedPlace } from './record.ts'
 
 /**
@@ -49,13 +51,48 @@ import { attach, note, projectRoot, type NamedPlace } from './record.ts'
  *  - what was never a session — opened by looking at a place, never typed
  *    into, never recorded — a moment after nobody is looking
  *    (`UNTOUCHED_GRACE`);
- *  - a session nobody is looking at whose program has printed nothing for a
- *    long time, which is one waiting at its prompt (`QUIET_REST`). It is a
- *    process put away, not a conversation: a session is resumable by id, and
- *    the next visit to its place starts the program again on the same one,
- *    without a question and without a message.
+ *  - a session nobody is looking at that has been done with its turn for a
+ *    long time (`QUIET_REST`). It is a process put away, not a conversation:
+ *    a session is resumable by id, and the next visit to its place starts
+ *    the program again on the same one, without a question and without a
+ *    message.
  *
- * Never one somebody has on screen, and never one that is printing.
+ * Never one somebody has on screen, never one that is working, and never one
+ * that is waiting for an answer.
+ *
+ * ## Told, not read
+ *
+ * Whether a session is working, waiting for the person or done with its turn
+ * is something the program SAYS (`reports` in program.ts): at each of those
+ * moments it runs `tell.sh`, which posts one word to this process over
+ * loopback. Nothing here reads a screen to guess at it.
+ *
+ * What stands behind that word:
+ *
+ *  - **A secret per run**, minted here when the pty is started and handed to
+ *    it in the environment — never on a command line, never in a file. A
+ *    report is taken only when it names a running session AND carries that
+ *    session's own secret. Everything the program starts inherits the
+ *    environment, so the agent in the pty and whatever a project's own hooks
+ *    run can read it: the most either can do with it is misstate the state of
+ *    the one session they are already inside. It cannot speak for another
+ *    session, and it opens no other door — it is not the page's ticket.
+ *  - **Only an event's name is heard.** A name this program does not use is
+ *    dropped. Nothing a report carries is stored, shown or logged, so a
+ *    report cannot put a sentence in front of a person.
+ *  - **A report cannot ask for anything.** The most a false one does is move
+ *    a dot, send one notice about its own session, or keep its own process
+ *    from being put away. Notices are rationed (`NOTICES_AT_ONCE`), so it cannot
+ *    fill a panel either.
+ *
+ * Two things the program does not report are covered from this side, and
+ * both are in `program.ts` at length: a person typing into a session that
+ * was waiting for them has answered it, and a session called working that
+ * has printed nothing for minutes is not (`STALE_WORK`).
+ *
+ * A program too old to report, or one whose reports never arrive, has no
+ * state. Everything else is as it was, including the rule that used to be
+ * the only one: put away after a long silence.
  *
  * When this process stops, its sessions stop with it — nothing is left
  * running with no owner — and that costs nothing lasting, for the same
@@ -104,30 +141,40 @@ const SETTLE_EVERY = 2_000
  */
 const UNTOUCHED_GRACE = 20_000
 /**
- * How long a session nobody is looking at may print nothing before its
- * process is put away.
+ * How long a session nobody is looking at is left before its process is put
+ * away — once it is done.
  *
  * Each running session is an agent holding a few hundred megabytes, and a
  * session keeps running when a person looks elsewhere, so one would
  * accumulate for every place ever worked in. The ones worth keeping are the
- * ones doing something, and the program says which those are by itself:
+ * ones in the middle of something, and which those are is no longer guessed
+ * at: the program says (see "Told, not read", and `rest` for the rule). A
+ * session that has FINISHED its turn, and has been left alone for this long
+ * since, is put away. One that is working, or waiting for an answer, never
+ * is.
+ *
+ * Half an hour, so that a person who stepped away from a place mid-thought
+ * comes back to the same process: to the line they had typed and not sent.
+ *
+ * ## When the program says nothing: silence, as before
+ *
+ * A copy too old to report, and a session whose reports do not arrive, are
+ * judged the way every session used to be — by how long the program has
+ * printed nothing:
  *
  *  - Waiting at its prompt, Claude Code prints NOTHING. Measured on 2.1.296:
  *    started in a pty, brought to its prompt, nothing typed, and every byte
  *    it printed in twenty minutes timed. There were 1133 of them, and the
  *    last came eleven seconds after it started.
  *  - Working, it draws a spinner and a running clock for as long as a turn
- *    or a tool lasts. That half is NOT measured here — it would have meant
- *    sending a prompt, which nothing in this module does, a test included —
- *    and it is why the time below is long instead of a minute.
+ *    or a tool lasts: several writes a second (the numbers are at
+ *    `STALE_WORK`, below).
  *
- * So silence is what "waiting" looks like from outside, and the question is
- * how long to be sure. Half an hour: far longer than the gap between two
- * frames of a spinner, and long enough that a person who stepped
- * away from a place mid-thought comes back to the same process. Counted from
- * the last byte the program printed, the last thing a person typed, or the
- * moment the last person looked away — whichever is latest — so a session
- * read for an hour and then left is given the whole time again.
+ * There the time is counted from the last byte the program printed, the last
+ * thing a person typed, or the moment the last person looked away —
+ * whichever is latest. It is the weaker rule and it is known to be: a
+ * question left on screen is as silent as a prompt, and under this rule is
+ * put away with it. That is what being told is for.
  *
  * What is put away is the process. The conversation is the program's record,
  * and the next visit to the place resumes it by id (`open`, below).
@@ -136,6 +183,49 @@ const UNTOUCHED_GRACE = 20_000
 export const QUIET_REST = Math.max(1_000, Math.trunc(Number(process.env.KEHIKOT_CLAUDE_QUIET_MS) || 30 * 60_000))
 /** How often the quiet ones are looked for. */
 const REST_EVERY = 60_000
+/**
+ * How long a session called `working` may print nothing before it is no
+ * longer called anything.
+ *
+ * Measured on 2.1.296, with a stand-in for the model so that a turn could be
+ * held open: mid-turn it printed 2834 bytes in 67 writes over ten seconds;
+ * the same with its terminal told it had lost focus (3070 in twelve); the
+ * same while a tool ran. And a turn interrupted with Esc reported nothing —
+ * no `Stop`, and no idle notification in the seventy-five seconds after — and
+ * printed nothing either. So two minutes of nothing at all from a session
+ * called working means the turn ended without a word, and "unknown" is the
+ * true thing to say. It then falls under the silence rule like any session
+ * with no state, which is where it would have been before states existed.
+ */
+const STALE_WORK = 2 * 60_000
+/**
+ * How many notices one session may raise in a row, and how long until it may
+ * raise one more. A session that finishes and, on the prompt queued behind
+ * it, stops to ask three seconds later has two things to say and says both;
+ * one reporting in a loop says four and then one every quarter of a minute.
+ */
+const NOTICES_AT_ONCE = 4
+const NOTICE_EVERY = 15_000
+/** How many notices are held for a page that is not there to take them. The oldest go. */
+const NOTICES_HELD = 32
+/**
+ * How long a page that has just arrived waits before it is handed what was
+ * held. A page begins following the moment it loads and puts its session on
+ * screen a moment after that; handed over at once, the first thing a person
+ * opening the app would be told is that the session in front of them has
+ * finished.
+ */
+const HELD_WAIT = 3_000
+/** The script a session's program runs to report (see "Told, not read"). */
+const TELL = join(import.meta.dirname, 'tell.sh')
+/** The environment a report is made from. Read by `tell.sh` and by nothing else. */
+export const TELL_ENV = { port: 'KEHIKOT_TELL_PORT', secret: 'KEHIKOT_TELL_SECRET', session: 'KEHIKOT_TELL_SESSION' } as const
+
+/** A word in single quotes for `/bin/sh`, whatever is in it. Used for one thing: this module's own path. */
+export const quoted = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`
+
+/** The line the program is to run for one event. The event is a name out of `program.ts`, never anything heard. */
+export const tellLine = (event: string, script: string = TELL): string => `/bin/sh ${quoted(script)} ${event}`
 /** A session that still has no first prompt after this many looks is not asked again until it ends. */
 const LABEL_TRIES = 8
 
@@ -221,21 +311,27 @@ function readKehikko(raw: unknown): Kehikko | null | undefined {
   return typeof said.id === 'number' && Number.isSafeInteger(said.id) ? { id: said.id } : undefined
 }
 
-/** A place off the wire, or null. Ids and the kehikko's key are checked; the kehikko's name is a label and only bounded. */
+/** A place off the wire, or null. Ids and the kehikko's key are checked; the names — the kehikko's, the parts' — are labels and only bounded. */
 export function readPlace(raw: unknown): NamedPlace | null {
   if (typeof raw !== 'object' || raw === null) return null
-  const said = raw as { epic?: unknown; parts?: unknown; kehikko?: unknown; kehikkoName?: unknown; kehikkoId?: unknown }
+  const said = raw as { epic?: unknown; parts?: unknown; kehikko?: unknown; kehikkoName?: unknown; kehikkoId?: unknown; partNames?: unknown }
   const epic = said.epic ?? null
   if (epic !== null && (typeof epic !== 'string' || !SLUG.test(epic))) return null
   const parts = said.parts ?? []
   if (!Array.isArray(parts) || parts.length > 200 || parts.some((one) => typeof one !== 'string' || !SLUG.test(one))) return null
   const kehikko = readKehikko(said.kehikko)
   if (kehikko === undefined) return null
+  const ids = sortedParts(parts as string[])
+  /* Names for the parts, by id: labels like the kehikko's, bounded and never compared. Given in
+     any order and for any subset; what comes out is in the order of `parts`. */
+  const names = typeof said.partNames === 'object' && said.partNames !== null && !Array.isArray(said.partNames) ? (said.partNames as Record<string, unknown>) : null
+  const partNames = names ? ids.map((id) => (Object.hasOwn(names, id) && typeof names[id] === 'string' ? (names[id] as string).slice(0, 120) : '')) : undefined
   return {
     epic,
-    parts: sortedParts(parts as string[]),
+    parts: ids,
     kehikko,
     kehikkoName: typeof said.kehikkoName === 'string' ? said.kehikkoName.slice(0, 120) : undefined,
+    ...(partNames?.some(Boolean) ? { partNames } : {}),
     /* The host's row number, carried only to be written beside a key as a note. */
     ...(kehikko && 'key' in kehikko && typeof said.kehikkoId === 'number' && Number.isSafeInteger(said.kehikkoId) ? { kehikkoId: said.kehikkoId } : {}),
   }
@@ -316,14 +412,28 @@ export interface Run {
   projectPath: string
   /** The place a new session is recorded for once it exists. */
   place: NamedPlace | null
+  /** The place it was last opened from, with the names a person knows it by. For a notice. */
+  at: NamedPlace | null
   key: string | null
   label: string
   /** How many times the program has been asked what this session is called. Bounded: some never have a first prompt. */
   asked: number
   /** Whether a person has typed anything into it. The emulator's own replies do not count (see `input.ts`). */
   touched: boolean
-  /** When the program last printed, a person last typed, or the last person looked away: what `QUIET_REST` counts from. */
+  /** When the program last printed, a person last typed, or the last person looked away: what `QUIET_REST` counts from when nothing is known. */
   stirredAt: number
+  /** When the program last printed anything. */
+  printedAt: number
+  /** When a person last typed into it or last looked away from it: what a finished session's rest is counted from. */
+  attendedAt: number
+  /** What the program last said it is doing, or null when it has said nothing that still holds. */
+  state: State | null
+  /** Since when. Meaningless while `state` is null. */
+  stateSince: number
+  /** What a report has to carry to be believed about this run. Null for one that was not asked to report. */
+  secret: string | null
+  /** How many notices it may still raise, and when that was last true (see `NOTICES_AT_ONCE`). */
+  notices: { left: number; at: number }
   /** Put away by `rest`, so that its viewers are told that and not that it ended. */
   rested: boolean
   /** The clock on an untouched, unrecorded run nobody is watching (see `UNTOUCHED_GRACE`). */
@@ -343,6 +453,43 @@ export interface Run {
 
 export type Refusal = { code: number; why: string }
 
+/**
+ * Something worth telling a person who is not looking: a session of theirs
+ * came to need them, or finished.
+ *
+ * It is raised here and said by a page, because only a page can speak to a
+ * host (the wire is `postMessage`), and it carries no sentence: the page
+ * writes one from these fields. What a person wrote — the session's label,
+ * the names of the place — is theirs; nothing in it came from a report.
+ */
+export interface Notice {
+  seq: number
+  session: string
+  state: 'needs-you' | 'finished'
+  label: string
+  projectPath: string
+  epic: string | null
+  /** The picked parts by what a person calls them, falling back to their ids. */
+  parts: string[]
+  kehikko: string
+  at: number
+}
+
+/** One session's state, as a feed says it. */
+export interface Stated {
+  session: string
+  state: State | null
+  since: number
+}
+
+/** Something following along: every change of state, and — when it asked for them — notices. */
+export interface Follower {
+  /** Whether this one can pass a notice on to a host. */
+  notices: boolean
+  state(stated: Stated): void
+  notice(notice: Notice): void
+}
+
 export interface RunsOptions {
   spawn: Spawn
   screen: (cols: number, rows: number) => Screen | Promise<Screen>
@@ -351,6 +498,12 @@ export interface RunsOptions {
   grace?: number
   /** How long a session nobody is looking at may print nothing before it is put away. */
   quiet?: number
+  /** How long a session called working may print nothing before it is called nothing. */
+  stale?: number
+  /** How long a page that has just arrived waits for what was held; 0 hands it over at once. */
+  heldWait?: number
+  /** The port a report is posted to: this server's own. Null (and before it is known) nothing is asked to report. */
+  port?: () => number | null
   /** How often the quiet ones are looked for; null for never, when a test calls `rest` itself. */
   every?: number | null
   now?: () => number
@@ -366,15 +519,27 @@ export class Runs {
   private readonly program: Program
   private readonly grace: number
   private readonly quiet: number
+  private readonly stale: number
+  private readonly heldWait: number
   private readonly now: () => number
   private readonly log: (line: string) => void
   /** Opens in flight, by id, so two viewers arriving together get one run and not two. */
   private readonly starting = new Map<string, Promise<Run | Refusal>>()
+  /** Pages following along (see `subscribe`). */
+  private readonly followers = new Set<Follower>()
+  /** Notices no page was there to take, oldest first. */
+  private readonly held: Notice[] = []
+  private noticed = 0
+  /** Where reports are posted. Set by whoever knows the port this server bound. */
+  port: () => number | null
 
   constructor(private readonly options: RunsOptions) {
     this.program = options.program ?? PROGRAM
     this.grace = options.grace ?? UNTOUCHED_GRACE
     this.quiet = options.quiet ?? QUIET_REST
+    this.stale = options.stale ?? STALE_WORK
+    this.heldWait = options.heldWait ?? HELD_WAIT
+    this.port = options.port ?? (() => null)
     this.now = options.now ?? Date.now
     this.log = options.log ?? (() => {})
     const every = options.every === undefined ? Math.min(REST_EVERY, this.quiet) : options.every
@@ -444,7 +609,13 @@ export class Runs {
     }
     /* And nothing about how many are running: see "There is no limit" at the top. */
 
-    const args = settled ? this.program.resume(settled) : this.program.fresh(id)
+    /* Asked to report only when this copy can take the asking and there is
+       somewhere to report to. Otherwise the command is the two words it
+       always was, and the session has no state. */
+    const port = this.port()
+    const tells = port !== null && (await this.program.supports(found.file)).tells
+    const secret = tells ? randomBytes(24).toString('hex') : null
+    const args = [...(settled ? this.program.resume(settled) : this.program.fresh(id)), ...(tells ? this.program.reports(tellLine) : [])]
     let pty: Pty
     let screen: Screen
     try {
@@ -453,7 +624,13 @@ export class Runs {
         cwd: projectPath,
         cols: asked.cols,
         rows: asked.rows,
-        env: { ...this.program.environment(), TERM },
+        env: {
+          ...this.program.environment(),
+          TERM,
+          /* The secret travels here and nowhere else: not in `args`, which any
+             process on the machine can list, and not in a file. */
+          ...(secret ? { [TELL_ENV.port]: String(port), [TELL_ENV.secret]: secret, [TELL_ENV.session]: settled ?? id } : {}),
+        },
       })
     } catch (error) {
       const why = error instanceof Error ? error.message : String(error)
@@ -467,11 +644,18 @@ export class Runs {
       settled,
       projectPath,
       place: asked.place,
+      at: asked.place,
       key: placeKey(asked.place),
       label: '',
       asked: 0,
       touched: false,
       stirredAt: this.now(),
+      printedAt: this.now(),
+      attendedAt: this.now(),
+      state: null,
+      stateSince: this.now(),
+      secret,
+      notices: { left: NOTICES_AT_ONCE, at: this.now() },
       rested: false,
       idle: null,
       startedAt: this.now(),
@@ -482,7 +666,7 @@ export class Runs {
       ended: false,
     }
     this.runs.set(id, run)
-    this.log(`claude: ${found.file} ${args.join(' ')} in ${projectPath} (pid ${pty.pid})`)
+    this.log(`claude: ${found.file} ${args.slice(0, 2).join(' ')}${tells ? ', asked to report' : ''} in ${projectPath} (pid ${pty.pid})`)
     if (settled) this.remember(run, asked.place)
     this.follow(run)
     return run
@@ -493,6 +677,7 @@ export class Runs {
    * One that does not yet is recorded by `settle` when it does.
    */
   private remember(run: Run, place: NamedPlace): void {
+    run.at = place
     if (!run.settled) return
     const written = attach(run.projectPath, place, run.settled, { label: run.label, lastActive: this.now() })
     if (!written.ok) this.log(`claude: ${written.error}`)
@@ -502,6 +687,7 @@ export class Runs {
     let asked = 0
     run.pty.onData((chunk) => {
       run.stirredAt = this.now()
+      run.printedAt = run.stirredAt
       run.screen.write(chunk)
       for (const viewer of run.viewers) viewer.output(chunk)
       /* A new session exists once the program has written its record, which
@@ -516,6 +702,11 @@ export class Runs {
       run.ended = true
       if (run.idle) clearTimeout(run.idle)
       this.runs.delete(run.id)
+      /* Gone: no state to show for it, and nothing held about it is still true. */
+      if (run.what === 'session') {
+        run.state = null
+        this.tell(run)
+      }
       void this.finish(run, exitCode)
     })
   }
@@ -575,7 +766,14 @@ export class Runs {
   attach(run: Run, viewer: Viewer, cols: number, rows: number, how: 'new' | 'resumed' | 'attached' | 'install'): void {
     if (run.idle) clearTimeout(run.idle)
     run.idle = null
-    viewer.say({ opened: how, session: run.what === 'session' ? (run.settled ?? run.id) : null, label: run.label, exists: Boolean(run.settled) })
+    viewer.say({
+      opened: how,
+      session: run.what === 'session' ? (run.settled ?? run.id) : null,
+      label: run.label,
+      exists: Boolean(run.settled),
+      state: run.state,
+      since: run.stateSince,
+    })
     /* On screen until the page says otherwise: a view connects when it is shown. */
     run.looking.add(viewer)
     run.screen.write('', () => {
@@ -597,27 +795,152 @@ export class Runs {
       run.looking.add(viewer)
       return
     }
-    if (run.looking.delete(viewer) && run.looking.size === 0) run.stirredAt = this.now()
+    if (run.looking.delete(viewer) && run.looking.size === 0) this.left(run)
+  }
+
+  /** The last person looking at it looked away. */
+  private left(run: Run): void {
+    run.stirredAt = this.now()
+    run.attendedAt = run.stirredAt
   }
 
   /**
-   * Put away the sessions that are waiting and that nobody is looking at
+   * The program in a session reported something (see "Told, not read").
+   *
+   * `session` is the id the pty was started on and `secret` what the report
+   * carried. False for anything that is not a running session's own report;
+   * the caller answers every such thing the same way, so that what is running
+   * cannot be learned by asking.
+   */
+  heard(session: string, secret: string | null, event: string): boolean {
+    const run = this.runs.get(session)
+    if (!run || run.what !== 'session' || run.ended || !run.secret || !sameTicket(secret, run.secret)) return false
+    const state = this.program.signal(event)
+    if (state) this.become(run, state)
+    return true
+  }
+
+  /**
+   * A session's state changed. Said to everything following, and — when it
+   * came to need the person or finished while nobody had it on screen —
+   * raised as a notice, once.
+   *
+   * "Once" is per change: a second report of the same state is not a change.
+   * Nothing is raised about a session somebody is looking at — they saw it —
+   * and a session that has spent its ration (`NOTICES_AT_ONCE`) waits.
+   */
+  private become(run: Run, state: State | null): void {
+    if (run.state === state) return
+    run.state = state
+    run.stateSince = this.now()
+    this.tell(run)
+    if (state !== 'needs-you' && state !== 'finished') return
+    if (run.looking.size > 0) return
+    const ration = run.notices
+    ration.left = Math.min(NOTICES_AT_ONCE, ration.left + (this.now() - ration.at) / NOTICE_EVERY)
+    ration.at = this.now()
+    if (ration.left < 1) return
+    ration.left -= 1
+    const at = run.at
+    this.noticed += 1
+    this.raise({
+      seq: this.noticed,
+      session: run.settled ?? run.id,
+      state,
+      label: run.label,
+      projectPath: run.projectPath,
+      epic: at?.epic ?? null,
+      parts: (at?.parts ?? []).map((id, index) => at?.partNames?.[index] || id),
+      kehikko: at?.kehikkoName ?? '',
+      at: this.now(),
+    })
+  }
+
+  /** Say a session's state to its viewers and to every page following. */
+  private tell(run: Run): void {
+    const stated: Stated = { session: run.settled ?? run.id, state: run.state, since: run.stateSince }
+    for (const viewer of run.viewers) viewer.say({ ...stated })
+    for (const follower of this.followers) follower.state(stated)
+  }
+
+  /**
+   * Hand a notice to ONE page that can pass it on — the one that began
+   * following last — or hold it for the next that arrives. One, because every
+   * page of this module could say it and a person should be told once.
+   */
+  private raise(notice: Notice): void {
+    const taker = [...this.followers].reverse().find((one) => one.notices)
+    if (taker) return taker.notice(notice)
+    this.held.push(notice)
+    if (this.held.length > NOTICES_HELD) this.held.shift()
+  }
+
+  /**
+   * Follow along: told every change of state from now on, and — a moment
+   * later (`HELD_WAIT`) — handed the notices nobody was there for: those
+   * that are still true then, which is to say the session is still in that
+   * state and still on nobody's screen. Returns the function that stops
+   * following.
+   */
+  subscribe(follower: Follower): () => void {
+    this.followers.add(follower)
+    for (const run of this.sessions()) {
+      if (run.state) follower.state({ session: run.settled ?? run.id, state: run.state, since: run.stateSince })
+    }
+    const hand = () => {
+      if (!this.followers.has(follower)) return
+      for (const notice of this.held.splice(0)) {
+        const run = this.find(notice.session)
+        if (run && run.state === notice.state && run.looking.size === 0) follower.notice(notice)
+      }
+    }
+    if (follower.notices && this.held.length) {
+      if (this.heldWait > 0) setTimeout(hand, this.heldWait).unref?.()
+      else hand()
+    }
+    return () => void this.followers.delete(follower)
+  }
+
+  /**
+   * Put away the sessions that are done and that nobody is looking at
    * (see `QUIET_REST`). Called on a clock; returns the ones it ended.
    *
-   * Never one somebody has on screen, never one that has printed inside the
-   * time, and never the installer. Nothing is recorded and nothing is said to
-   * a person: a viewer still following from behind another view is told
-   * `rested` and lets go, and the place resumes the session when it is next
-   * opened.
+   * What decides is what the session's program has said it is doing:
+   *
+   *  - `working`, `needs-you`: never. Not after an hour and not after a day.
+   *    One is an agent mid-task; the other holds a question whose answer
+   *    exists nowhere but in that process.
+   *  - `finished`: once it has been finished, and left alone, for the whole
+   *    time. Counted from the turn ending, the last thing a person typed, or
+   *    the last person looking away, whichever is latest. What it prints at
+   *    its prompt does not start the clock again.
+   *  - nothing known — a copy too old to report, or one whose reports do not
+   *    arrive: the rule there was before, silence for the whole time.
+   *
+   * Never one somebody has on screen, and never the installer. Nothing is
+   * recorded and nothing is said to a person: a viewer still following from
+   * behind another view is told `rested` and lets go, and the place resumes
+   * the session when it is next opened.
+   *
+   * This is also where a `working` that has outlived its evidence is taken
+   * back (see `STALE_WORK`).
    */
   rest(): Run[] {
     const put: Run[] = []
     for (const run of this.runs.values()) {
-      if (run.what !== 'session' || run.ended || run.rested || run.looking.size > 0) continue
-      const quietFor = this.now() - run.stirredAt
+      if (run.what !== 'session' || run.ended || run.rested) continue
+      if (run.state === 'working' && this.now() - run.printedAt >= this.stale) {
+        this.log(`claude: ${run.settled ?? run.id} was working and has printed nothing for ${Math.round((this.now() - run.printedAt) / 60_000)} min — its state is no longer known`)
+        this.become(run, null)
+      }
+      if (run.looking.size > 0 || run.state === 'working' || run.state === 'needs-you') continue
+      const finished = run.state === 'finished'
+      const quietFor = this.now() - (finished ? Math.max(run.stateSince, run.attendedAt) : run.stirredAt)
       if (quietFor < this.quiet) continue
       run.rested = true
-      this.log(`claude: put away ${run.settled ?? run.id}, which nobody was looking at and which had printed nothing for ${Math.round(quietFor / 60_000)} min — its place resumes it`)
+      this.log(
+        `claude: put away ${run.settled ?? run.id}, which nobody was looking at and which had ${finished ? 'been finished' : 'printed nothing'} for ${Math.round(quietFor / 60_000)} min — its place resumes it`,
+      )
       kill(run.pty)
       put.push(run)
     }
@@ -626,7 +949,7 @@ export class Runs {
 
   detach(run: Run, viewer: Viewer): void {
     run.viewers.delete(viewer)
-    if (run.looking.delete(viewer) && run.looking.size === 0) run.stirredAt = this.now()
+    if (run.looking.delete(viewer) && run.looking.size === 0) this.left(run)
     if (run.what !== 'session' || run.ended || run.viewers.size > 0 || run.touched || run.settled || run.idle) return
     run.idle = setTimeout(() => {
       run.idle = null
@@ -663,6 +986,13 @@ export class Runs {
     if (typedByPerson(data)) {
       run.touched = true
       run.stirredAt = this.now()
+      run.attendedAt = run.stirredAt
+      /* The program reports a question being asked and never one being
+         answered (program.ts). A person typing into a session that was
+         waiting for them is that answer. A lone Esc is the exception: it
+         dismisses the question without answering it, and the session still
+         needs them. */
+      if (run.state === 'needs-you' && data !== '\x1b') this.become(run, 'working')
     }
     run.pty.write(data)
   }
@@ -707,11 +1037,18 @@ export class Runs {
       settled: null,
       projectPath: '',
       place: null,
+      at: null,
       key: null,
       label: '',
       asked: 0,
       touched: false,
       stirredAt: this.now(),
+      printedAt: this.now(),
+      attendedAt: this.now(),
+      state: null,
+      stateSince: this.now(),
+      secret: null,
+      notices: { left: NOTICES_AT_ONCE, at: this.now() },
       rested: false,
       idle: null,
       startedAt: this.now(),
@@ -833,6 +1170,8 @@ export const SOCKET = '/session'
  */
 export function serveSessions(server: Upgradable, port: number, log: (line: string) => void): void {
   const runs = theRuns(log)
+  /* Where a session's program reports to: this server, on the port it really bound. */
+  runs.port = () => port
   void (async () => {
     const { WebSocketServer } = await import('ws')
     const sockets = new WebSocketServer({ noServer: true })

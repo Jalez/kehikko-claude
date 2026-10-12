@@ -179,3 +179,43 @@ describe('never in the way', () => {
     expect(opened).toEqual([])
   })
 })
+
+describe('what a running session is doing, in the list', () => {
+  const doing = (state: Row['state'], since = NOW - 5 * 60_000) =>
+    drawn({ listing: listing({ sessions: [row('a', { label: 'one', running: true, state, since }), row('b', { label: 'two', running: true }), row('c', { label: 'three' })] }) })
+
+  test('is said where "running" was: a glyph of its own shape, the word, and since when as the title', () => {
+    for (const [state, glyph, word] of [
+      ['working', '●', 'working'],
+      ['needs-you', '◆', 'needs you'],
+      ['finished', '○', 'finished'],
+    ] as const) {
+      const { list } = doing(state)
+      const mark = list.querySelector('[data-session="a"] [data-state]') as HTMLElement
+      expect(mark.getAttribute('data-state')).toBe(state)
+      expect(mark.textContent).toBe(`${glyph}${word}`)
+      expect(mark.getAttribute('title')).toBe(`${word} · 5 min ago`)
+      /* In place of the word, not beside it. */
+      expect(list.querySelector('[data-session="a"]')?.textContent).not.toContain('running')
+      cleanup()
+    }
+  })
+
+  test('one that has not said still says running, and one that is not running says nothing', () => {
+    const { list } = doing('working')
+    expect(list.querySelector('[data-session="b"] [data-state]')).toBeNull()
+    expect(list.querySelector('[data-session="b"]')?.textContent).toContain('running')
+    expect(list.querySelector('[data-session="c"] [data-state]')).toBeNull()
+    expect(list.querySelector('[data-session="c"]')?.textContent).not.toContain('running')
+  })
+
+  test('adds no row and no line: the same rows, each still one line', () => {
+    const plain = drawn({ listing: listing({ sessions: [row('a', { label: 'one', running: true }), row('b', { label: 'two', running: true })] }) })
+    const before = plain.list.querySelectorAll('[data-row]').length
+    const children = plain.list.children.length
+    cleanup()
+    const marked = drawn({ listing: listing({ sessions: [row('a', { label: 'one', running: true, state: 'needs-you', since: NOW }), row('b', { label: 'two', running: true, state: 'finished', since: NOW })] }) })
+    expect(marked.list.querySelectorAll('[data-row]').length).toBe(before)
+    expect(marked.list.children.length).toBe(children)
+  })
+})

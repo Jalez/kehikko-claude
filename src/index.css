@@ -11,6 +11,8 @@
   --radius: 0.5rem;
   /* The dot beside a session that is running now. The word is always there too. */
   --running: oklch(0.63 0.15 150);
+  /* The mark on a session that has stopped to wait for its person. Its shape and its word differ too. */
+  --needs-you: oklch(0.6 0.16 62);
   --background: oklch(1 0 0);
   --foreground: oklch(0.2 0 0);
   --card: oklch(0.98 0 0);
@@ -49,6 +51,7 @@
     --accent: oklch(0.26 0 0);
     --accent-foreground: oklch(0.92 0 0);
     --destructive: oklch(0.66 0.16 27);
+    --needs-you: oklch(0.8 0.15 78);
     --border: oklch(0.26 0 0);
     --input: oklch(0.28 0 0);
     --ring: oklch(0.5 0 0);
@@ -71,6 +74,7 @@
   --accent: oklch(0.26 0 0);
   --accent-foreground: oklch(0.92 0 0);
   --destructive: oklch(0.66 0.16 27);
+  --needs-you: oklch(0.8 0.15 78);
   --border: oklch(0.26 0 0);
   --input: oklch(0.28 0 0);
   --ring: oklch(0.5 0 0);
@@ -78,6 +82,7 @@
 
 @theme inline {
   --color-running: var(--running);
+  --color-needs-you: var(--needs-you);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);

@@ -5,11 +5,11 @@ import { join } from 'node:path'
 
 import { WELL_KNOWN } from 'kehikot-module-protocol'
 
-import { MANIFEST, TICKET, answer, listing, lookedIn, type Listing } from '../doors.ts'
-import { Runs, headless } from '../live.ts'
+import { MANIFEST, TICKET, answer, listing, lookedIn, stream, type Listing } from '../doors.ts'
+import { Runs, TELL_ENV, headless, theRuns, type Notice, type Pty, type Run, type Stated } from '../live.ts'
 import { ID } from '../manifest.ts'
 import { placeKey } from '../place.ts'
-import { recordDirs } from '../program.ts'
+import { PROGRAM, recordDirs } from '../program.ts'
 import { attach, readPlaces } from '../record.ts'
 
 const project = realpathSync(mkdtempSync(join(tmpdir(), 'kehikko-claude-doors-')))
@@ -208,5 +208,126 @@ describe('the MCP door', () => {
     for (const name of ['start', 'open', 'type', 'install', 'end']) {
       expect((await rpc('tools/call', { name, arguments: { projectPath: project } })).result?.isError).toBe(true)
     }
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * What a session is doing: the door its program reports to, and where it is read
+ * ------------------------------------------------------------------ */
+
+describe('a session’s own report, and where its state is read', () => {
+  /* This process's one set of runs, as the doors find it, with a pty that is not one. */
+  const env: NodeJS.ProcessEnv[] = []
+  const pty = (): Pty => ({ pid: 0, write() {}, resize() {}, kill() {}, onData() {}, onExit() {} })
+  const held = globalThis as Record<symbol, unknown>
+  const HELD = Symbol.for('kehikot.claude.runs')
+  const was = held[HELD]
+  const D = '55555555-5555-4555-8555-555555555555'
+  const live = new Runs({
+    program: { ...PROGRAM, find: () => ({ file: '/fake/claude', looked: [], usual: [] }), supports: async () => ({ ok: true, missing: null, tells: true }), newId: () => D },
+    every: null,
+    port: () => 9590,
+    screen: headless,
+    spawn: (_file, _args, options) => {
+      env.push(options.env)
+      return pty()
+    },
+  })
+  held[HELD] = live
+  afterAll(() => {
+    held[HELD] = was
+  })
+  const state = (session: string, event: string, ticket: string | null, method = 'POST') => answer(method, '/api/state', new URLSearchParams({ session, event }), null, ticket)
+  const viewer = { output() {}, say() {}, close() {} }
+  let run: Run
+  let secret = ''
+
+  test('the doors find this process’s runs', async () => {
+    expect(theRuns()).toBe(live)
+    run = (await live.open({ what: 'session', projectPath: project, place: METHODS, session: null, cols: 80, rows: 24 }, viewer)) as Run
+    secret = String(env[0]![TELL_ENV.secret])
+    expect(run.id).toBe(D)
+  })
+
+  test('is taken with that session’s secret and answered with nothing', async () => {
+    const reply = await state(D, 'UserPromptSubmit', secret)
+    expect(reply).toEqual({ status: 204, body: null })
+    expect(run.state).toBe('working')
+  })
+
+  test('is refused in one sentence for every other reason, and the sentence does not say which', async () => {
+    const refusals = [
+      await state(D, 'Stop', null),
+      await state(D, 'Stop', ''),
+      await state(D, 'Stop', 'wrong'),
+      /* The page's own ticket opens every other door here, and not this one. */
+      await state(D, 'Stop', TICKET),
+      await state(A, 'Stop', secret),
+      await state('', 'Stop', secret),
+      await state('__proto__', 'Stop', secret),
+    ]
+    expect(new Set(refusals.map((one) => JSON.stringify(one))).size).toBe(1)
+    expect(refusals[0]?.status).toBe(403)
+    expect(run.state).toBe('working')
+    expect((await state(D, 'Stop', secret, 'GET'))?.status).toBe(405)
+    expect(run.state).toBe('working')
+  })
+
+  test('the secret opens no other door', async () => {
+    const query = new URLSearchParams({ projectPath: project, key: placeKey(METHODS) })
+    expect((await answer('GET', '/api/place', query, null, secret))?.status).toBe(403)
+    expect((await answer('POST', '/api/end', none, { session: D }, secret))?.status).toBe(403)
+  })
+
+  test('nothing a report carries is kept: a body is not read and a strange event changes nothing', async () => {
+    const reply = await answer('POST', '/api/state', new URLSearchParams({ session: D, event: 'Stop<script>' }), { message: 'Finished: something a person never wrote' }, secret)
+    expect(reply?.status).toBe(204)
+    expect(run.state).toBe('working')
+    expect(JSON.stringify(live.sessions().map((one) => [one.label, one.state]))).not.toContain('never wrote')
+  })
+
+  test('the list a page reads says what each running session is doing, and since when', async () => {
+    await state(D, 'PermissionRequest', secret)
+    const said = (await listing(project, placeKey(METHODS), live)) as Listing
+    expect(said.sessions.find((one) => one.id === D)).toMatchObject({ running: true, state: 'needs-you', since: run.stateSince })
+    expect(said.running.find((one) => one.id === D)).toMatchObject({ state: 'needs-you', since: run.stateSince })
+    /* One that is not running says nothing about a state. */
+    expect(said.others.every((one) => !('state' in one))).toBe(true)
+  })
+
+  test('the MCP tool says it too, for a session that is recorded', async () => {
+    recorded(D, 'the one that is running')
+    await live.settle(run)
+    await state(D, 'Stop', secret)
+    const called = await rpc('tools/call', { name: 'sessions', arguments: { projectPath: project } })
+    const places = JSON.parse(called.result?.content?.[0]?.text ?? '[]') as { place: string; sessions: { id: string; running: boolean; state?: string; since?: string }[] }[]
+    const row = places.flatMap((one) => one.sessions).find((one) => one.id === D)
+    expect(row).toMatchObject({ running: true, state: 'finished', since: new Date(run.stateSince).toISOString() })
+    expect(places.flatMap((one) => one.sessions).filter((one) => one.id !== D).every((one) => !('state' in one))).toBe(true)
+    const tools = (await rpc('tools/list')).result?.tools as { description?: string }[]
+    expect(tools[0]?.description).toContain('needs-you')
+  })
+
+  test('the feed is ticketed like the read beside it, and says each change and each notice', async () => {
+    const events: [unknown, string | undefined][] = []
+    const emit = (event: unknown, name?: string) => void events.push([event, name])
+    expect(stream('GET', '/api/place', none, emit, TICKET)).toBeNull()
+    expect(stream('GET', '/api/feed', none, emit, null)).toMatchObject({ reply: { status: 403 } })
+    expect(stream('GET', '/api/feed', new URLSearchParams({ ticket: secret }), emit, null)).toMatchObject({ reply: { status: 403 } })
+    expect(stream('POST', '/api/feed', new URLSearchParams({ ticket: TICKET }), emit, null)).toMatchObject({ reply: { status: 405 } })
+    expect(events).toEqual([])
+
+    const opened = stream('GET', '/api/feed', new URLSearchParams({ ticket: TICKET, notices: '1' }), emit, null) as { close: () => void }
+    /* What is running now, at once. */
+    expect(events).toEqual([[{ session: D, state: 'finished', since: run.stateSince } satisfies Stated, undefined]])
+    live.look(run, viewer, false)
+    await state(D, 'UserPromptSubmit', secret)
+    await state(D, 'PermissionRequest', secret)
+    expect(events.map(([event, name]) => [name, (event as Stated).state])).toEqual([[undefined, 'finished'], [undefined, 'working'], [undefined, 'needs-you'], ['notice', 'needs-you']])
+    const notice = events.at(-1)![0] as Notice
+    expect(notice).toMatchObject({ session: D, label: 'the one that is running', epic: 'thesis', parts: ['methods'], kehikko: 'writing' })
+    opened.close()
+    await state(D, 'PostToolUse', secret)
+    expect(events.length).toBe(4)
   })
 })
