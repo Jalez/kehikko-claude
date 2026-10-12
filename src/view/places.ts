@@ -1,0 +1,136 @@
+import type { Listing, Row } from '../../doors.ts'
+import { placeKey, type Place } from '../../place.ts'
+
+/**
+ * What the page does when the canvas names a place, decided from what the
+ * server says is there.
+ *
+ * ## The rule that was asked for
+ *
+ * "It should be the same session associated with this specific epic > parts >
+ * kehikko, and if there are more than one session associated with it, then it
+ * asks which one to open before it opens it."
+ *
+ *   - none recorded → a new session, at once;
+ *   - exactly one → that one, at once;
+ *   - more than one → ask, and open nothing until the person has chosen.
+ *
+ * Nothing is remembered as a default. The one thing that is remembered is
+ * narrower and is not a default: which session THIS PAGE was showing for a
+ * place, for as long as the page's tab lives (`held`, in `app.tsx`). A page
+ * that reloads — which the plumbing does by itself when its server restarts —
+ * comes back to what was on screen instead of asking a question the person
+ * answered a minute ago. A page opened afresh asks.
+ *
+ * ## Why this file holds no socket, no emulator and no React
+ *
+ * As in Terminal's `sessions.ts`: everything here is a pure function of what
+ * was said and what is held, so the tests can say "two sessions, so it asks"
+ * without a browser or a pty in the room.
+ */
+
+export type Step =
+  /** The program is missing, or too old: one sentence and one press. */
+  | { do: 'install'; update: boolean }
+  /** Open this session; null is a new one. */
+  | { do: 'open'; session: string | null }
+  /** More than one belongs here: ask. */
+  | { do: 'choose' }
+
+/**
+ * `showing` is the session this page was showing for the place, if it was
+ * showing one. It is honoured only while it is still one of the place's
+ * sessions: one that was taken off the place in another container is not
+ * reopened on the strength of a memory.
+ */
+export function decide(listing: Listing, showing: string | null = null): Step {
+  if (!listing.program.found) return { do: 'install', update: false }
+  if (listing.program.lacks) return { do: 'install', update: true }
+  if (showing && listing.sessions.some((one) => one.id === showing)) return { do: 'open', session: showing }
+  if (listing.sessions.length === 0) return { do: 'open', session: null }
+  if (listing.sessions.length === 1) return { do: 'open', session: listing.sessions[0]!.id }
+  return { do: 'choose' }
+}
+
+/** A place as the page holds it: the project's folder with the key inside it. */
+export interface Standing extends Place {
+  projectPath: string
+  kehikkoName: string
+  key: string
+}
+
+/**
+ * What the host said, as a place — or null when there is nothing to open:
+ * the page has not been greeted, nothing is framing it, or no project is
+ * open. A session with no project is a session in no folder, which nobody
+ * asked for; Terminal falls back to a home shell there and this does not.
+ */
+export function standing(host: {
+  where: 'listening' | 'unhosted' | 'hosted'
+  projectPath: string | null
+  epic: string | null
+  parts: readonly { id: string; picked: boolean }[]
+  kehikko: { id: number; name: string } | null
+}): Standing | null {
+  if (host.where !== 'hosted' || !host.projectPath) return null
+  const place: Place = {
+    epic: host.epic,
+    parts: host.parts.filter((part) => part.picked).map((part) => part.id).sort(),
+    kehikko: host.kehikko?.id ?? null,
+  }
+  return { ...place, projectPath: host.projectPath, kehikkoName: host.kehikko?.name ?? '', key: placeKey(place) }
+}
+
+/** One string for a place across projects: what a view is filed under. */
+export const placeId = (at: { projectPath: string; key: string }): string => `${at.projectPath}\n${at.key}`
+
+/** How many terminal views the page keeps mounted. A view let go is only a viewer: its session runs on. */
+export const MOST_VIEWS = 8
+
+export interface View {
+  /** This page's own number for it; a fresh one makes a fresh emulator and a fresh socket. */
+  n: number
+  at: Standing
+  /** The session it is on. Null until the server has said which id a new one got. */
+  session: string | null
+  shownAt: number
+}
+
+/** The views to let go of, least recently shown first, never the one on screen. */
+export function surplus(views: readonly View[], shown: number | null, most = MOST_VIEWS): View[] {
+  const others = views.filter((view) => view.n !== shown).sort((a, b) => a.shownAt - b.shownAt)
+  return others.slice(0, Math.max(0, views.length - most))
+}
+
+/** What a session is called where there is room for a few words. */
+export function named(row: Pick<Row, 'label'> | null | undefined): string {
+  return row?.label || 'No prompt yet'
+}
+
+/** The same, for the corner of the terminal: short enough to cost nothing. */
+export function brief(label: string, most = 28): string {
+  const text = label || 'New session'
+  return text.length > most ? `${text.slice(0, most - 1).trimEnd()}…` : text
+}
+
+/** When something last happened, in the fewest words that are still true. */
+export function ago(at: number | null, now: number): string {
+  if (at === null) return ''
+  const seconds = Math.max(0, Math.round((now - at) / 1000))
+  if (seconds < 60) return 'just now'
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes} min ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours} h ago`
+  const days = Math.round(hours / 24)
+  if (days < 30) return `${days} d ago`
+  return new Date(at).toISOString().slice(0, 10)
+}
+
+/** Where the program was looked for, short enough for one sentence: PATH as one word, then the usual places. */
+export function lookedIn(looked: readonly string[], home = ''): string {
+  const usual = looked.filter((dir) => /(?:\.local\/bin|\.claude\/local|homebrew\/bin|^\/usr\/local\/bin)$/.test(dir))
+  const tidy = (dir: string) => (home && dir.startsWith(`${home}/`) ? `~${dir.slice(home.length)}` : dir.replace(/^\/Users\/[^/]+\//, '~/'))
+  const places = usual.slice(0, 3).map(tidy)
+  return ['PATH', ...places].join(', ')
+}

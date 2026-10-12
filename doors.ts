@@ -1,0 +1,288 @@
+import { establishBuild, refuseTicket, type Reply } from 'kehikot-module-protocol/serve'
+
+import { MOST_RUNNING, TICKET, theRuns, type Runs } from './live.ts'
+import { ID, MANIFEST, VERSION } from './manifest.ts'
+import { readPlaceKey } from './place.ts'
+import { PROGRAM, type Program } from './program.ts'
+import { WHERE, detach, projectRoot, readPlaces, sessionsAt } from './record.ts'
+
+/**
+ * The HTTP doors, as one function: `answer` takes a request and returns a
+ * status and a body, or `null` for "not ours, let Vite have it". `doors()` in
+ * vite.config.ts is the only thing that touches a socket, which is what lets
+ * the tests call this directly.
+ *
+ * Almost everything this module does happens on the socket in `live.ts`.
+ * What is here is what the page needs to know BEFORE it opens one — which
+ * sessions this place has, whether the program is installed — and the two
+ * things a person can do to a session that are not typing into it.
+ *
+ * ## Reads carry the ticket too
+ *
+ * `GET /api/place` says what somebody has been working on: the first line of
+ * each session's first prompt, and when. Terminal deleted the one door it had
+ * like that (`/api/chats`) and was right to. This one is needed — it is the
+ * list the person chooses from — so it is fenced the way a write is: the
+ * ticket this process printed into its own page. The MCP door says the same
+ * things to an agent without one, because an agent has no page to have been
+ * handed a ticket by; what fences that is what fences every module's MCP
+ * door, the loopback bind and the absence of any CORS header.
+ *
+ * ## Nothing here starts anything
+ *
+ * A session is started by the socket's first frame, from the page, and the
+ * installer by a press in the page. No door below runs a program, and the MCP
+ * door has one tool, which reads.
+ */
+
+export { TICKET }
+
+/** What this process is built from, said in the manifest, at `/healthz`, in the page and on every answer. */
+export const BUILD = establishBuild({ version: VERSION, dir: import.meta.dirname })
+
+const ok = (body: unknown): Reply => ({ status: 200, body })
+const bad = (why: string, status = 400): Reply => ({ status, body: { ok: false, error: why } })
+
+/** One session, as a row in a list. */
+export interface Row {
+  id: string
+  /** The first line of its first prompt, cut short; `''` when it has none yet. */
+  label: string
+  /** Milliseconds, or null when nothing is known. */
+  lastActive: number | null
+  /** Whether this module is running it now. */
+  running: boolean
+}
+
+export interface Listing {
+  ok: true
+  program: {
+    name: string
+    /** The binary, or null when it was not found. */
+    found: string | null
+    looked: string[]
+    /** What an installed copy lacks, when it is too old to use. Null otherwise. */
+    lacks: string | null
+    install: { line: string; lands: string }
+  }
+  /** The sessions of this place, in the order they were added. */
+  sessions: Row[]
+  /** The project's other sessions: they belong to no place, or to another. */
+  others: Row[]
+  /** Everything running, in any project, for the list a person ends one from. */
+  running: { id: string; label: string; projectPath: string; here: boolean; startedAt: number }[]
+  most: number
+}
+
+/**
+ * What the page draws a place from.
+ *
+ * A place's sessions are the ones the record lists for it, plus any that is
+ * running for it and does not exist yet — a new session nobody has spoken to
+ * is in memory only (see `record.ts`), and a page that reloads has to find it
+ * rather than start a second one beside it.
+ */
+export async function listing(
+  projectPath: string,
+  key: string,
+  runs: Runs = theRuns(),
+  program: Program = PROGRAM,
+  most = MOST_RUNNING,
+): Promise<Listing | { ok: false; error: string }> {
+  const root = projectRoot(projectPath)
+  if (!root.ok) return root
+  if (!readPlaceKey(key)) return { ok: false, error: 'That is not a place.' }
+  const read = readPlaces(root.value)
+  if (!read.ok) return read
+
+  const found = program.find()
+  const able = found.file ? await program.supports(found.file) : { ok: true, missing: null }
+  const held = await program.sessions(root.value)
+  const known = new Map(held.map((one) => [one.id, one]))
+  const live = runs.sessions()
+
+  const row = (id: string): Row => {
+    const run = live.find((one) => one.id === id || one.settled === id)
+    const kept = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id] : undefined
+    const keptAt = kept?.lastActive ? Date.parse(kept.lastActive) : NaN
+    return {
+      id,
+      label: known.get(id)?.label || run?.label || kept?.label || '',
+      lastActive: known.get(id)?.lastActive ?? (Number.isFinite(keptAt) ? keptAt : (run?.startedAt ?? null)),
+      running: Boolean(run),
+    }
+  }
+
+  const here = sessionsAt(read.value, key)
+  for (const run of live) {
+    const id = run.settled ?? run.id
+    if (run.projectPath === root.value && run.key === key && !here.includes(id)) here.push(id)
+  }
+
+  const install = program.install()
+  return {
+    ok: true,
+    program: {
+      name: program.name,
+      found: found.file,
+      looked: found.looked,
+      lacks: able.ok ? null : able.missing,
+      install: { line: install.line, lands: install.lands },
+    },
+    sessions: here.map(row),
+    others: held.filter((one) => !here.includes(one.id)).map((one) => row(one.id)),
+    running: live.map((run) => ({
+      id: run.settled ?? run.id,
+      label: run.label,
+      projectPath: run.projectPath,
+      here: run.projectPath === root.value && run.key === key,
+      startedAt: run.startedAt,
+    })),
+    most,
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * The MCP door, for agents. One tool, and it reads.
+ * ------------------------------------------------------------------ */
+
+function tools() {
+  return [
+    {
+      name: 'sessions',
+      description:
+        `The ${PROGRAM.name} sessions a person keeps in a project, by place. A place is an epic, the set of parts picked `
+        + 'out of it and a kehikko; each lists its sessions with the first line of their first prompt, when each was '
+        + `last active and whether it is running now. Read from ${WHERE}. Give the absolute project directory as `
+        + 'projectPath, and an epic slug to see only that epic’s places. Reads only: nothing here starts, ends or types '
+        + 'into a session.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          projectPath: { type: 'string', description: 'The absolute directory of the project.' },
+          epic: { type: 'string', description: 'An epic’s slug, to list only its places.' },
+        },
+        required: ['projectPath'],
+      },
+      annotations: { title: 'Sessions by place', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+  ]
+}
+
+async function call(name: string, args: Record<string, unknown>): Promise<string> {
+  if (name !== 'sessions') throw new Error(`no tool "${name.slice(0, 60)}" here`)
+  const root = projectRoot(typeof args.projectPath === 'string' ? args.projectPath : null)
+  if (!root.ok) throw new Error(root.error)
+  const read = readPlaces(root.value)
+  if (!read.ok) throw new Error(read.error)
+  const epic = typeof args.epic === 'string' && args.epic ? args.epic : null
+  const held = new Map((await PROGRAM.sessions(root.value)).map((one) => [one.id, one]))
+  const live = theRuns().sessions()
+  const places = Object.entries(read.value.places)
+    .filter(([, place]) => epic === null || place.epic === epic)
+    .map(([key, place]) => ({
+      place: key,
+      epic: place.epic,
+      parts: place.parts,
+      kehikko: place.kehikko,
+      sessions: place.sessions.map((id) => {
+        const kept = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id] : undefined
+        const at = held.get(id)?.lastActive
+        return {
+          id,
+          firstPrompt: held.get(id)?.label || kept?.label || '',
+          lastActive: at ? new Date(at).toISOString() : (kept?.lastActive ?? null),
+          running: live.some((run) => run.id === id || run.settled === id),
+        }
+      }),
+    }))
+  if (!places.length) return epic ? `No session is recorded for the epic "${epic}" in that project.` : 'No session is recorded for that project yet.'
+  return JSON.stringify(places, null, 2)
+}
+
+interface Rpc {
+  id?: number | string
+  method?: string
+  params?: { name?: string; arguments?: Record<string, unknown> }
+}
+
+async function mcp(rpc: Rpc): Promise<Reply> {
+  const reply = (result: unknown) => ok({ jsonrpc: '2.0', id: rpc.id ?? null, result })
+  const text = (s: string, isError = false) => reply({ content: [{ type: 'text', text: s }], ...(isError ? { isError } : {}) })
+
+  if (rpc.method === 'initialize') {
+    return reply({
+      protocolVersion: '2025-06-18',
+      capabilities: { tools: {} },
+      serverInfo: { name: ID, version: VERSION },
+      instructions: MANIFEST.mcp?.about ?? '',
+    })
+  }
+  /* A notification carries no id and is answered with nothing. */
+  if (typeof rpc.method === 'string' && rpc.method.startsWith('notifications/')) return { status: 202, body: null }
+  if (rpc.method === 'tools/list') return reply({ tools: tools() })
+  if (rpc.method === 'tools/call') {
+    try {
+      return text(await call(String(rpc.params?.name ?? ''), rpc.params?.arguments ?? {}))
+    } catch (e) {
+      /* A refusal is an answer the agent reads, not a transport failure it retries. */
+      return text(e instanceof Error ? e.message : String(e), true)
+    }
+  }
+  return { status: 404, body: { jsonrpc: '2.0', id: rpc.id ?? null, error: { code: -32601, message: String(rpc.method) } } }
+}
+
+/* ------------------------------------------------------------------ *
+ * The doors.
+ * ------------------------------------------------------------------ */
+
+export async function answer(
+  method: string,
+  path: string,
+  query: URLSearchParams,
+  body: Record<string, unknown> | null,
+  ticket: string | null,
+): Promise<Reply | null> {
+  if (path === '/healthz') return ok({ ok: true, id: ID, version: VERSION, where: WHERE })
+
+  if (path === '/mcp') {
+    if (method !== 'POST') return bad('the MCP door takes POST', 405)
+    if (!body || typeof body.method !== 'string') {
+      return { status: 400, body: { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'not a request' } } }
+    }
+    return mcp(body as Rpc)
+  }
+
+  if (!path.startsWith('/api/')) return null
+
+  /* Every door under /api, the read included: see "Reads carry the ticket too". */
+  const refused = refuseTicket(ticket, TICKET)
+  if (refused) return refused
+
+  if (path === '/api/place' && method === 'GET') {
+    const said = await listing(query.get('projectPath') ?? '', query.get('key') ?? '')
+    return said.ok ? ok(said) : bad(said.error)
+  }
+
+  /* End a running session, because a person chose that one. The only way a
+     session is ever ended that is not the program exiting by itself. */
+  if (path === '/api/end' && method === 'POST') {
+    const id = typeof body?.session === 'string' ? body.session : ''
+    if (!PROGRAM.isId(id)) return bad('that is not a session id')
+    return ok({ ok: true, ended: theRuns().end(id) })
+  }
+
+  /* Take a session off a place. The session is kept, and so is its transcript:
+     it goes back among the ones that can be attached. */
+  if (path === '/api/detach' && method === 'POST') {
+    const id = typeof body?.session === 'string' ? body.session : ''
+    const key = typeof body?.key === 'string' ? body.key : ''
+    if (!PROGRAM.isId(id)) return bad('that is not a session id')
+    const written = detach(typeof body?.projectPath === 'string' ? body.projectPath : null, key, id)
+    return written.ok ? ok({ ok: true }) : bad(written.error)
+  }
+
+  return bad('not here', 404)
+}
+
+export { MANIFEST }

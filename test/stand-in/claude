@@ -1,0 +1,49 @@
+#!/bin/sh
+# A stand-in for `claude`, for tests and for walking the page without an agent.
+#
+# It prints the arguments it was started with, echoes what is typed, and keeps
+# a record where Claude Code keeps one — `$CLAUDE_CONFIG_DIR/projects/<folder>/
+# <session id>.jsonl`, written when the first line is typed and not before,
+# which is when the real program first writes one. `--resume` of an id with no
+# record is refused, as the real program refuses it. `/exit` ends it.
+#
+# STANDIN_OLD=1 makes its --help that of a copy too old to take a session id.
+
+if [ "$1" = "--help" ]; then
+  echo "Usage: claude [options] [command] [prompt]"
+  if [ -z "$STANDIN_OLD" ]; then
+    echo "  -r, --resume [value]     Resume a conversation by session ID"
+    echo "  --session-id <uuid>      Use a specific session ID for the conversation"
+  fi
+  exit 0
+fi
+
+config="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+folder=$(pwd -P | sed 's/[^a-zA-Z0-9]/-/g')
+dir="$config/projects/$folder"
+mode="$1"
+id="$2"
+record="$dir/$id.jsonl"
+
+case "$mode" in
+  --session-id)
+    if [ -f "$record" ]; then echo "Error: Session ID $id is already in use."; exit 1; fi
+    echo "stand-in claude: NEW session $id" ;;
+  --resume)
+    if [ ! -f "$record" ]; then echo "No conversation found with session ID: $id"; exit 1; fi
+    echo "stand-in claude: RESUMED session $id ($(grep -c '"type":"user"' "$record") earlier lines)" ;;
+  *)
+    echo "stand-in claude: started with no session id: $*"; exit 2 ;;
+esac
+echo "args: $*"
+echo "cwd: $(pwd -P)"
+
+trap 'echo "stand-in claude: hung up"; exit 0' HUP TERM
+while printf '> ' && IFS= read -r line; do
+  [ "$line" = "/exit" ] && { echo "bye"; exit 0; }
+  [ -z "$line" ] && continue
+  mkdir -p "$dir"
+  safe=$(printf '%s' "$line" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  printf '{"type":"user","isSidechain":false,"sessionId":"%s","cwd":"%s","message":{"role":"user","content":"%s"}}\n' "$id" "$(pwd -P)" "$safe" >> "$record"
+  echo "you said: $line"
+done
