@@ -1,5 +1,5 @@
 import type { Listing, Row } from '../../doors.ts'
-import { placeKey, type Place } from '../../place.ts'
+import { kehikkoOf, placeKey, type Place } from '../../place.ts'
 
 /**
  * What the page does when the canvas names a place, decided from what the
@@ -42,13 +42,20 @@ export type Step =
  * showing one. It is honoured only while it is still one of the place's
  * sessions: one that was taken off the place in another container is not
  * reopened on the strength of a memory.
+ *
+ * Only sessions that are HERE count — the ones Claude Code has on this
+ * computer. One the record lists and this computer does not have (`missing`:
+ * it ran on another, or its transcript was cleaned away) cannot be opened,
+ * so it is neither the one to open nor a reason to ask: a place whose only
+ * recorded session is somewhere else gets a new one, and nothing is said.
  */
 export function decide(listing: Listing, showing: string | null = null): Step {
   if (!listing.program.found) return { do: 'install', update: false }
   if (listing.program.lacks) return { do: 'install', update: true }
-  if (showing && listing.sessions.some((one) => one.id === showing)) return { do: 'open', session: showing }
-  if (listing.sessions.length === 0) return { do: 'open', session: null }
-  if (listing.sessions.length === 1) return { do: 'open', session: listing.sessions[0]!.id }
+  const here = listing.sessions.filter((one) => !one.missing)
+  if (showing && here.some((one) => one.id === showing)) return { do: 'open', session: showing }
+  if (here.length === 0) return { do: 'open', session: null }
+  if (here.length === 1) return { do: 'open', session: here[0]!.id }
   return { do: 'choose' }
 }
 
@@ -56,6 +63,8 @@ export function decide(listing: Listing, showing: string | null = null): Step {
 export interface Standing extends Place {
   projectPath: string
   kehikkoName: string
+  /** The host's row number for the kehikko today: a note beside a key, and all there is without one. */
+  kehikkoId: number | null
   key: string
 }
 
@@ -64,21 +73,32 @@ export interface Standing extends Place {
  * the page has not been greeted, nothing is framing it, or no project is
  * open. A session with no project is a session in no folder, which nobody
  * asked for; Terminal falls back to a home shell there and this does not.
+ *
+ * The kehikko is named by its `key` whenever the host sends one (protocol
+ * 1.1.0), because the key is the same after the project is removed and added
+ * again and on another machine, and the `id` is a row number that is not. A
+ * host that sends no key is an older one, and the place falls back to the id.
  */
 export function standing(host: {
   where: 'listening' | 'unhosted' | 'hosted'
   projectPath: string | null
   epic: string | null
   parts: readonly { id: string; picked: boolean }[]
-  kehikko: { id: number; name: string } | null
+  kehikko: { id: number; name: string; key?: string } | null
 }): Standing | null {
   if (host.where !== 'hosted' || !host.projectPath) return null
   const place: Place = {
     epic: host.epic,
     parts: host.parts.filter((part) => part.picked).map((part) => part.id).sort(),
-    kehikko: host.kehikko?.id ?? null,
+    kehikko: kehikkoOf(host.kehikko),
   }
-  return { ...place, projectPath: host.projectPath, kehikkoName: host.kehikko?.name ?? '', key: placeKey(place) }
+  return {
+    ...place,
+    projectPath: host.projectPath,
+    kehikkoName: host.kehikko?.name ?? '',
+    kehikkoId: host.kehikko?.id ?? null,
+    key: placeKey(place),
+  }
 }
 
 /** One string for a place across projects: what a view is filed under. */

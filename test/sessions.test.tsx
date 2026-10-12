@@ -30,7 +30,8 @@ interface Mounted {
 }
 const mounted: Mounted[] = []
 const unmounted: Target[] = []
-const naming = (target: Target) => (target.what === 'install' ? 'install' : `${target.place.parts.join('+') || 'whole'}@${target.place.kehikko}:${target.session ?? 'new'}`)
+const which = (kehikko: Extract<Target, { what: 'session' }>['place']['kehikko']) => (kehikko === null ? '-' : 'key' in kehikko ? `key:${kehikko.key}` : kehikko.id)
+const naming = (target: Target) => (target.what === 'install' ? 'install' : `${target.place.parts.join('+') || 'whole'}@${which(target.place.kehikko)}:${target.session ?? 'new'}`)
 
 mock.module('../src/view/terminal-view.tsx', () => ({
   TerminalView: ({ target, shown, onStanding, onSaid }: { target: Target; shown: boolean; onStanding?: (s: Standing) => void; onSaid?: (s: object) => void }) => {
@@ -59,9 +60,17 @@ function server(start: Record<string, Row[]> = {}) {
   const held: Record<string, Row[]> = { ...start }
   const state = { found: '/bin/claude' as string | null, lacks: null as string | null, running: [] as Listing['running'], most: 6, others: [] as Row[] }
   const asked: string[] = []
+  /** What the page asked to have brought across to a kehikko's key, in order with the reads. */
+  const order: string[] = []
   const api: Api = {
+    rekey: async (_projectPath, kehikko) => {
+      order.push(`rekey ${kehikko.key} ${kehikko.name} ${kehikko.id}`)
+      await new Promise((done) => setTimeout(done, 1))
+      order.push('rekeyed')
+    },
     place: async (_projectPath, key) => {
       asked.push(key)
+      order.push(`read ${key}`)
       return {
         ok: true,
         program: { name: 'Claude Code', found: state.found, foundAt: state.found, looked: ['/usr/bin', '/Users/someone/.local/bin'], where: 'PATH, ~/.local/bin', lacks: state.lacks, install: { line: 'curl -fsSL https://claude.ai/install.sh | bash', lands: '~/.local/bin/claude' } },
@@ -80,11 +89,14 @@ function server(start: Record<string, Row[]> = {}) {
       held[key] = (held[key] ?? []).filter((one) => one.id !== session)
     },
   }
-  return { api, held, state, asked }
+  return { api, held, state, asked, order }
 }
 
 const at = (parts: string[] = [], kehikko = 3, epic: string | null = 'thesis', projectPath = P) =>
   standing({ where: 'hosted', projectPath, epic, parts: parts.map((id) => ({ id, picked: true })), kehikko: { id: kehikko, name: `k${kehikko}` } })!
+/** The same, from a host that names the kehikko by its key (protocol 1.1.0). */
+const keyed = (parts: string[] = [], id = 3, key = '4072c9e5', name = 'writing') =>
+  standing({ where: 'hosted', projectPath: P, epic: 'thesis', parts: parts.map((part) => ({ id: part, picked: true })), kehikko: { id, name, key } })!
 const KEY = (parts: string[] = [], kehikko = 3) => at(parts, kehikko).key
 
 /* Twice: what the server said is drawn when the first round ends, and a new session is started on a timer set by that drawing. */
@@ -151,6 +163,95 @@ describe('opening the module on a place', () => {
     expect(container.textContent).toContain('No project is open')
     expect(mounted.length).toBe(0)
     expect(s.asked).toEqual([])
+  })
+})
+
+describe('the kehikko by its key', () => {
+  test('the host renumbering a kehikko moves nothing: the same place, the same session, nothing reopened', async () => {
+    const s = server({ [keyed().key]: [row('a')] })
+    const { container, rerender } = render(<Sessions theme="dark" at={keyed([], 2)} api={s.api} />)
+    await flush()
+    expect(shown(container)).toEqual(['whole@key:4072c9e5:a'])
+    const before = view('whole@key:4072c9e5:a')
+    /* Removed from the host and added again: 2, then 9, then 28. */
+    rerender(<Sessions theme="dark" at={keyed([], 9)} api={s.api} />)
+    await flush()
+    rerender(<Sessions theme="dark" at={keyed([], 28)} api={s.api} />)
+    await flush()
+    expect(shown(container)).toEqual(['whole@key:4072c9e5:a'])
+    expect(view('whole@key:4072c9e5:a')).toBe(before)
+    expect(unmounted).toEqual([])
+    /* The place was read once: the number is not part of it. */
+    expect(s.asked).toEqual([keyed().key])
+  })
+
+  test('a page opened after the renumbering finds the session by itself, with nothing attached by hand', async () => {
+    const s = server({ [keyed().key]: [row('a')] })
+    const { container } = render(<Sessions theme="dark" at={keyed([], 28)} api={s.api} />)
+    await flush()
+    expect(shown(container)).toEqual(['whole@key:4072c9e5:a'])
+    expect(container.querySelector('[data-chooser]')).toBeNull()
+  })
+
+  test('what an older release filed under the row number is asked to be brought across BEFORE the place is read, once per kehikko', async () => {
+    const s = server({ [keyed().key]: [row('a')] })
+    const { rerender } = render(<Sessions theme="dark" at={keyed([], 28)} api={s.api} />)
+    await flush()
+    expect(s.order).toEqual(['rekey 4072c9e5 writing 28', 'rekeyed', `read ${keyed().key}`])
+    /* Another place on the same kehikko: read, and not asked again. */
+    rerender(<Sessions theme="dark" at={keyed(['methods'], 28)} api={s.api} />)
+    await flush()
+    expect(s.order.filter((one) => one.startsWith('rekey ')).length).toBe(1)
+    expect(s.order.at(-1)).toBe(`read ${keyed(['methods']).key}`)
+    /* Another kehikko is asked about in its turn. */
+    rerender(<Sessions theme="dark" at={keyed([], 4, 'review-2', 'review')} api={s.api} />)
+    await flush()
+    expect(s.order.filter((one) => one.startsWith('rekey '))).toEqual(['rekey 4072c9e5 writing 28', 'rekey review-2 review 4'])
+  })
+
+  test('a host that sends no key is not asked about one: the place is the row number, as before', async () => {
+    const s = server({ [KEY()]: [row('a')] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    expect(KEY()).toBe('epic=thesis;parts=-;kehikko=3')
+    expect(shown(container)).toEqual(['whole@3:a'])
+    expect(s.order).toEqual([`read ${KEY()}`])
+  })
+
+  test('if the bringing across is refused, nothing is read and nothing opened — a new session is not started beside the old ones', async () => {
+    const s = server({ [keyed().key]: [] })
+    s.api.rekey = async () => {
+      throw new Error('places.json is not readable JSON.')
+    }
+    const { container } = render(<Sessions theme="dark" at={keyed()} api={s.api} />)
+    await flush()
+    expect(all(container)).toEqual([])
+    expect(s.asked).toEqual([])
+    expect(container.textContent).toContain('places.json is not readable JSON.')
+  })
+})
+
+describe('a session from another computer', () => {
+  test('the only one recorded here is somewhere else: a new session, at once, and no question', async () => {
+    const s = server({ [KEY()]: [row('away', { label: 'started on the laptop', missing: true })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    expect(shown(container)).toEqual(['whole@3:new'])
+    expect(container.querySelector('[data-chooser]')).toBeNull()
+  })
+
+  test('one here and one elsewhere: the one here opens, and the other is only a muted row in the list', async () => {
+    const s = server({ [KEY()]: [row('away', { label: 'started on the laptop', missing: true }), row('a', { label: 'here' })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    expect(shown(container)).toEqual(['whole@3:a'])
+    fireEvent.click(container.querySelector('[data-sessions]') as HTMLElement)
+    await flush()
+    const away = container.querySelector('[data-session="away"]') as HTMLElement
+    expect(away.textContent).toContain('not on this computer')
+    fireEvent.click(away)
+    await flush()
+    expect(all(container)).toEqual(['whole@3:a'])
   })
 })
 

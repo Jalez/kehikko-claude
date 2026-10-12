@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { isAbsolute } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 
 import { KEHIKOT_DIR, kehikotDir, moduleDir, moduleFile, within } from 'kehikot-module-protocol'
 
 import { ID } from './manifest.ts'
-import { placeKey, readPlaceKey, sortedParts, type Place } from './place.ts'
+import { isKehikkoKey, placeKey, readPlaceKey, sortedParts, type Place } from './place.ts'
 
 /**
  * Which session belongs to which place, kept inside the project it is about:
@@ -13,10 +13,10 @@ import { placeKey, readPlaceKey, sortedParts, type Place } from './place.ts'
  *     {
  *       "version": 1,
  *       "places": {
- *         "epic=thesis;parts=methods+results;kehikko=3": {
+ *         "epic=thesis;parts=methods+results;kehikko=key:4072c9e5": {
  *           "epic": "thesis",
  *           "parts": ["methods", "results"],
- *           "kehikko": { "id": 3, "name": "writing" },
+ *           "kehikko": { "key": "4072c9e5", "id": 3, "name": "writing" },
  *           "sessions": ["6f0c…", "a41e…"]
  *         }
  *       },
@@ -27,9 +27,15 @@ import { placeKey, readPlaceKey, sortedParts, type Place } from './place.ts'
  *
  * ## What is in it, and why each thing
  *
- * - **The key** is `placeKey`: ids only, parts sorted. It is what is looked up.
+ * - **The key** is `placeKey`: ids only, parts sorted, the kehikko by its
+ *   stable `key`. It is what is looked up.
  * - **The names beside it** (`epic`, `parts`, the kehikko's `name`) are for a
- *   person reading the file and for the list an agent is given. Never compared.
+ *   person reading the file and for the list an agent is given. Never compared
+ *   — with the one exception of `rekey` below, which reads a kehikko's name
+ *   once, to bring an older file across.
+ * - **The kehikko's `id`** beside a `key` is the row number the host last
+ *   called it by: a note for a person lining this file up with a host's
+ *   database, nothing more. It is never compared and never looked up.
  * - **A session's `label` and `lastActive`** are what Claude Code's own record
  *   said the last time this module looked, so the list can be drawn from this
  *   file alone — for a session whose transcript has since been cleaned away,
@@ -53,13 +59,41 @@ import { placeKey, readPlaceKey, sortedParts, type Place } from './place.ts'
  * the file, readable, and its sessions stay in Claude Code's own records for
  * the folder — which is where "attach an existing session" lists them from,
  * for every other place in the project. A rename changes nothing at all, since
- * a rename does not change an id.
+ * a rename does not change a key.
  *
- * The same is true, less happily, when the HOST renumbers a kehikko: the id
- * in `context.kehikko` is the host's own number for it, which changes when a
- * project is forgotten and added again and differs on another machine. The
- * host keeps a stable `key` per kehikko in its own record; the protocol does
- * not carry it yet, and the day it does is the day this key should use it.
+ * ## The kehikko by its key, and files written before there was one
+ *
+ * A host renumbers a kehikko whenever its project is removed and added again,
+ * and numbers it afresh on another machine: the `id` in `context.kehikko` is
+ * a row in that host's database. Protocol 1.1.0 carries the kehikko's `key`
+ * beside it — the one the host keeps in the project's own
+ * `.kehikot/kehikko/kehikot.json` — and that is what a place is filed under
+ * (`kehikko=key:4072c9e5`). A host that sends no key leaves the id, and a
+ * place filed under it (`kehikko=3`) is as fragile as it always was.
+ *
+ * Entries written under an id are brought across by `rekey`, once, the first
+ * time a host names a kehikko by key: see there for the rule, which matches
+ * by the kehikko's NAME because that is the only thing in an old entry that
+ * still means what it meant. Reading never does this. `readPlaces` returns
+ * what the file says; only `rekey` moves an entry, and it is a write like any
+ * other.
+ *
+ * ## What travels with the project, and what does not
+ *
+ * This file is in the project, and the sessions it names are not: a session
+ * is a transcript in Claude Code's own folder on the computer where it ran.
+ * On another computer — or on this one, after Claude Code has cleaned an old
+ * transcript away — the file names a session there is no record of. Such an
+ * id is never removed here on that account (the other computer still has
+ * it), and never started: `doors.ts` marks it `missing`, the list shows it
+ * muted, and `live.ts` refuses to open it rather than start a new
+ * conversation under an old one's id.
+ *
+ * Because it means so little elsewhere, and holds the first line of what
+ * somebody asked, the file is NOT shared by default: the first write puts a
+ * `.gitignore` beside it naming it, the way the host does for its tracker
+ * reading in `.kehikot/kehikko/`. Written only when there is none, so a
+ * person who empties it to share the file is not overruled.
  *
  * ## One writer at a time, with nothing awaited in the middle
  *
@@ -83,7 +117,12 @@ export const WHERE = `<project>/${KEHIKOT_DIR}/claude/${FILE}.json`
 export interface PlaceEntry {
   epic: string | null
   parts: string[]
-  kehikko: { id: number; name: string } | null
+  /**
+   * The kehikko, as a person reads it. With a `key`, that is what the place is
+   * filed under and `id` is only the row number a host last called it by.
+   * Without one, the place is filed under `id` (an older host).
+   */
+  kehikko: { key?: string; id?: number; name: string } | null
   sessions: string[]
 }
 
@@ -104,6 +143,8 @@ export interface Places {
 export interface NamedPlace extends Place {
   /** What the kehikko is called now. Stored for reading, never compared. */
   kehikkoName?: string
+  /** The host's row number for it today. Stored beside a key as a note, never compared. */
+  kehikkoId?: number
 }
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string }
@@ -143,11 +184,93 @@ export function attach(
     places.places[key] = {
       epic: place.epic,
       parts: sortedParts(place.parts),
-      kehikko: place.kehikko === null ? null : { id: place.kehikko, name: place.kehikkoName ?? was?.kehikko?.name ?? '' },
+      kehikko: beside(place.kehikko, place.kehikkoName ?? was?.kehikko?.name ?? '', place.kehikkoId ?? was?.kehikko?.id),
       sessions: was?.sessions.includes(id) ? was.sessions : [...(was?.sessions ?? []), id],
     }
     describe(places, id, about, now)
   })
+}
+
+/** The kehikko as it is written beside a key: tagged the way the place is, with the id as a note when keyed. */
+function beside(kehikko: Place['kehikko'], name: string, seen?: number): PlaceEntry['kehikko'] {
+  if (kehikko === null) return null
+  if ('id' in kehikko) return { id: kehikko.id, name }
+  return typeof seen === 'number' && Number.isSafeInteger(seen) ? { key: kehikko.key, id: seen, name } : { key: kehikko.key, name }
+}
+
+/**
+ * Bring the entries an older release filed under a kehikko's row number
+ * across to its key. Asked for by the page, once, when a host first names the
+ * kehikko it is standing on by key.
+ *
+ * ## The rule
+ *
+ * An entry is moved when it is still filed under an id AND the kehikko NAME
+ * stored beside it equals the open kehikko's name. It becomes
+ * `kehikko=key:<key>` with its epic and parts unchanged.
+ *
+ * - **By name, never by id.** Ids are handed out again: after a project is
+ *   removed and added back, id 3 may be a different kehikko, or one in
+ *   another project. The name is what the person called it, and it is the
+ *   only thing in an old entry that still means what it meant. It also means
+ *   the entries a renumbering had already split — the same kehikko filed
+ *   under 2 and later under 9 — come back together.
+ * - **Merged, not replaced.** Where the key already has an entry for the same
+ *   epic and parts, the session lists are joined as a set: the key's own
+ *   first, then whatever the old entry adds.
+ * - **Once.** If any entry filed under a key already carries this name, the
+ *   name has been claimed — by this migration having run, or by another
+ *   kehikko of the same name — and entries under ids are left alone rather
+ *   than guessed at.
+ * - **Everything else stays exactly as it is.** An entry whose name matches
+ *   nothing is not touched and not removed; its sessions are in Claude Code's
+ *   records for the folder and can be attached from any place. When nothing
+ *   matches at all, the file is not written.
+ *
+ * `moved` is how many entries were re-keyed.
+ */
+export function rekey(
+  projectPath: string | null | undefined,
+  kehikko: { key: string; name: string; id?: number },
+): Result<{ moved: number }> {
+  if (!isKehikkoKey(kehikko.key)) return { ok: false, error: 'That is not a kehikko’s key.' }
+  /* Looked at first without making a folder: most projects have nothing to move. */
+  const read = readPlaces(projectPath)
+  if (!read.ok) return read
+  if (!movable(read.value, kehikko.name).length) return { ok: true, value: { moved: 0 } }
+
+  let moved = 0
+  const written = change(projectPath, (places) => {
+    /* Decided again from what was just read: this is the read the write follows. */
+    const from = new Set(movable(places, kehikko.name))
+    moved = from.size
+    if (!moved) return false
+    const next: Places['places'] = {}
+    for (const [key, entry] of Object.entries(places.places)) {
+      const moving = from.has(key)
+      const to = moving ? placeKey({ epic: entry.epic, parts: entry.parts, kehikko: { key: kehikko.key } }) : key
+      const had = Object.hasOwn(next, to) ? next[to] : undefined
+      /* The key's own entry leads, wherever in the file it was. */
+      const [first, second] = moving ? [had, entry] : [entry, had]
+      next[to] = {
+        epic: entry.epic,
+        parts: entry.parts,
+        kehikko: moving && had ? had.kehikko : moving ? beside({ key: kehikko.key }, kehikko.name, kehikko.id) : entry.kehikko,
+        sessions: [...new Set([...(first?.sessions ?? []), ...(second?.sessions ?? [])])],
+      }
+    }
+    places.places = next
+    return true
+  })
+  return written.ok ? { ok: true, value: { moved } } : written
+}
+
+/** The keys of the entries `rekey` would move for a kehikko called `name`. Empty when the name is already claimed. */
+function movable(places: Places, name: string): string[] {
+  if (!name) return []
+  const entries = Object.entries(places.places)
+  if (entries.some(([, entry]) => entry.kehikko?.key !== undefined && entry.kehikko.name === name)) return []
+  return entries.filter(([, entry]) => entry.kehikko && entry.kehikko.key === undefined && entry.kehikko.name === name).map(([key]) => key)
 }
 
 /** Take a session off a place. The session itself, and its entry here, are kept. */
@@ -193,16 +316,45 @@ function describe(places: Places, id: string, about: { label?: string; lastActiv
  * essay above). Written to a temporary file and renamed, so a crash never
  * leaves half a file.
  */
-function change(projectPath: string | null | undefined, edit: (places: Places) => void): Result<Places> {
+function change(projectPath: string | null | undefined, edit: (places: Places) => void | boolean): Result<Places> {
   const file = fileFor(projectPath, true)
   if (!file.ok) return file
   const read = load(file.value)
   if (!read.ok) return read
-  edit(read.value)
+  /* An edit that answers false found nothing to do, and nothing is written. */
+  if (edit(read.value) === false) return read
+  unshared(file.value)
   const temporary = `${file.value}.${process.pid}.tmp`
   writeFileSync(temporary, `${JSON.stringify(read.value, null, 2)}\n`)
   renameSync(temporary, file.value)
   return read
+}
+
+/**
+ * What the `.gitignore` beside the record says, when this module writes it.
+ * See "What travels with the project" at the top.
+ */
+export const IGNORE = `# Which Claude Code session belongs to which place in this project.
+#
+# Not shared by default. The sessions themselves are on the computer where
+# they ran (Claude Code's own folder, ~/.claude), so the list means little
+# anywhere else, and it holds the first line of what was asked in each.
+#
+# To share it anyway, delete the two lines below and keep this file: it is
+# only written when there is none.
+${FILE}.json
+${FILE}.json.*.tmp
+`
+
+/** Put the `.gitignore` beside the record if the folder has none. A courtesy: failing to is not a reason to lose a write. */
+function unshared(file: string): void {
+  const ignore = join(dirname(file), '.gitignore')
+  try {
+    /* `wx`: only ever a new file. One that is there — a link included — is somebody's, and is left. */
+    writeFileSync(ignore, IGNORE, { flag: 'wx' })
+  } catch {
+    /* There already, or the folder cannot be written to — in which case the write below says so. */
+  }
 }
 
 function load(file: string): Result<Places> {
@@ -229,11 +381,13 @@ function tidy(raw: unknown): Places {
     for (const [key, value] of Object.entries(places)) {
       const place = readPlaceKey(key)
       if (!place || typeof value !== 'object' || value === null) continue
-      const entry = value as { kehikko?: { name?: unknown } | null; sessions?: unknown }
+      const entry = value as { kehikko?: { id?: unknown; name?: unknown } | null; sessions?: unknown }
+      const seen = entry.kehikko?.id
       out.places[key] = {
         epic: place.epic,
         parts: place.parts,
-        kehikko: place.kehikko === null ? null : { id: place.kehikko, name: typeof entry.kehikko?.name === 'string' ? entry.kehikko.name : '' },
+        /* Which kehikko is read off the KEY. Of what is beside it only the name is taken, and the id as a note. */
+        kehikko: beside(place.kehikko, typeof entry.kehikko?.name === 'string' ? entry.kehikko.name : '', typeof seen === 'number' ? seen : undefined),
         sessions: Array.isArray(entry.sessions) ? [...new Set(entry.sessions.filter((one): one is string => typeof one === 'string' && one.length > 0 && one.length <= 128))] : [],
       }
     }

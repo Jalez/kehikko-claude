@@ -21,7 +21,24 @@ import { ago, named } from './places.ts'
  * Every row is a button, so the pointer and Tab both reach all of it. On top
  * of that the list itself takes the keyboard: the arrows (or j and k) move,
  * Enter opens, and a digit opens that row outright.
+ *
+ * ## A session that is not on this computer
+ *
+ * The record is in the project and may arrive on another computer; the
+ * sessions do not (see `record.ts`). A row the record lists and Claude Code
+ * has nothing for here is still drawn — the list should agree with the file,
+ * and its first prompt says what it was — but muted, with the reason in a
+ * few words where "running" would be, and it does not open: there is nothing
+ * here to resume, and starting the program under its id would be a different
+ * conversation. It can still be taken off the place. No row is added to say
+ * any of this.
  */
+
+/** Why a row cannot be opened, in the fewest words that are true of both ways it happens. */
+export const NOT_HERE = 'not on this computer'
+const NOT_HERE_WHY =
+  'Claude Code has no record of this session on this computer: it was started on another one, or its transcript has '
+  + 'since been cleaned away. It stays in the record, and opens where it exists.'
 
 type Item =
   | { kind: 'session'; row: Row; attach: boolean }
@@ -62,7 +79,13 @@ export function Chooser({
   onClose?: () => void
 }) {
   const [others, setOthers] = useState(false)
-  const [at, setAt] = useState(0)
+  /* Where the keyboard starts: the first row that can be opened. A session that is not on this
+     computer is listed where it was added, which may be first, and Enter on it would do nothing. */
+  const [at, setAt] = useState(() => {
+    if (mode === 'full') return 0
+    const first = listing.sessions.findIndex((row) => !row.missing)
+    return first === -1 ? listing.sessions.length : first
+  })
   const list = useRef<HTMLDivElement>(null)
 
   const items = useMemo<Item[]>(() => {
@@ -85,8 +108,9 @@ export function Chooser({
 
   const act = (item: Item | undefined) => {
     if (!item) return
-    if (item.kind === 'session') onOpen(item.row.id)
-    else if (item.kind === 'new') onOpen(null)
+    if (item.kind === 'session') {
+      if (!item.row.missing) onOpen(item.row.id)
+    } else if (item.kind === 'new') onOpen(null)
     else if (item.kind === 'attach') setOthers((open) => !open)
     else onEnd(item.id)
   }
@@ -151,6 +175,27 @@ export function Chooser({
         }
 
         const { row } = item
+        if (row.missing) {
+          return (
+            <div key={row.id} role="option" aria-selected={on} aria-disabled data-row="missing" data-session={row.id} className={shell} onMouseMove={() => setAt(index)}>
+              {number}
+              <span className="text-muted-foreground flex min-w-0 flex-1 items-center gap-2" title={NOT_HERE_WHY}>
+                <span className="min-w-0 flex-1 truncate">{named(row)}</span>
+                <span className="shrink-0">{NOT_HERE}</span>
+                <span className="shrink-0">{ago(row.lastActive, now)}</span>
+              </span>
+              <button
+                type="button"
+                className="hover:bg-background text-muted-foreground shrink-0 rounded border px-1.5"
+                title="Take this session off this place. It stays in the record’s list of sessions, and can be attached again where it exists."
+                aria-label="Remove from this place"
+                onClick={() => onDetach(row.id)}
+              >
+                ×
+              </button>
+            </div>
+          )
+        }
         return (
           <div key={row.id} role="option" aria-selected={on} data-row={item.attach ? 'other' : 'session'} data-session={row.id} className={shell} onMouseMove={() => setAt(index)}>
             {number}

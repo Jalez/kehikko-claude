@@ -10,6 +10,11 @@ import type { Listing } from '../doors.ts'
 export interface Api {
   /** What this place holds: its sessions, the project's others, what is running, and whether the program is there. */
   place(projectPath: string, key: string): Promise<Listing>
+  /**
+   * Bring what an older release filed under a kehikko's row number across to
+   * its key. Asked once per kehikko, before the first read of a place on it.
+   */
+  rekey(projectPath: string, kehikko: { key: string; name: string; id?: number }): Promise<void>
   /** End a running session, because a person chose that one. */
   end(session: string): Promise<void>
   /** Take a session off a place. The session itself is kept. */
@@ -19,6 +24,9 @@ export interface Api {
 export const api: Api = {
   async place(projectPath, key) {
     return answered(await ask<Listing>('./api/place', { query: { projectPath, key }, ticket: true }))
+  },
+  async rekey(projectPath, kehikko) {
+    answered(await ask('./api/rekey', { body: { projectPath, kehikko } }))
   },
   async end(session) {
     answered(await ask('./api/end', { body: { session } }))

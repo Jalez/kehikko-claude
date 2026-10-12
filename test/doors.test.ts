@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -10,7 +10,7 @@ import { Runs, headless } from '../live.ts'
 import { ID } from '../manifest.ts'
 import { placeKey } from '../place.ts'
 import { recordDirs } from '../program.ts'
-import { attach } from '../record.ts'
+import { attach, readPlaces } from '../record.ts'
 
 const project = realpathSync(mkdtempSync(join(tmpdir(), 'kehikko-claude-doors-')))
 const bin = realpathSync(mkdtempSync(join(tmpdir(), 'kehikko-claude-bin-')))
@@ -20,7 +20,7 @@ afterAll(() => {
 })
 
 const none = new URLSearchParams()
-const METHODS = { epic: 'thesis', parts: ['methods'], kehikko: 3, kehikkoName: 'writing' }
+const METHODS = { epic: 'thesis', parts: ['methods'], kehikko: { id: 3 }, kehikkoName: 'writing' }
 const A = '11111111-1111-4111-8111-111111111111'
 const B = '22222222-2222-4222-8222-222222222222'
 const C = '33333333-3333-4333-8333-333333333333'
@@ -96,11 +96,26 @@ describe('what a place holds', () => {
     expect(said.running).toEqual([])
   })
 
-  test('a session whose own record has gone is still listed, from what was kept beside it', async () => {
+  test('a session Claude Code has no record of on this computer is listed from what was kept beside it, and marked as not here', async () => {
+    /* The record came with the project; the session ran on another computer, or its transcript was cleaned away. */
     const gone = '44444444-4444-4444-8444-444444444444'
     attach(project, METHODS, gone, { label: 'kept in the record', lastActive: Date.parse('2026-10-01T00:00:00Z') })
     const said = (await listing(project, placeKey(METHODS), runs)) as Listing
-    expect(said.sessions.find((one) => one.id === gone)).toEqual({ id: gone, label: 'kept in the record', lastActive: Date.parse('2026-10-01T00:00:00Z'), running: false })
+    expect(said.sessions.find((one) => one.id === gone)).toEqual({ id: gone, label: 'kept in the record', lastActive: Date.parse('2026-10-01T00:00:00Z'), running: false, missing: true })
+    /* The ones that are here are not marked at all. */
+    expect(said.sessions.find((one) => one.id === A)).not.toHaveProperty('missing')
+    /* Not offered for attaching either: that list is what Claude Code holds here. */
+    expect(said.others.some((one) => one.id === gone)).toBe(false)
+    /* And nothing was taken out of the record on that account. */
+    const kept = readPlaces(project)
+    expect(kept.ok && kept.value.places[placeKey(METHODS)]?.sessions).toContain(gone)
+    expect(kept.ok && kept.value.sessions[gone]?.label).toBe('kept in the record')
+
+    const called = await rpc('tools/call', { name: 'sessions', arguments: { projectPath: project } })
+    const places = JSON.parse(called.result?.content?.[0]?.text ?? '[]') as { place: string; sessions: { id: string; missing?: boolean }[] }[]
+    const methods = places.find((one) => one.place === placeKey(METHODS))
+    expect(methods?.sessions.find((one) => one.id === gone)?.missing).toBe(true)
+    expect(methods?.sessions.find((one) => one.id === A)?.missing).toBeUndefined()
   })
 
   test('says when the program is found', async () => {
@@ -129,6 +144,37 @@ describe('what a place holds', () => {
     expect(said.sessions.some((one) => one.id === A)).toBe(false)
     expect(said.others.some((one) => one.id === A)).toBe(true)
     expect((await answer('POST', '/api/detach', none, { projectPath: project, key: placeKey(METHODS), session: 'nope' }, TICKET))?.status).toBe(400)
+  })
+
+  test('bringing an older file across to a kehikko’s key is a door of its own, ticketed, and the read never does it', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'kehikko-claude-rekey-')))
+    try {
+      attach(dir, { epic: 'thesis', parts: [], kehikko: { id: 3 }, kehikkoName: 'writing' }, A)
+      const old = 'epic=thesis;parts=-;kehikko=3'
+      const keyed = 'epic=thesis;parts=-;kehikko=key:4072c9e5'
+      const file = join(dir, '.kehikot', 'claude', 'places.json')
+      const before = readFileSync(file, 'utf8')
+
+      /* Reading the keyed place finds nothing, and moves nothing. */
+      expect(((await listing(dir, keyed, runs)) as Listing).sessions).toEqual([])
+      expect(readFileSync(file, 'utf8')).toBe(before)
+
+      const body = { projectPath: dir, kehikko: { key: '4072c9e5', name: 'writing', id: 28 } }
+      expect((await answer('POST', '/api/rekey', none, body, null))?.status).toBe(403)
+      expect((await answer('POST', '/api/rekey', none, { projectPath: dir, kehikko: { key: 'Not A Key', name: 'writing' } }, TICKET))?.status).toBe(400)
+      expect((await answer('POST', '/api/rekey', none, { projectPath: dir }, TICKET))?.status).toBe(400)
+      expect(readFileSync(file, 'utf8')).toBe(before)
+
+      expect((await answer('POST', '/api/rekey', none, body, TICKET))?.body).toEqual({ ok: true, moved: 1 })
+      const read = readPlaces(dir)
+      expect(read.ok && Object.keys(read.value.places)).toEqual([keyed])
+      expect(read.ok && read.value.places[keyed]).toEqual({ epic: 'thesis', parts: [], kehikko: { key: '4072c9e5', id: 28, name: 'writing' }, sessions: [A] })
+      expect(read.ok && Object.hasOwn(read.value.places, old)).toBe(false)
+      /* Asked again, there is nothing left to do. */
+      expect((await answer('POST', '/api/rekey', none, body, TICKET))?.body).toEqual({ ok: true, moved: 0 })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   test('ending something that is not running says so and ends nothing', async () => {
