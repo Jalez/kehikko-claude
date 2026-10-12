@@ -34,7 +34,7 @@ const which = (kehikko: Extract<Target, { what: 'session' }>['place']['kehikko']
 const naming = (target: Target) => (target.what === 'install' ? 'install' : `${target.place.parts.join('+') || 'whole'}@${which(target.place.kehikko)}:${target.session ?? 'new'}`)
 
 mock.module('../src/view/terminal-view.tsx', () => ({
-  TerminalView: ({ target, shown, onStanding, onSaid }: { target: Target; shown: boolean; onStanding?: (s: Standing) => void; onSaid?: (s: object) => void }) => {
+  TerminalView: ({ target, shown, watched, onStanding, onSaid }: { target: Target; shown: boolean; watched?: boolean; onStanding?: (s: Standing) => void; onSaid?: (s: object) => void }) => {
     useEffect(() => {
       const mine: Mounted = { target, tell: (next) => onStanding?.(next), say: (said) => onSaid?.(said) }
       mounted.push(mine)
@@ -44,7 +44,7 @@ mock.module('../src/view/terminal-view.tsx', () => ({
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
-    return <div data-terminal={naming(target)} data-shown={shown ? 'yes' : 'no'} />
+    return <div data-terminal={naming(target)} data-shown={shown ? 'yes' : 'no'} data-watched={(watched ?? shown) ? 'yes' : 'no'} />
   },
 }))
 
@@ -58,7 +58,7 @@ const row = (id: string, more: Partial<Row> = {}): Row => ({ id, label: '', last
 /** A server in a variable: what each place holds, and what was asked of it. */
 function server(start: Record<string, Row[]> = {}) {
   const held: Record<string, Row[]> = { ...start }
-  const state = { found: '/bin/claude' as string | null, lacks: null as string | null, running: [] as Listing['running'], most: 6, others: [] as Row[] }
+  const state = { found: '/bin/claude' as string | null, lacks: null as string | null, running: [] as Listing['running'], others: [] as Row[] }
   const asked: string[] = []
   /** What the page asked to have brought across to a kehikko's key, in order with the reads. */
   const order: string[] = []
@@ -77,7 +77,6 @@ function server(start: Record<string, Row[]> = {}) {
         sessions: held[key] ?? [],
         others: state.others,
         running: state.running,
-        most: state.most,
       }
     },
     end: async (session) => {
@@ -438,27 +437,75 @@ describe('the one control, and what it leads to', () => {
   })
 })
 
-describe('at the bound', () => {
-  test('a refused open ends nothing: the person is shown what is running, ends one, and the open goes ahead', async () => {
-    const s = server()
+describe('nothing stands between a place and its session', () => {
+  const elsewhere = (n: number): Listing['running'] => Array.from({ length: n }, (_, k) => ({ id: `r${k}`, label: '', projectPath: '/p/other', place: null, here: false, startedAt: k }))
+
+  test('however many are running, a place with one recorded session opens it, and one with none gets a new one', async () => {
+    const s = server({ [KEY()]: [row('a')] })
+    s.state.running = elsewhere(12)
+    const { container, rerender } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    expect(shown(container)).toEqual(['whole@3:a'])
+    expect(container.querySelector('[data-chooser]')).toBeNull()
+    rerender(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
+    await flush()
+    expect(shown(container)).toEqual(['methods@3:new'])
+    expect(container.querySelector('[data-chooser]')).toBeNull()
+    expect(container.textContent).not.toContain('as many as')
+  })
+
+  test('the server is told which view is on screen: the one of the place the canvas is on, and no other', async () => {
+    const s = server({ [KEY()]: [row('a')], [KEY(['methods'])]: [row('b')] })
+    const { container, rerender } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    act(() => view('whole@3:a').say({ session: 'a', exists: true }))
+    rerender(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
+    await flush()
+    const watched = () => Object.fromEntries([...container.querySelectorAll('[data-terminal]')].map((one) => [one.getAttribute('data-terminal'), one.getAttribute('data-watched')]))
+    expect(watched()).toEqual({ 'whole@3:a': 'no', 'methods@3:b': 'yes' })
+    /* The list drawn over the terminal hides it and does not make it unwatched. */
+    fireEvent.click(container.querySelector('[data-sessions]') as HTMLElement)
+    await flush()
+    expect(container.querySelector('[data-chooser="sessions"]')).not.toBeNull()
+    expect(watched()).toEqual({ 'whole@3:a': 'no', 'methods@3:b': 'yes' })
+  })
+
+  test('a session put away behind another view is let go without a word, and its place resumes it', async () => {
+    const s = server({ [KEY()]: [row('a')], [KEY(['methods'])]: [row('b')] })
+    const { container, rerender } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    act(() => view('whole@3:a').say({ session: 'a', exists: true }))
+    rerender(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
+    await flush()
+    expect(all(container)).toEqual(['whole@3:a', 'methods@3:b'])
+
+    /* The server put the first one's process away (`CLOSED.rested`). */
+    act(() => view('whole@3:a').tell({ at: 'closed', code: 4001, why: 'put away while it was quiet' }))
+    await flush()
+    expect(all(container)).toEqual(['methods@3:b'])
+    expect(shown(container)).toEqual(['methods@3:b'])
+    expect(container.querySelector('[data-ended]')).toBeNull()
+    expect(container.querySelector('[data-chooser]')).toBeNull()
+    expect(container.textContent).not.toContain('put away')
+
+    /* Back to the place: the same session, asked for by its id, with no question. */
+    rerender(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    expect(shown(container)).toEqual(['whole@3:a'])
+    expect(container.querySelector('[data-chooser]')).toBeNull()
+    expect(container.querySelector('[data-ended]')).toBeNull()
+  })
+
+  test('were the one on screen ever put away, it is opened again at once and no strip is drawn', async () => {
+    const s = server({ [KEY()]: [row('a')] })
     const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
     await flush()
-    s.state.most = 2
-    s.state.running = [
-      { id: 'x', label: 'the oldest', projectPath: P, place: null, here: false, startedAt: 1 },
-      { id: 'y', label: 'another', projectPath: '/p/other', place: null, here: false, startedAt: 2 },
-    ]
-    act(() => view('whole@3:new').tell({ at: 'closed', code: 4429, why: '2 sessions are running' }))
+    const before = view('whole@3:a')
+    act(() => before.tell({ at: 'closed', code: 4001, why: 'put away while it was quiet' }))
     await flush()
-    expect(container.querySelector('[data-chooser="full"]')?.textContent).toContain('2 sessions are running, which is as many as this module keeps')
-    expect(mounted.length).toBe(0)
-    expect(s.asked.filter((one) => one.startsWith('end'))).toEqual([])
-
-    fireEvent.click(container.querySelectorAll('[data-row="running"] button')[0] as HTMLElement)
-    await act(async () => void (await new Promise((done) => setTimeout(done, 250))))
-    await flush()
-    expect(s.asked).toContain('end x')
-    expect(shown(container)).toEqual(['whole@3:new'])
+    expect(shown(container)).toEqual(['whole@3:a'])
+    expect(view('whole@3:a')).not.toBe(before)
+    expect(container.querySelector('[data-ended]')).toBeNull()
   })
 })
 

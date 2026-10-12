@@ -177,7 +177,8 @@ class Watcher implements Viewer {
 /** Long enough for the emulator's write queue and the promises behind an open to have run. */
 const settle = () => new Promise((done) => setTimeout(done, 25))
 
-function world(options: { most?: number; found?: string | null; able?: boolean; line?: string; grace?: number } = {}) {
+function world(options: { found?: string | null; able?: boolean; line?: string; grace?: number; quiet?: number } = {}) {
+  const logged: string[] = []
   const ptys: FakePty[] = []
   /* What the stand-in program holds a record for, by folder. */
   const held = new Map<string, Recorded[]>()
@@ -198,8 +199,11 @@ function world(options: { most?: number; found?: string | null; able?: boolean; 
   }
   const runs = new Runs({
     program,
-    most: options.most ?? 6,
     grace: options.grace ?? 60_000,
+    quiet: options.quiet ?? 30 * 60_000,
+    /* No clock of its own: a test moves the time and calls `rest`. */
+    every: null,
+    log: (line) => logged.push(line),
     now: () => clock,
     screen: headless,
     spawn: (file, args, opts) => {
@@ -211,6 +215,7 @@ function world(options: { most?: number; found?: string | null; able?: boolean; 
   return {
     runs,
     ptys,
+    logged,
     /** The program writes its record: from here on the session exists. */
     records: (projectPath: string, id: string, label = '') => held.set(projectPath, [...(held.get(projectPath) ?? []).filter((one) => one.id !== id), { id, label, lastActive: clock }]),
     later: (ms: number) => {
@@ -505,29 +510,62 @@ describe('a session that was never one', () => {
   })
 })
 
-describe('the bound on how many run at once', () => {
-  test('at the bound an open is refused and nothing is ended to make room', async () => {
+describe('what counts as typing', () => {
+  /* What xterm answered Claude Code 2.1.296 before any key, the focus the page gives its terminal, and a pointer crossing it. */
+  const REPLIES = ['\x1b[?1;2c', '\x1b[I', '\x1b[O', '\x1b[<35;40;12M', '\x1b[<0;40;12M\x1b[<0;40;12m', '\x1b[12;1R', '\x1b]11;rgb:0a0a/0a0a/0a0a\x1b\\', '\x1bP>|xterm.js(6.0.0)\x1b\\', '\x1b[?0u', '\x1b[?2026;2$y', '\x1b[?997;1n']
+
+  test('the emulator’s own replies reach the program and are not typing: the run is still ended after the moment', async () => {
     const dir = project()
-    const w = world({ most: 2 })
-    await w.runs.open(ask(dir, null), new Watcher())
-    await w.runs.open(ask(dir, null, { ...HERE, parts: [] }), new Watcher())
-    const refused = await w.runs.open(ask(dir, null, { ...HERE, parts: ['results'] }), new Watcher())
-    expect(refused).toMatchObject({ code: CLOSED.full })
-    expect(w.ptys.length).toBe(2)
+    const w = world({ grace: 30 })
+    const viewer = new Watcher()
+    const run = (await w.runs.open(ask(dir, null), viewer)) as Run
+    await settle()
+    for (const reply of REPLIES) w.runs.type(run, reply)
+    /* Every one was handed on: the program asked, and has to be answered. */
+    expect(w.ptys[0]!.typed).toEqual(REPLIES)
+    expect(run.touched).toBe(false)
+    w.runs.detach(run, viewer)
+    await new Promise((done) => setTimeout(done, 80))
+    expect(w.ptys[0]!.killed).toBe(true)
+  })
+
+  test('a key, a key a full-screen program is sent, and a paste are each typing, and keep it', async () => {
+    for (const typed of ['h', '\r', '\x1b[A', '\x1bOP', '\x1b[97;5u', '\x03', '\x1b[200~pasted text\x1b[201~', '\x1b[?1;2ch']) {
+      const dir = project()
+      const w = world({ grace: 20 })
+      const viewer = new Watcher()
+      const run = (await w.runs.open(ask(dir, null), viewer)) as Run
+      await settle()
+      w.runs.type(run, '\x1b[?1;2c')
+      w.runs.type(run, typed)
+      expect(run.touched).toBe(true)
+      w.runs.detach(run, viewer)
+      await new Promise((done) => setTimeout(done, 60))
+      expect(w.ptys[0]!.killed).toBe(false)
+    }
+  })
+})
+
+describe('there is no limit on how many run', () => {
+  test('an open is never refused for what else is running: a new one, and one resumed', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A, 'an earlier conversation')
+    for (let n = 0; n < 12; n += 1) {
+      expect(isRun(await w.runs.open(ask(dir, null, { ...HERE, parts: [`part-${n}`] }), new Watcher()))).toBe(true)
+    }
+    const viewer = new Watcher()
+    expect(isRun(await w.runs.open(ask(dir, A), viewer))).toBe(true)
+    expect(viewer.said[0]).toMatchObject({ opened: 'resumed', session: A })
+    expect(w.ptys.length).toBe(13)
     expect(w.ptys.every((pty) => !pty.killed)).toBe(true)
-    expect(w.runs.sessions().length).toBe(2)
+    expect(w.runs.sessions().length).toBe(13)
+    expect(Object.values(CLOSED)).not.toContain(4429)
   })
 
-  test('coming back to one that is running is never refused for room', async () => {
+  test('a person may still end the one they choose', async () => {
     const dir = project()
-    const w = world({ most: 1 })
-    await w.runs.open(ask(dir, null), new Watcher())
-    expect(isRun(await w.runs.open(ask(dir, B), new Watcher()))).toBe(true)
-  })
-
-  test('the person ends the one they choose, and then there is room', async () => {
-    const dir = project()
-    const w = world({ most: 1 })
+    const w = world()
     const viewer = new Watcher()
     await w.runs.open(ask(dir, null), viewer)
     await settle()
@@ -536,7 +574,6 @@ describe('the bound on how many run at once', () => {
     await settle()
     expect(w.ptys[0]!.killed).toBe(true)
     expect(viewer.closed?.code).toBe(CLOSED.ended)
-    expect(isRun(await w.runs.open(ask(dir, null, { ...HERE, parts: [] }), new Watcher()))).toBe(true)
   })
 
   test('when this process stops, nothing it started is left running', async () => {
@@ -546,6 +583,136 @@ describe('the bound on how many run at once', () => {
     await w.runs.open(ask(dir, null, { ...HERE, parts: [] }), new Watcher())
     w.runs.endAll()
     expect(w.ptys.every((pty) => pty.killed)).toBe(true)
+  })
+})
+
+describe('a waiting session nobody is looking at is put away, and resumed', () => {
+  const QUIET = 30 * 60_000
+  const THERE = { ...HERE, parts: ['results'] }
+
+  /** A recorded session, opened and typed into, with its one viewer. */
+  async function working(w: ReturnType<typeof world>, dir: string, id: string, place: NamedPlace = HERE) {
+    w.records(dir, id, 'a conversation')
+    const viewer = new Watcher()
+    const run = (await w.runs.open(ask(dir, id, place), viewer)) as Run
+    await settle()
+    w.runs.type(run, 'hello\r')
+    return { run, viewer, pty: w.ptys.at(-1)! }
+  }
+
+  test('quiet for the whole time with nobody looking: its process is ended, one line is logged, and nothing is said of an ending', async () => {
+    const dir = project()
+    const w = world({ quiet: QUIET })
+    const { run, viewer, pty } = await working(w, dir, A)
+    /* The canvas moves on: the view stays mounted behind another, socket open, and says it is not on screen. */
+    w.runs.look(run, viewer, false)
+    w.later(QUIET - 1)
+    expect(w.runs.rest()).toEqual([])
+    expect(pty.killed).toBe(false)
+    w.later(1)
+    expect(w.runs.rest()).toEqual([run])
+    await settle()
+    expect(pty.killed).toBe(true)
+    expect(w.runs.find(A)).toBeNull()
+    expect(viewer.closed?.code).toBe(CLOSED.rested)
+    expect(w.logged.filter((line) => line.includes('put away'))).toEqual([`claude: put away ${A}, which nobody was looking at and which had printed nothing for 30 min — its place resumes it`])
+    /* The record is untouched: the place still has its session. */
+    expect(listed(dir)).toEqual([A])
+  })
+
+  test('the place resumes it by its id on the next visit: the same session, started again', async () => {
+    const dir = project()
+    const w = world({ quiet: QUIET })
+    const { run, viewer } = await working(w, dir, A)
+    w.runs.detach(run, viewer)
+    w.later(QUIET)
+    w.runs.rest()
+    await settle()
+    expect(w.runs.sessions()).toEqual([])
+
+    const back = new Watcher()
+    const again = await w.runs.open(ask(dir, A), back)
+    expect(isRun(again)).toBe(true)
+    expect(again).not.toBe(run)
+    expect(w.ptys.length).toBe(2)
+    expect(w.ptys[1]!.args).toEqual(['--resume', A])
+    expect(back.said[0]).toMatchObject({ opened: 'resumed', session: A, exists: true })
+    expect(listed(dir)).toEqual([A])
+  })
+
+  test('one somebody has on screen is never put away, however long it is quiet', async () => {
+    const dir = project()
+    const w = world({ quiet: QUIET })
+    const { pty } = await working(w, dir, A)
+    w.later(QUIET * 20)
+    expect(w.runs.rest()).toEqual([])
+    expect(pty.killed).toBe(false)
+  })
+
+  test('one that is printing is never put away, however long nobody has looked', async () => {
+    const dir = project()
+    const w = world({ quiet: QUIET })
+    const { run, viewer, pty } = await working(w, dir, A)
+    w.runs.detach(run, viewer)
+    /* Three hours of an agent at work: a spinner frame every so often, never a silence as long as the time. */
+    for (let n = 0; n < 36; n += 1) {
+      w.later(5 * 60_000)
+      pty.says('\r⠋ working…')
+      expect(w.runs.rest()).toEqual([])
+    }
+    expect(pty.killed).toBe(false)
+    /* It finishes and waits. Only then does the time start. */
+    w.later(QUIET - 1)
+    expect(w.runs.rest()).toEqual([])
+    w.later(1)
+    expect(w.runs.rest()).toEqual([run])
+  })
+
+  test('the time starts when the last person looks away, not when the program last printed', async () => {
+    const dir = project()
+    const w = world({ quiet: QUIET })
+    const { run, viewer, pty } = await working(w, dir, A)
+    /* Read for two hours, nothing printed. */
+    w.later(4 * QUIET)
+    w.runs.look(run, viewer, false)
+    expect(w.runs.rest()).toEqual([])
+    w.later(QUIET - 1)
+    expect(w.runs.rest()).toEqual([])
+    /* Looked at again, and away again: the whole time once more. */
+    w.runs.look(run, viewer, true)
+    w.later(QUIET)
+    expect(w.runs.rest()).toEqual([])
+    w.runs.look(run, viewer, false)
+    w.later(QUIET - 1)
+    expect(w.runs.rest()).toEqual([])
+    expect(pty.killed).toBe(false)
+    w.later(1)
+    expect(w.runs.rest()).toEqual([run])
+  })
+
+  test('of several, only the quiet unwatched ones go: the watched one and the working one stay', async () => {
+    const dir = project()
+    const w = world({ quiet: QUIET })
+    const quiet = await working(w, dir, A)
+    const watched = await working(w, dir, '66666666-6666-4666-8666-666666666666', THERE)
+    const busy = await working(w, dir, '77777777-7777-4777-8777-777777777777', { ...HERE, parts: [] })
+    w.runs.look(quiet.run, quiet.viewer, false)
+    w.runs.look(busy.run, busy.viewer, false)
+    w.later(QUIET)
+    busy.pty.says('still at it\r\n')
+    expect(w.runs.rest()).toEqual([quiet.run])
+    expect([quiet.pty.killed, watched.pty.killed, busy.pty.killed]).toEqual([true, false, false])
+  })
+
+  test('the installer is not a session and is never put away', async () => {
+    const w = world({ found: null, quiet: QUIET })
+    const viewer = new Watcher()
+    const run = (await w.runs.install({ what: 'install', cols: 100, rows: 30 }, viewer)) as Run
+    await settle()
+    w.runs.detach(run, viewer)
+    w.later(QUIET * 4)
+    expect(w.runs.rest()).toEqual([])
+    expect(w.ptys[0]!.killed).toBe(false)
   })
 })
 
@@ -564,7 +731,7 @@ describe('installing, which only a press in the page can ask for', () => {
     await settle()
     expect(viewer.out.indexOf('$ curl -fsSL https://example.invalid/install.sh | bash')).toBe(0)
     expect(viewer.out).toContain('downloading…')
-    /* It is not a session: it does not count against the bound, and nothing is recorded. */
+    /* It is not a session, and nothing is recorded. */
     expect(w.runs.sessions()).toEqual([])
   })
 

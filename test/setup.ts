@@ -24,6 +24,6 @@ process.env.CLAUDE_CONFIG_DIR = CONFIG
 process.env.KEHIKOT_MODULES_DIR = join(SCRATCH, 'modules')
 process.env.PATH = '/usr/bin:/bin'
 delete process.env.KEHIKOT_CLAUDE_INSTALL_LINE
-delete process.env.KEHIKOT_CLAUDE_MOST_RUNNING
+delete process.env.KEHIKOT_CLAUDE_QUIET_MS
 
 GlobalRegistrator.register()

@@ -1,22 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import type { Listing, Row } from '../../doors.ts'
-import { readPlaceKey } from '../../place.ts'
 import { ago, named } from './places.ts'
 
 /**
  * The list a person chooses a session from, drawn where the terminal would be.
  *
- * Three occasions, one list:
+ * Two occasions, one list:
  *
  *  - **`ask`**: the place has more than one session, and nothing is opened
  *    until one is chosen. There is no way out of it but choosing.
  *  - **`sessions`**: the person pressed the control in the corner of a
  *    running terminal. The same list with the one on screen marked; Escape
  *    goes back to it.
- *  - **`full`**: as many sessions are running as this module keeps. Nothing
- *    is ended to make room — the list is of what is running, and the person
- *    ends the one they choose.
+ *
+ * It is never drawn to stand in the way. There was a third occasion — as
+ * many sessions running as the module would keep, and a list to end one from
+ * — and it is gone with the limit it belonged to (see live.ts). `End` is on a
+ * running session's own row for a person who wants it, and nobody is asked
+ * to press it.
  *
  * Every row is a button, so the pointer and Tab both reach all of it. On top
  * of that the list itself takes the keyboard: the arrows (or j and k) move,
@@ -44,20 +46,10 @@ type Item =
   | { kind: 'session'; row: Row; attach: boolean }
   | { kind: 'new' }
   | { kind: 'attach' }
-  | { kind: 'running'; id: string; label: string; projectPath: string; place: string | null; here: boolean }
-
-/** Where a running session is, in the words a person would use: its project when it is another one, then the epic and the parts. */
-function whereabouts(item: { projectPath: string; place: string | null; here: boolean }, sameProject: boolean): string {
-  if (item.here) return 'here'
-  const place = item.place ? readPlaceKey(item.place) : null
-  const words = place ? [place.epic ?? 'no epic', place.parts.length ? place.parts.join(' + ') : 'all parts'].join(' · ') : ''
-  return sameProject ? words : [item.projectPath.split('/').pop(), words].filter(Boolean).join(' · ')
-}
 
 export function Chooser({
   mode,
   listing,
-  project = null,
   current = null,
   now = Date.now(),
   onOpen,
@@ -65,10 +57,8 @@ export function Chooser({
   onDetach,
   onClose,
 }: {
-  mode: 'ask' | 'sessions' | 'full'
+  mode: 'ask' | 'sessions'
   listing: Listing
-  /** The open project's folder, so a session running in another one can say so. */
-  project?: string | null
   /** The session on screen behind this list, if there is one. */
   current?: string | null
   now?: number
@@ -82,21 +72,19 @@ export function Chooser({
   /* Where the keyboard starts: the first row that can be opened. A session that is not on this
      computer is listed where it was added, which may be first, and Enter on it would do nothing. */
   const [at, setAt] = useState(() => {
-    if (mode === 'full') return 0
     const first = listing.sessions.findIndex((row) => !row.missing)
     return first === -1 ? listing.sessions.length : first
   })
   const list = useRef<HTMLDivElement>(null)
 
   const items = useMemo<Item[]>(() => {
-    if (mode === 'full') return listing.running.map((run) => ({ kind: 'running', ...run }))
     return [
       ...listing.sessions.map((row): Item => ({ kind: 'session', row, attach: false })),
       { kind: 'new' },
       ...(listing.others.length ? [{ kind: 'attach' } as Item] : []),
       ...(others ? listing.others.map((row): Item => ({ kind: 'session', row, attach: true })) : []),
     ]
-  }, [mode, listing, others])
+  }, [listing, others])
 
   /* The list takes the keyboard as it appears: a person who was typing in a
      terminal a moment ago should not have to reach for the pointer. */
@@ -111,8 +99,7 @@ export function Chooser({
     if (item.kind === 'session') {
       if (!item.row.missing) onOpen(item.row.id)
     } else if (item.kind === 'new') onOpen(null)
-    else if (item.kind === 'attach') setOthers((open) => !open)
-    else onEnd(item.id)
+    else setOthers((open) => !open)
   }
 
   const key = (event: React.KeyboardEvent) => {
@@ -127,12 +114,7 @@ export function Chooser({
     event.preventDefault()
   }
 
-  const said =
-    mode === 'full'
-      ? `${listing.running.length} sessions are running, which is as many as this module keeps — end one to open this one.`
-      : mode === 'ask'
-        ? 'More than one session belongs here. Which one?'
-        : 'Sessions here'
+  const said = mode === 'ask' ? 'More than one session belongs here. Which one?' : 'Sessions here'
 
   return (
     <div
@@ -156,21 +138,6 @@ export function Chooser({
               {number}
               <span>{item.kind === 'new' ? 'New session' : others ? 'Attach an existing session ▾' : `Attach an existing session… (${listing.others.length})`}</span>
             </button>
-          )
-        }
-
-        if (item.kind === 'running') {
-          return (
-            <div key={item.id} role="option" aria-selected={on} data-row="running" className={shell} onMouseMove={() => setAt(index)}>
-              {number}
-              <span className="min-w-0 flex-1 truncate">{item.label || 'No prompt yet'}</span>
-              <span className="text-muted-foreground min-w-0 shrink truncate" title={item.projectPath}>
-                {whereabouts(item, item.projectPath === project)}
-              </span>
-              <button type="button" className="hover:bg-background shrink-0 rounded border px-1.5" onClick={() => onEnd(item.id)}>
-                End
-              </button>
-            </div>
           )
         }
 
