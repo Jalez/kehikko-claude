@@ -46,6 +46,7 @@ describe('finding the binary', () => {
     const found = PROGRAM.find({ HOME, PATH: `/nowhere:${bin}` })
     expect(found.file).toBe(join(bin, 'claude'))
     expect(found.looked).toEqual(['/nowhere', bin])
+    expect(found.usual[0]).toBe(join(HOME, '.local', 'bin'))
   })
 
   test('then the usual places a thin PATH leaves out — where the vendor’s installer puts it first', () => {

@@ -6,8 +6,8 @@ import type { Listing } from '../doors.ts'
 import { ID } from '../manifest.ts'
 import { api as realApi, type Api } from './api.ts'
 import { Chooser } from './view/chooser.tsx'
-import { MOST_VIEWS, brief, decide, lookedIn, placeId, standing, surplus, type Standing as Place, type View } from './view/places.ts'
-import { TerminalView, type Standing } from './view/terminal-view.tsx'
+import { MOST_VIEWS, SETTLE_MS, brief, decide, placeId, standing, surplus, type Standing as Place, type View } from './view/places.ts'
+import { TerminalView, type Said, type Standing } from './view/terminal-view.tsx'
 import { Button } from '@/components/ui/button'
 
 /** What the shared sentences call this module. */
@@ -86,6 +86,7 @@ export function Sessions({
   at,
   cover = null,
   api = realApi,
+  settleMs = SETTLE_MS,
 }: {
   theme: 'light' | 'dark'
   /** The place the canvas is about, or null when there is nothing to open. */
@@ -93,6 +94,8 @@ export function Sessions({
   /** The shared not-ready state — waiting, unhosted, no project, server down, page stale — or none. */
   cover?: CoverState | null
   api?: Api
+  /** How long a place is stood on before a new session is started for it. */
+  settleMs?: number
 }) {
   const [views, setViews] = useState<View[]>([])
   /** Which view each place shows, by `placeId`. */
@@ -130,8 +133,21 @@ export function Sessions({
     }
   }, [project, key, again, api])
 
-  /* Another place: the list that was open over the last one is not about this one. */
-  useEffect(() => setAsking(false), [project, key])
+  /*
+   * Another place. The list that was open over the last one is not about
+   * this one; and a view left behind with nothing in it — a new session
+   * nobody typed into — is let go rather than kept, so that walking through
+   * places does not leave a process at each. The server ends what was behind
+   * it a little later, unless somebody comes back first.
+   */
+  useEffect(() => {
+    setAsking(false)
+    const gone = views.filter((one) => !one.kept && placeId(one.at) !== id).map((one) => one.n)
+    if (!gone.length) return
+    setViews((all) => all.filter((one) => !gone.includes(one.n)))
+    setShownBy((all) => Object.fromEntries(Object.entries(all).filter(([, shown]) => !gone.includes(shown))))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project, key])
 
   const drop = (n: number) => {
     setViews((all) => all.filter((one) => one.n !== n))
@@ -146,7 +162,7 @@ export function Sessions({
     const was = views.find((one) => one.n === shownBy[id])
     if (was && session && was.session === session && standings[was.n]?.at !== 'closed') return
     count.current += 1
-    const next: View = { n: count.current, at, session, shownAt: Date.now() }
+    const next: View = { n: count.current, at, session, shownAt: Date.now(), kept: false }
     const kept = [...views.filter((one) => one.n !== was?.n), next]
     const gone = surplus(kept, next.n, MOST_VIEWS).map((one) => one.n)
     setViews(kept.filter((one) => !gone.includes(one.n)))
@@ -167,7 +183,11 @@ export function Sessions({
   useEffect(() => {
     if (!at || !here || view || installing || full) return
     const step = decide(here, remembered.at(at.projectPath).read(at.key))
-    if (step.do === 'open') opened.current(step.session)
+    if (step.do !== 'open') return
+    if (step.session) return opened.current(step.session)
+    /* A new session waits a moment for the canvas to stop moving. */
+    const waited = setTimeout(() => opened.current(null), settleMs)
+    return () => clearTimeout(waited)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [here, view === null, installing === null, full])
 
@@ -197,7 +217,8 @@ export function Sessions({
     setStandings((all) => ({ ...all, [one.n]: next }))
   }
 
-  const said = (one: View, heard: { session?: string | null; label?: string }) => {
+  const said = (one: View, heard: Said) => {
+    if (heard.typed || heard.exists) setViews((all) => all.map((each) => (each.n === one.n && !each.kept ? { ...each, kept: true } : each)))
     const session = heard.session
     if (session) {
       setViews((all) => all.map((each) => (each.n === one.n && each.session !== session ? { ...each, session } : each)))
@@ -235,8 +256,8 @@ export function Sessions({
           <div title={here.program.lacks ? (here.program.found ?? '') : here.program.looked.join('\n')}>
             <Cover state="empty" name={NAME}>
               {here.program.lacks
-                ? `${here.program.name} at ${here.program.found} is too old for this: it has no ${here.program.lacks}.`
-                : `${here.program.name} is not installed — looked in ${lookedIn(here.program.looked)}.`}
+                ? `${here.program.name} at ${here.program.foundAt} is too old for this: it has no ${here.program.lacks}.`
+                : `${here.program.name} is not installed — looked in ${here.program.where}.`}
             </Cover>
           </div>
           <Button
@@ -259,6 +280,7 @@ export function Sessions({
           <Chooser
             mode={fullNow ? 'full' : view ? 'sessions' : 'ask'}
             listing={here}
+            project={here.running.find((one) => one.here)?.projectPath ?? at?.projectPath ?? null}
             current={view?.session ?? null}
             onOpen={open}
             onClose={view ? () => setAsking(false) : undefined}

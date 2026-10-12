@@ -55,6 +55,12 @@ import { placeKey, readPlaceKey, sortedParts, type Place } from './place.ts'
  * for every other place in the project. A rename changes nothing at all, since
  * a rename does not change an id.
  *
+ * The same is true, less happily, when the HOST renumbers a kehikko: the id
+ * in `context.kehikko` is the host's own number for it, which changes when a
+ * project is forgotten and added again and differs on another machine. The
+ * host keeps a stable `key` per kehikko in its own record; the protocol does
+ * not carry it yet, and the day it does is the day this key should use it.
+ *
  * ## One writer at a time, with nothing awaited in the middle
  *
  * Every change is read-modify-write, and every one of them is synchronous

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import { WELL_KNOWN } from 'kehikot-module-protocol'
 
-import { MANIFEST, TICKET, answer, listing, type Listing } from '../doors.ts'
+import { MANIFEST, TICKET, answer, listing, lookedIn, type Listing } from '../doors.ts'
 import { Runs, headless } from '../live.ts'
 import { ID } from '../manifest.ts'
 import { placeKey } from '../place.ts'
@@ -89,6 +89,9 @@ describe('what a place holds', () => {
     expect(typeof said.sessions[0]?.lastActive).toBe('number')
     expect(said.program.found).toBeNull()
     expect(said.program.looked.length).toBeGreaterThan(2)
+    /* For the one sentence: PATH as one word, then where an install usually lands, the home folder as ~. */
+    expect(said.program.where).toBe('PATH, ~/.local/bin, ~/.claude/local, /opt/homebrew/bin')
+    expect(lookedIn(['/Users/someone/.local/bin', '/opt/homebrew/bin'], '/Users/someone')).toBe('PATH, ~/.local/bin, /opt/homebrew/bin')
     expect(said.program.install.line).toContain('install.sh')
     expect(said.running).toEqual([])
   })

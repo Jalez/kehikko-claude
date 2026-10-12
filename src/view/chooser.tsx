@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import type { Listing, Row } from '../../doors.ts'
+import { readPlaceKey } from '../../place.ts'
 import { ago, named } from './places.ts'
 
 /**
@@ -26,11 +27,20 @@ type Item =
   | { kind: 'session'; row: Row; attach: boolean }
   | { kind: 'new' }
   | { kind: 'attach' }
-  | { kind: 'running'; id: string; label: string; projectPath: string; here: boolean }
+  | { kind: 'running'; id: string; label: string; projectPath: string; place: string | null; here: boolean }
+
+/** Where a running session is, in the words a person would use: its project when it is another one, then the epic and the parts. */
+function whereabouts(item: { projectPath: string; place: string | null; here: boolean }, sameProject: boolean): string {
+  if (item.here) return 'here'
+  const place = item.place ? readPlaceKey(item.place) : null
+  const words = place ? [place.epic ?? 'no epic', place.parts.length ? place.parts.join(' + ') : 'all parts'].join(' · ') : ''
+  return sameProject ? words : [item.projectPath.split('/').pop(), words].filter(Boolean).join(' · ')
+}
 
 export function Chooser({
   mode,
   listing,
+  project = null,
   current = null,
   now = Date.now(),
   onOpen,
@@ -40,6 +50,8 @@ export function Chooser({
 }: {
   mode: 'ask' | 'sessions' | 'full'
   listing: Listing
+  /** The open project's folder, so a session running in another one can say so. */
+  project?: string | null
   /** The session on screen behind this list, if there is one. */
   current?: string | null
   now?: number
@@ -129,7 +141,7 @@ export function Chooser({
               {number}
               <span className="min-w-0 flex-1 truncate">{item.label || 'No prompt yet'}</span>
               <span className="text-muted-foreground min-w-0 shrink truncate" title={item.projectPath}>
-                {item.here ? 'here' : item.projectPath.split('/').pop()}
+                {whereabouts(item, item.projectPath === project)}
               </span>
               <button type="button" className="hover:bg-background shrink-0 rounded border px-1.5" onClick={() => onEnd(item.id)}>
                 End

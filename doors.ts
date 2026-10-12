@@ -3,7 +3,7 @@ import { establishBuild, refuseTicket, type Reply } from 'kehikot-module-protoco
 import { MOST_RUNNING, TICKET, theRuns, type Runs } from './live.ts'
 import { ID, MANIFEST, VERSION } from './manifest.ts'
 import { readPlaceKey } from './place.ts'
-import { PROGRAM, type Program } from './program.ts'
+import { PROGRAM, home, type Program } from './program.ts'
 import { WHERE, detach, projectRoot, readPlaces, sessionsAt } from './record.ts'
 
 /**
@@ -58,9 +58,12 @@ export interface Listing {
   ok: true
   program: {
     name: string
-    /** The binary, or null when it was not found. */
+    /** The binary, or null when it was not found. `foundAt` is the same with the home folder as `~`. */
     found: string | null
+    foundAt: string | null
     looked: string[]
+    /** The same, short enough for one sentence: PATH as one word, then the usual places. */
+    where: string
     /** What an installed copy lacks, when it is too old to use. Null otherwise. */
     lacks: string | null
     install: { line: string; lands: string }
@@ -70,7 +73,7 @@ export interface Listing {
   /** The project's other sessions: they belong to no place, or to another. */
   others: Row[]
   /** Everything running, in any project, for the list a person ends one from. */
-  running: { id: string; label: string; projectPath: string; here: boolean; startedAt: number }[]
+  running: { id: string; label: string; projectPath: string; place: string | null; here: boolean; startedAt: number }[]
   most: number
 }
 
@@ -97,9 +100,12 @@ export async function listing(
 
   const found = program.find()
   const able = found.file ? await program.supports(found.file) : { ok: true, missing: null }
+  const live = runs.sessions()
+  /* A running session that had not been recorded, or named, the last time the
+     program spoke may have been since: somebody is about to read the list. */
+  await Promise.all(live.filter((run) => !run.settled || !run.label).map((run) => runs.settle(run).catch(() => {})))
   const held = await program.sessions(root.value)
   const known = new Map(held.map((one) => [one.id, one]))
-  const live = runs.sessions()
 
   const row = (id: string): Row => {
     const run = live.find((one) => one.id === id || one.settled === id)
@@ -125,7 +131,9 @@ export async function listing(
     program: {
       name: program.name,
       found: found.file,
+      foundAt: found.file ? tidy(found.file) : null,
       looked: found.looked,
+      where: lookedIn(found.usual),
       lacks: able.ok ? null : able.missing,
       install: { line: install.line, lands: install.lands },
     },
@@ -135,11 +143,22 @@ export async function listing(
       id: run.settled ?? run.id,
       label: run.label,
       projectPath: run.projectPath,
+      place: run.key,
       here: run.projectPath === root.value && run.key === key,
       startedAt: run.startedAt,
     })),
     most,
   }
+}
+
+/** Where the program was looked for, in few enough words for one sentence. The whole list is `looked`. */
+export function lookedIn(usual: readonly string[], at = home()): string {
+  return ['PATH', ...usual.slice(0, 3).map((dir) => tidy(dir, at))].join(', ')
+}
+
+/** A path with the home folder written as `~`, as a person would say it. */
+function tidy(path: string, at = home()): string {
+  return at && path.startsWith(`${at}/`) ? `~${path.slice(at.length)}` : path
 }
 
 /* ------------------------------------------------------------------ *

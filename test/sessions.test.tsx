@@ -26,7 +26,7 @@ import type { Standing, Target } from '../src/view/terminal-view.tsx'
 interface Mounted {
   target: Target
   tell: (standing: Standing) => void
-  say: (said: { session?: string | null; label?: string }) => void
+  say: (said: { session?: string | null; label?: string; exists?: boolean; typed?: boolean }) => void
 }
 const mounted: Mounted[] = []
 const unmounted: Target[] = []
@@ -47,7 +47,9 @@ mock.module('../src/view/terminal-view.tsx', () => ({
   },
 }))
 
-const { Sessions } = await import('../src/app.tsx')
+const { Sessions: Real } = await import('../src/app.tsx')
+/* A new session waits for the canvas to stop moving; here it does not have to, except where that wait is the thing under test. */
+const Sessions = (props: Parameters<typeof Real>[0]) => <Real settleMs={0} {...props} />
 
 const P = '/Users/someone/Projects/thesis'
 const row = (id: string, more: Partial<Row> = {}): Row => ({ id, label: '', lastActive: null, running: false, ...more })
@@ -62,7 +64,7 @@ function server(start: Record<string, Row[]> = {}) {
       asked.push(key)
       return {
         ok: true,
-        program: { name: 'Claude Code', found: state.found, looked: ['/usr/bin', '/Users/someone/.local/bin'], lacks: state.lacks, install: { line: 'curl -fsSL https://claude.ai/install.sh | bash', lands: '~/.local/bin/claude' } },
+        program: { name: 'Claude Code', found: state.found, foundAt: state.found, looked: ['/usr/bin', '/Users/someone/.local/bin'], where: 'PATH, ~/.local/bin', lacks: state.lacks, install: { line: 'curl -fsSL https://claude.ai/install.sh | bash', lands: '~/.local/bin/claude' } },
         sessions: held[key] ?? [],
         others: state.others,
         running: state.running,
@@ -85,7 +87,12 @@ const at = (parts: string[] = [], kehikko = 3, epic: string | null = 'thesis', p
   standing({ where: 'hosted', projectPath, epic, parts: parts.map((id) => ({ id, picked: true })), kehikko: { id: kehikko, name: `k${kehikko}` } })!
 const KEY = (parts: string[] = [], kehikko = 3) => at(parts, kehikko).key
 
-const flush = () => act(async () => void (await new Promise((done) => setTimeout(done, 5))))
+/* Twice: what the server said is drawn when the first round ends, and a new session is started on a timer set by that drawing. */
+const round = () => act(async () => void (await new Promise((done) => setTimeout(done, 5))))
+const flush = async () => {
+  await round()
+  await round()
+}
 const shown = (container: HTMLElement) => [...container.querySelectorAll('[data-shown="yes"]')].map((one) => one.getAttribute('data-terminal'))
 const all = (container: HTMLElement) => [...container.querySelectorAll('[data-terminal]')].map((one) => one.getAttribute('data-terminal'))
 const view = (name: string) => mounted.find((one) => naming(one.target) === name)!
@@ -152,7 +159,7 @@ describe('moving between places', () => {
     const s = server()
     const { container, rerender } = render(<Sessions theme="dark" at={at()} api={s.api} />)
     await flush()
-    act(() => view('whole@3:new').say({ session: 'first' }))
+    act(() => view('whole@3:new').say({ session: 'first', typed: true }))
     rerender(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
     await flush()
     expect(shown(container)).toEqual(['methods@3:new'])
@@ -166,25 +173,59 @@ describe('moving between places', () => {
     const { container, rerender } = render(<Sessions theme="dark" at={at()} api={s.api} />)
     await flush()
     const first = view('whole@3:new')
+    act(() => first.say({ session: 'first', exists: true }))
     rerender(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
     await flush()
     rerender(<Sessions theme="dark" at={at()} api={s.api} />)
     await flush()
-    expect(shown(container)).toEqual(['whole@3:new'])
+    expect(shown(container)).toEqual(['whole@3:first'])
     expect(mounted.includes(first)).toBe(true)
-    expect(mounted.length).toBe(2)
-    expect(unmounted).toEqual([])
+    expect(unmounted.map(naming)).toEqual(['methods@3:new'])
+  })
+
+  test('a new session nobody typed into is let go when the canvas moves on, so a walk through places leaves nothing behind', async () => {
+    const s = server()
+    const { container, rerender } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    rerender(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
+    await flush()
+    rerender(<Sessions theme="dark" at={at(['methods', 'results'])} api={s.api} />)
+    await flush()
+    expect(all(container)).toEqual(['methods+results@3:new'])
+    expect(unmounted.map(naming)).toEqual(['whole@3:new', 'methods@3:new'])
+  })
+
+  test('a new session is not started for a place the canvas only passed through', async () => {
+    const s = server({ [KEY(['results'])]: [row('r')] })
+    const { container, rerender } = render(<Real theme="dark" at={at()} api={s.api} settleMs={40} />)
+    await flush()
+    rerender(<Real theme="dark" at={at(['methods'])} api={s.api} settleMs={40} />)
+    await flush()
+    expect(mounted.length).toBe(0)
+    /* A session that exists does not wait: it is opened as soon as the place is known. */
+    rerender(<Real theme="dark" at={at(['results'])} api={s.api} settleMs={40} />)
+    await flush()
+    expect(shown(container)).toEqual(['results@3:r'])
+    act(() => view('results@3:r').say({ session: 'r', exists: true }))
+    rerender(<Real theme="dark" at={at(['methods', 'results'])} api={s.api} settleMs={40} />)
+    await flush()
+    await act(async () => void (await new Promise((done) => setTimeout(done, 80))))
+    expect(shown(container)).toEqual(['methods+results@3:new'])
+    expect(mounted.map((one) => naming(one.target)).sort()).toEqual(['methods+results@3:new', 'results@3:r'])
   })
 
   test('another kehikko and another epic are other places too, and the order parts were picked in is not', async () => {
     const s = server()
     const { container, rerender } = render(<Sessions theme="dark" at={at(['methods', 'results'])} api={s.api} />)
     await flush()
+    const first = view('methods+results@3:new')
     rerender(<Sessions theme="dark" at={at(['results', 'methods'])} api={s.api} />)
     await flush()
-    expect(all(container).length).toBe(1)
+    expect(mounted).toEqual([first])
+    act(() => first.say({ typed: true }))
     rerender(<Sessions theme="dark" at={at(['methods', 'results'], 4)} api={s.api} />)
     await flush()
+    act(() => view('methods+results@4:new').say({ typed: true }))
     rerender(<Sessions theme="dark" at={at(['methods', 'results'], 4, 'other-epic')} api={s.api} />)
     await flush()
     expect(all(container).length).toBe(3)
@@ -303,8 +344,8 @@ describe('at the bound', () => {
     await flush()
     s.state.most = 2
     s.state.running = [
-      { id: 'x', label: 'the oldest', projectPath: P, here: false, startedAt: 1 },
-      { id: 'y', label: 'another', projectPath: '/p/other', here: false, startedAt: 2 },
+      { id: 'x', label: 'the oldest', projectPath: P, place: null, here: false, startedAt: 1 },
+      { id: 'y', label: 'another', projectPath: '/p/other', place: null, here: false, startedAt: 2 },
     ]
     act(() => view('whole@3:new').tell({ at: 'closed', code: 4429, why: '2 sessions are running' }))
     await flush()
@@ -314,6 +355,7 @@ describe('at the bound', () => {
 
     fireEvent.click(container.querySelectorAll('[data-row="running"] button')[0] as HTMLElement)
     await act(async () => void (await new Promise((done) => setTimeout(done, 250))))
+    await flush()
     expect(s.asked).toContain('end x')
     expect(shown(container)).toEqual(['whole@3:new'])
   })

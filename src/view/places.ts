@@ -94,7 +94,20 @@ export interface View {
   /** The session it is on. Null until the server has said which id a new one got. */
   session: string | null
   shownAt: number
+  /**
+   * Whether there is anything in it to keep: the program has a record of the
+   * session, or somebody has typed into it. A view that is neither is let go
+   * when the canvas moves on, and the server ends what was behind it.
+   */
+  kept: boolean
 }
+
+/**
+ * How long a place has to be stood on before a NEW session is started for it.
+ * Picking three parts is three places on the way to the fourth, and only the
+ * last is wanted. Reopening a session that exists does not wait.
+ */
+export const SETTLE_MS = 600
 
 /** The views to let go of, least recently shown first, never the one on screen. */
 export function surplus(views: readonly View[], shown: number | null, most = MOST_VIEWS): View[] {
@@ -125,12 +138,4 @@ export function ago(at: number | null, now: number): string {
   const days = Math.round(hours / 24)
   if (days < 30) return `${days} d ago`
   return new Date(at).toISOString().slice(0, 10)
-}
-
-/** Where the program was looked for, short enough for one sentence: PATH as one word, then the usual places. */
-export function lookedIn(looked: readonly string[], home = ''): string {
-  const usual = looked.filter((dir) => /(?:\.local\/bin|\.claude\/local|homebrew\/bin|^\/usr\/local\/bin)$/.test(dir))
-  const tidy = (dir: string) => (home && dir.startsWith(`${home}/`) ? `~${dir.slice(home.length)}` : dir.replace(/^\/Users\/[^/]+\//, '~/'))
-  const places = usual.slice(0, 3).map(tidy)
-  return ['PATH', ...places].join(', ')
 }

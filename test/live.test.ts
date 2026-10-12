@@ -154,7 +154,7 @@ class Watcher implements Viewer {
 /** Long enough for the emulator's write queue and the promises behind an open to have run. */
 const settle = () => new Promise((done) => setTimeout(done, 25))
 
-function world(options: { most?: number; found?: string | null; able?: boolean; line?: string } = {}) {
+function world(options: { most?: number; found?: string | null; able?: boolean; line?: string; grace?: number } = {}) {
   const ptys: FakePty[] = []
   /* What the stand-in program holds a record for, by folder. */
   const held = new Map<string, Recorded[]>()
@@ -162,7 +162,7 @@ function world(options: { most?: number; found?: string | null; able?: boolean; 
   let found: string | null = options.found === undefined ? '/fake/bin/claude' : options.found
   const program: Program = {
     ...PROGRAM,
-    find: () => ({ file: found, looked: ['/fake/bin'] }),
+    find: () => ({ file: found, looked: ['/fake/bin'], usual: [] }),
     supports: async () => ({ ok: options.able ?? true, missing: options.able === false ? '--session-id' : null }),
     newId: (() => {
       const ids = [B, '33333333-3333-4333-8333-333333333333', '44444444-4444-4444-8444-444444444444', '55555555-5555-4555-8555-555555555555']
@@ -176,6 +176,7 @@ function world(options: { most?: number; found?: string | null; able?: boolean; 
   const runs = new Runs({
     program,
     most: options.most ?? 6,
+    grace: options.grace ?? 60_000,
     now: () => clock,
     screen: headless,
     spawn: (file, args, opts) => {
@@ -393,6 +394,55 @@ describe('a session outlives whoever is looking at it', () => {
     await settle()
     expect(viewer.closed?.code).toBe(CLOSED.ended)
     expect(w.runs.find(A)).toBeNull()
+  })
+})
+
+describe('a session that was never one', () => {
+  test('opened, never typed into, never recorded, and nobody looking: it is ended, after a moment', async () => {
+    const dir = project()
+    const w = world({ grace: 30 })
+    const viewer = new Watcher()
+    const run = (await w.runs.open(ask(dir, null), viewer)) as Run
+    await settle()
+    w.runs.detach(run, viewer)
+    expect(w.ptys[0]!.killed).toBe(false)
+    await new Promise((done) => setTimeout(done, 80))
+    expect(w.ptys[0]!.killed).toBe(true)
+    expect(w.runs.sessions()).toEqual([])
+  })
+
+  test('a viewer that comes back inside the moment — a page reload — finds it', async () => {
+    const dir = project()
+    const w = world({ grace: 60 })
+    const viewer = new Watcher()
+    const run = (await w.runs.open(ask(dir, null), viewer)) as Run
+    await settle()
+    w.runs.detach(run, viewer)
+    expect(await w.runs.open(ask(dir, B), new Watcher())).toBe(run)
+    await new Promise((done) => setTimeout(done, 120))
+    expect(w.ptys[0]!.killed).toBe(false)
+  })
+
+  test('one somebody has typed a character into is kept, and so is one the program has recorded', async () => {
+    const dir = project()
+    const typed = world({ grace: 20 })
+    const one = new Watcher()
+    const run = (await typed.runs.open(ask(dir, null), one)) as Run
+    await settle()
+    typed.runs.type(run, 'h')
+    typed.runs.detach(run, one)
+
+    const other = project()
+    const existing = world({ grace: 20 })
+    existing.records(other, A)
+    const two = new Watcher()
+    const resumed = (await existing.runs.open(ask(other, A), two)) as Run
+    await settle()
+    existing.runs.detach(resumed, two)
+
+    await new Promise((done) => setTimeout(done, 80))
+    expect(typed.ptys[0]!.killed).toBe(false)
+    expect(existing.ptys[0]!.killed).toBe(false)
   })
 })
 

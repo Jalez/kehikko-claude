@@ -14,7 +14,7 @@ const NOW = Date.parse('2026-10-12T12:00:00Z')
 const row = (id: string, more: Partial<Row> = {}): Row => ({ id, label: '', lastActive: null, running: false, ...more })
 const listing = (more: Partial<Listing> = {}): Listing => ({
   ok: true,
-  program: { name: 'Claude Code', found: '/bin/claude', looked: [], lacks: null, install: { line: 'install', lands: '' } },
+  program: { name: 'Claude Code', found: '/bin/claude', foundAt: '/bin/claude', looked: [], where: 'PATH', lacks: null, install: { line: 'install', lands: '' } },
   sessions: [row('a', { label: 'tighten the methods section', lastActive: NOW - 3 * 3_600_000 }), row('b', { label: '', running: true, lastActive: NOW - 60_000 })],
   others: [row('c', { label: 'from another place', lastActive: NOW - 86_400_000 })],
   running: [],
@@ -126,19 +126,24 @@ describe('the list of a place’s sessions', () => {
 describe('at the bound', () => {
   const full = listing({
     running: [
-      { id: 'x', label: 'the oldest', projectPath: '/p/thesis', here: false, startedAt: 1 },
-      { id: 'y', label: '', projectPath: '/p/other', here: true, startedAt: 2 },
+      { id: 'x', label: 'the oldest', projectPath: '/p/thesis', place: 'epic=thesis;parts=methods+results;kehikko=3', here: false, startedAt: 1 },
+      { id: 'y', label: '', projectPath: '/p/other', place: 'epic=-;parts=-;kehikko=1', here: true, startedAt: 2 },
+      { id: 'z', label: 'next door', projectPath: '/p/other', place: 'epic=paper;parts=-;kehikko=1', here: false, startedAt: 3 },
     ],
-    most: 2,
+    most: 3,
   })
 
   test('says how many are running and lists them; nothing is offered but ending one', () => {
-    const { list } = drawn({ mode: 'full', listing: full })
-    expect(list.textContent).toContain('2 sessions are running, which is as many as this module keeps — end one to open this one.')
-    expect(list.querySelectorAll('[data-row="running"]').length).toBe(2)
+    const { list } = drawn({ mode: 'full', listing: full, project: '/p/other' })
+    expect(list.textContent).toContain('3 sessions are running, which is as many as this module keeps — end one to open this one.')
+    expect(list.querySelectorAll('[data-row="running"]').length).toBe(3)
     expect(list.querySelector('[data-row="new"]')).toBeNull()
-    expect(list.textContent).toContain('thesis')
-    expect(list.textContent).toContain('here')
+    /* Where each one is: its project when it is another one, then the epic and the parts. */
+    const rows = [...list.querySelectorAll('[data-row="running"]')].map((one) => one.textContent)
+    expect(rows[0]).toContain('thesis · thesis · methods + results')
+    expect(rows[1]).toContain('here')
+    expect(rows[2]).toContain('paper · all parts')
+    expect(rows[2]).not.toContain('other ·')
   })
 
   test('the one that is ended is the one the person chose', () => {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { Listing, Row } from '../doors.ts'
-import { ago, brief, decide, lookedIn, placeId, standing, surplus, type View } from '../src/view/places.ts'
+import { ago, brief, decide, placeId, standing, surplus, type View } from '../src/view/places.ts'
 
 /**
  * What the page does when the canvas names a place. Pure, so the rule that
@@ -11,7 +11,7 @@ import { ago, brief, decide, lookedIn, placeId, standing, surplus, type View } f
 const row = (id: string, more: Partial<Row> = {}): Row => ({ id, label: '', lastActive: null, running: false, ...more })
 const listing = (sessions: Row[], program: Partial<Listing['program']> = {}): Listing => ({
   ok: true,
-  program: { name: 'Claude Code', found: '/bin/claude', looked: [], lacks: null, install: { line: 'install', lands: '~/.local/bin/claude' }, ...program },
+  program: { name: 'Claude Code', found: '/bin/claude', foundAt: '/bin/claude', looked: [], where: 'PATH', lacks: null, install: { line: 'install', lands: '~/.local/bin/claude' }, ...program },
   sessions,
   others: [],
   running: [],
@@ -93,7 +93,7 @@ describe('the place the canvas is about', () => {
 describe('the small words', () => {
   test('views are let go least recently shown first, and never the one on screen', () => {
     const at = standing({ where: 'hosted', projectPath: '/p', epic: null, parts: [], kehikko: null })!
-    const views: View[] = [1, 2, 3, 4].map((n) => ({ n, at, session: null, shownAt: n }))
+    const views: View[] = [1, 2, 3, 4].map((n) => ({ n, at, session: null, shownAt: n, kept: true }))
     expect(surplus(views, 1, 2).map((one) => one.n)).toEqual([2, 3])
     expect(surplus(views, 4, 8)).toEqual([])
   })
@@ -111,11 +111,5 @@ describe('the small words', () => {
     expect(ago(now - 3 * 3_600_000, now)).toBe('3 h ago')
     expect(ago(now - 2 * 86_400_000, now)).toBe('2 d ago')
     expect(ago(Date.parse('2026-07-01T00:00:00Z'), now)).toBe('2026-07-01')
-  })
-
-  test('where the program was looked for, in few enough words for one sentence', () => {
-    expect(lookedIn(['/usr/bin', '/bin', '/Users/someone/.local/bin', '/Users/someone/.claude/local', '/opt/homebrew/bin', '/usr/local/bin'])).toBe(
-      'PATH, ~/.local/bin, ~/.claude/local, /opt/homebrew/bin',
-    )
   })
 })

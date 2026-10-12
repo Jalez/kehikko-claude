@@ -44,6 +44,19 @@ export type Standing =
   /** `code` is the server's reason as a number (see `CLOSED` in live.ts); 0 when the socket simply went. */
   | { at: 'closed'; code: number; why: string }
 
+/**
+ * The server's own word about the run, and one of the page's: `typed` is said
+ * here, the first time a person types into this view.
+ */
+export interface Said {
+  session?: string | null
+  label?: string
+  opened?: string
+  /** Whether the program has a record of the session yet. */
+  exists?: boolean
+  typed?: boolean
+}
+
 /** What this view asks the server to put it on. Fixed for the life of the view. */
 export type Target =
   | { what: 'install' }
@@ -68,7 +81,7 @@ export function TerminalView({
   shown: boolean
   onStanding?: (standing: Standing) => void
   /** The server's own word: which session this turned out to be, and what it is called. */
-  onSaid?: (said: { session?: string | null; label?: string; opened?: string }) => void
+  onSaid?: (said: Said) => void
 }) {
   /* Read inside the effect below, which runs once. A view is never re-pointed:
      the parent mounts another for another session. */
@@ -106,6 +119,11 @@ export function TerminalView({
 
     let socket: WebSocket | null = null
     const waiting: string[] = []
+    /* Set by this effect's cleanup. A socket closed BY the cleanup still
+       reports its close, a tick later, and that is not news about the run:
+       React mounts every view twice in development, and the first one's
+       closing socket was being read as "the connection could not be made". */
+    let left = false
 
     const connect = () => {
       if (socket) return
@@ -120,6 +138,7 @@ export function TerminalView({
       socket = live
 
       live.onopen = () => {
+        if (left) return live.close()
         const asked = start.current
         live.send(
           JSON.stringify(
@@ -143,6 +162,7 @@ export function TerminalView({
 
       let ended = false
       live.onmessage = (event: MessageEvent) => {
+        if (left) return
         if (typeof event.data !== 'string') {
           /* The program's bytes, straight through and never parsed. */
           terminal.write(new Uint8Array(event.data as ArrayBuffer))
@@ -150,13 +170,13 @@ export function TerminalView({
         }
         try {
           const heard: unknown = JSON.parse(event.data)
-          if (typeof heard === 'object' && heard !== null) said.current?.(heard as { session?: string | null; label?: string })
+          if (typeof heard === 'object' && heard !== null) said.current?.(heard as Said)
         } catch {
           /* Not this module's word. Dropped, not drawn. */
         }
       }
       const closed = (code: number, why: string) => {
-        if (ended) return
+        if (ended || left) return
         ended = true
         /* A session that ended and a server that stopped both end the socket.
            Ask which, so a page whose server has gone says that. */
@@ -167,7 +187,12 @@ export function TerminalView({
       live.onerror = () => closed(0, 'the connection could not be made')
     }
 
+    let typed = false
     const typing = terminal.onData((data: string) => {
+      if (!typed) {
+        typed = true
+        said.current?.({ typed: true })
+      }
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ d: data }))
         return
@@ -201,6 +226,7 @@ export function TerminalView({
     if (usable()) connect()
 
     return () => {
+      left = true
       resized.disconnect()
       typing.dispose()
       /* The viewer leaves. The session, on the server, is not touched. */

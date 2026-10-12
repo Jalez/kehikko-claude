@@ -29,7 +29,8 @@ import { attach, note, projectRoot, readPlaces, type NamedPlace } from './record
  *
  * A session ends when the program in it exits, when a person ends it from the
  * list, or when this process stops. Never because nobody is looking, and
- * never to make room (see `MOST_RUNNING`).
+ * never to make room (see `MOST_RUNNING`). The one exception is something
+ * that is not yet a session at all: see `UNTOUCHED_GRACE`.
  *
  * When this process stops, its sessions stop with it — nothing is left
  * running with no owner — and that costs nothing lasting, because a session
@@ -72,6 +73,19 @@ const TERM = 'xterm-256color'
 const SCROLLBACK = 5000
 /** At most this often is the program asked whether a new session exists yet. */
 const SETTLE_EVERY = 2_000
+/**
+ * How long a session that was never a session is kept once nobody is looking.
+ *
+ * A place is opened by looking at it, and a new session is started for a
+ * place that has none — so picking through the parts of an epic would leave a
+ * process behind at every stop. One that nobody has typed a character into
+ * and that the program has recorded nothing for holds nothing at all: when
+ * its last viewer leaves it is given this long (a page reload is back well
+ * inside it) and then ended. This is the one thing ended without a person
+ * choosing, and it is not a session: anything typed into, and anything that
+ * exists, is never touched.
+ */
+const UNTOUCHED_GRACE = 20_000
 /** A session that still has no first prompt after this many looks is not asked again until it ends. */
 const LABEL_TRIES = 8
 
@@ -238,6 +252,10 @@ export interface Run {
   label: string
   /** How many times the program has been asked what this session is called. Bounded: some never have a first prompt. */
   asked: number
+  /** Whether anybody has typed anything into it. */
+  touched: boolean
+  /** The clock on an untouched, unrecorded run nobody is watching (see `UNTOUCHED_GRACE`). */
+  idle: ReturnType<typeof setTimeout> | null
   startedAt: number
   pty: Pty
   screen: Screen
@@ -252,6 +270,8 @@ export interface RunsOptions {
   screen: (cols: number, rows: number) => Screen | Promise<Screen>
   program?: Program
   most?: number
+  /** How long an untouched, unrecorded session outlives its last viewer. */
+  grace?: number
   now?: () => number
   log?: (line: string) => void
 }
@@ -264,6 +284,7 @@ export class Runs {
   readonly runs = new Map<string, Run>()
   private readonly program: Program
   private readonly most: number
+  private readonly grace: number
   private readonly now: () => number
   private readonly log: (line: string) => void
   /** Opens in flight, by id, so two viewers arriving together get one run and not two. */
@@ -272,6 +293,7 @@ export class Runs {
   constructor(private readonly options: RunsOptions) {
     this.program = options.program ?? PROGRAM
     this.most = options.most ?? MOST_RUNNING
+    this.grace = options.grace ?? UNTOUCHED_GRACE
     this.now = options.now ?? Date.now
     this.log = options.log ?? (() => {})
   }
@@ -363,6 +385,8 @@ export class Runs {
       key: placeKey(asked.place),
       label: '',
       asked: 0,
+      touched: false,
+      idle: null,
       startedAt: this.now(),
       pty,
       screen,
@@ -407,6 +431,7 @@ export class Runs {
     })
     run.pty.onExit(({ exitCode }) => {
       run.ended = true
+      if (run.idle) clearTimeout(run.idle)
       this.runs.delete(run.id)
       void this.finish(run, exitCode)
     })
@@ -418,6 +443,7 @@ export class Runs {
     if (!run.settled) {
       run.settled = await this.program.settled(run.projectPath, run.id, run.startedAt)
       if (!run.settled) return
+      for (const viewer of run.viewers) viewer.say({ exists: true, session: run.settled })
     }
     run.asked += 1
     const known = (await this.program.sessions(run.projectPath)).find((one) => one.id === run.settled)
@@ -463,7 +489,9 @@ export class Runs {
    * redraw itself for the window it is now in.
    */
   attach(run: Run, viewer: Viewer, cols: number, rows: number, how: 'new' | 'resumed' | 'attached' | 'install'): void {
-    viewer.say({ opened: how, session: run.what === 'session' ? (run.settled ?? run.id) : null, label: run.label })
+    if (run.idle) clearTimeout(run.idle)
+    run.idle = null
+    viewer.say({ opened: how, session: run.what === 'session' ? (run.settled ?? run.id) : null, label: run.label, exists: Boolean(run.settled) })
     run.screen.write('', () => {
       if (run.ended) return
       const screen = run.screen.serialize()
@@ -475,6 +503,20 @@ export class Runs {
 
   detach(run: Run, viewer: Viewer): void {
     run.viewers.delete(viewer)
+    if (run.what !== 'session' || run.ended || run.viewers.size > 0 || run.touched || run.settled || run.idle) return
+    run.idle = setTimeout(() => {
+      run.idle = null
+      if (run.ended || run.viewers.size > 0 || run.touched) return
+      /* Asked once more: the program may have recorded it since. */
+      void this.settle(run)
+        .catch(() => {})
+        .then(() => {
+          if (run.ended || run.viewers.size > 0 || run.touched || run.settled) return
+          this.log(`claude: ended ${run.id}, which nobody had typed into and nobody was looking at`)
+          kill(run.pty)
+        })
+    }, this.grace)
+    run.idle.unref?.()
   }
 
   resize(run: Run, cols: number, rows: number): void {
@@ -488,7 +530,9 @@ export class Runs {
   }
 
   type(run: Run, data: string): void {
-    if (!run.ended) run.pty.write(data)
+    if (run.ended) return
+    run.touched = true
+    run.pty.write(data)
   }
 
   /**
@@ -534,6 +578,8 @@ export class Runs {
       key: null,
       label: '',
       asked: 0,
+      touched: false,
+      idle: null,
       startedAt: this.now(),
       pty,
       screen,

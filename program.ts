@@ -46,6 +46,8 @@ export interface Found {
   file: string | null
   /** Every directory looked in, in the order it was looked in. */
   looked: string[]
+  /** The ones among them that are not from PATH: the usual places an install lands. */
+  usual: string[]
 }
 
 export interface Able {
@@ -156,14 +158,15 @@ function runnable(file: string): boolean {
 
 function find(env: NodeJS.ProcessEnv = process.env): Found {
   const looked: string[] = []
-  const dirs = [...(env.PATH ?? '').split(delimiter).filter(Boolean), ...usualDirs(env)]
+  const usual = usualDirs(env)
+  const dirs = [...(env.PATH ?? '').split(delimiter).filter(Boolean), ...usual]
   for (const dir of dirs) {
     if (looked.includes(dir)) continue
     looked.push(dir)
     const file = join(dir, BINARY)
-    if (runnable(file)) return { file, looked }
+    if (runnable(file)) return { file, looked, usual }
   }
-  return { file: null, looked }
+  return { file: null, looked, usual }
 }
 
 /**
