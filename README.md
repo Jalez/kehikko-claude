@@ -72,14 +72,37 @@ does not happen.
 When the server itself stops, its sessions stop with it — nothing is left running with no owner — and
 the next open of each place **resumes** its session by id.
 
-- **At most 6 sessions run at once**, across every project (`KEHIKOT_CLAUDE_MOST_RUNNING` moves it).
-  At the bound nothing is ended to make room: the open is refused, the page lists what is running, and
-  you end the one you choose.
-- **One thing is ended without being chosen, and it is not a session:** a new one that nobody has typed
-  a character into, that Claude Code has recorded nothing for, and that nobody is looking at, twenty
-  seconds after its last viewer left. A place is opened by looking at it, and without this a walk
-  through the parts of an epic would leave a process at every stop. For the same reason a *new* session
-  waits 0.6 s for the canvas to stop moving before it starts; an existing one is opened at once.
+### No limit, and nothing to tidy
+
+A place has its session, and going to the place opens it — every time, however many others are
+running. No open is ever refused for what else is running, and the page never asks anybody to end
+something. (There used to be a bound of six, at which every open was refused and a list was shown to
+end one from. Nobody had asked for it, and it locked a person out of their own work.)
+
+What keeps the number of processes down happens by itself, and neither thing loses anything:
+
+- **What was never a session is ended a moment after nobody is looking:** a new one that nobody has
+  typed a character into and that Claude Code has recorded nothing for, twenty seconds after its last
+  viewer left. A place is opened by looking at it, and without this a walk through the parts of an
+  epic would leave a process at every stop. For the same reason a *new* session waits 0.6 s for the
+  canvas to stop moving before it starts; an existing one is opened at once.
+- **A waiting session nobody is looking at has its process put away:** one that is on no screen and
+  whose program has printed nothing for thirty minutes (`KEHIKOT_CLAUDE_QUIET_MS` moves it). Claude
+  Code prints nothing while it waits at its prompt (measured: twenty minutes at the prompt of 2.1.296,
+  its last byte eleven seconds in) and draws a spinner and a clock while it works, so silence is what
+  "waiting" looks like from outside. The session is not ended — it is Claude Code's record,
+  and the next visit to the place resumes it by id, with no question and no message. Never one that is
+  on screen, and never one that is printing. One line in this server's log says when it happens.
+
+  What does not come back with a resumed session is what lived only in the process: a line typed at
+  the prompt and not sent, a question the agent had been waiting half an hour for an answer to, and
+  anything the agent had left running in the background.
+
+"Typed" means by a person. A program asks its terminal questions, and the emulator in the page
+answers them on the channel the keyboard uses: Claude Code is told what kind of terminal it is in a
+third of a second after it starts, hears of the page giving its terminal the keyboard, and — having
+asked for the pointer — of the mouse crossing it. None of that is typing (`input.ts` is the list), and
+all of it still reaches the program.
 
 ### What it never does
 
@@ -266,7 +289,8 @@ installed. A module for another agent is that file again plus a manifest.
 | `place.ts` | the key of a place, and a kehikko as a key or a row number. Pure; shared by the page and the server |
 | `record.ts` | `places.json`: read-modify-write with nothing awaited in between, the migration to keys, and the `.gitignore` beside it |
 | `program.ts` | the adapter: everything that knows it is Claude Code |
-| `live.ts` | the running sessions, the headless emulators, the socket and its fence |
+| `input.ts` | which of what a page's emulator sends is a person typing, and which is the emulator answering the program. Pure; shared by the page and the server |
+| `live.ts` | the running sessions, the headless emulators, the socket and its fence, and the two things ended without anybody choosing |
 | `doors.ts` | the HTTP doors and the MCP tool |
 | `src/view/places.ts` | what the page does when the canvas names a place. Pure |
 | `src/view/chooser.tsx` | the list |

@@ -5,6 +5,7 @@ import '@xterm/xterm/css/xterm.css'
 
 import { probeServer, ticket } from 'kehikot-module-protocol/client'
 
+import { typedByPerson } from '../../input.ts'
 import type { Kehikko } from '../../place.ts'
 
 /**
@@ -16,8 +17,8 @@ import type { Kehikko } from '../../place.ts'
  * Here the view is a viewer. The session belongs to the server (`live.ts`);
  * this attaches to it, is sent the screen as it stands, and follows along.
  * Unmounting closes the socket and nothing else — which is what lets a page
- * reload, a place switched away from, or a view let go to make room all
- * leave an agent exactly where it was.
+ * reload, a place switched away from, or a view let go to keep the page
+ * light all leave an agent exactly where it was.
  *
  * What came over unchanged, each for the reason Terminal found the hard way
  * (its file has the essays): nothing is opened until the container has a real
@@ -48,7 +49,9 @@ export type Standing =
 
 /**
  * The server's own word about the run, and one of the page's: `typed` is said
- * here, the first time a person types into this view.
+ * here, the first time a PERSON types into this view. What the emulator
+ * answers the program by itself comes out of the same event and is not that
+ * (see `input.ts`): it is sent on, and says nothing about the view.
  */
 export interface Said {
   session?: string | null
@@ -74,6 +77,7 @@ export function TerminalView({
   theme,
   target,
   shown,
+  watched = shown,
   onStanding,
   onSaid,
 }: {
@@ -81,6 +85,14 @@ export function TerminalView({
   target: Target
   /** Whether this is the view on screen. The others are hidden by the parent and keep following. */
   shown: boolean
+  /**
+   * Whether this is the view of the place the canvas is on — which it still
+   * is while a list is drawn over it. The server is told, because a view
+   * mounted behind another keeps its socket and is not somebody looking: a
+   * session nobody is looking at, waiting at its prompt, is put away after a
+   * long while and resumed when its place is opened (`QUIET_REST` in live.ts).
+   */
+  watched?: boolean
   onStanding?: (standing: Standing) => void
   /** The server's own word: which session this turned out to be, and what it is called. */
   onSaid?: (said: Said) => void
@@ -90,6 +102,9 @@ export function TerminalView({
   const start = useRef(target)
   const holder = useRef<HTMLDivElement>(null)
   const term = useRef<Terminal | null>(null)
+  const line = useRef<WebSocket | null>(null)
+  const looking = useRef(watched)
+  looking.current = watched
 
   /* Held in refs and read inside the effect rather than listed as
      dependencies: a parent that re-created a callback on every render would
@@ -138,6 +153,7 @@ export function TerminalView({
       const live = new WebSocket(`${scheme}://${location.host}/session`)
       live.binaryType = 'arraybuffer'
       socket = live
+      line.current = live
 
       live.onopen = () => {
         if (left) return live.close()
@@ -160,6 +176,8 @@ export function TerminalView({
         if (visible.current) terminal.focus()
         /* Whatever was typed while this was opening, in order, after the opening frame. */
         for (const data of waiting.splice(0)) live.send(JSON.stringify({ d: data }))
+        /* Taken for on screen unless said otherwise: it usually is, having just been shown. */
+        if (!looking.current) live.send(JSON.stringify({ w: false }))
       }
 
       let ended = false
@@ -191,7 +209,9 @@ export function TerminalView({
 
     let typed = false
     const typing = terminal.onData((data: string) => {
-      if (!typed) {
+      /* Everything is sent on: the program's questions have to be answered.
+         Only what a person typed says the view holds something. */
+      if (!typed && typedByPerson(data)) {
         typed = true
         said.current?.({ typed: true })
       }
@@ -233,6 +253,7 @@ export function TerminalView({
       typing.dispose()
       /* The viewer leaves. The session, on the server, is not touched. */
       socket?.close()
+      line.current = null
       terminal.dispose()
       term.current = null
     }
@@ -244,6 +265,12 @@ export function TerminalView({
   useEffect(() => {
     if (term.current) term.current.options.theme = palette(theme)
   }, [theme])
+
+  /* On screen, or behind another view: said to the server as it changes. */
+  useEffect(() => {
+    const live = line.current
+    if (live && live.readyState === WebSocket.OPEN) live.send(JSON.stringify({ w: watched }))
+  }, [watched])
 
   /* This became the view on screen: take the keyboard. */
   const visible = useRef(shown)

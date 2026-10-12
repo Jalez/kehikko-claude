@@ -16,7 +16,8 @@ const NAME = 'Claude'
 /** The server's reasons for closing a socket that the page acts on (`CLOSED` in live.ts). */
 const INSTALLED = 4010
 const MISSING = 4404
-const FULL = 4429
+/** Put away while it was quiet and nobody was looking. Not news: the view is let go and nothing is drawn. */
+const RESTED = 4001
 
 /** Try again: ask whether this module's own server is there now. The standing it reports is what redraws. */
 const knock = () => void probeServer()
@@ -76,6 +77,14 @@ export function App() {
  * emulators, or because the page reloaded — ends nothing, and the next view
  * of that session is sent its screen.
  *
+ * ## A place opens its session, and nothing stands in the way
+ *
+ * There is no number of running sessions at which a place is refused, and
+ * so no list a person is made to end something from. A session left waiting
+ * behind another view for a long time has its process put away by the server
+ * (`QUIET_REST` in live.ts); its view here is told so, is let go without a
+ * word, and coming back to the place resumes the same session.
+ *
  * ## What is drawn besides the terminal
  *
  * Nothing that costs a row while a session is running. The session's short
@@ -109,8 +118,6 @@ export function Sessions({
   const [refusal, setRefusal] = useState<string | null>(null)
   /** The person opened the list over a running terminal. */
   const [asking, setAsking] = useState(false)
-  /** An open was refused because as many sessions are running as are kept. */
-  const [full, setFull] = useState(false)
   /** The installer's own view, while it runs and after it fails. */
   const [installing, setInstalling] = useState<{ n: number; failed: string | null } | null>(null)
   const [again, setAgain] = useState(0)
@@ -208,7 +215,7 @@ export function Sessions({
   const opened = useRef(open)
   opened.current = open
   useEffect(() => {
-    if (!at || !here || view || installing || full) return
+    if (!at || !here || view || installing) return
     const step = decide(here, remembered.at(at.projectPath).read(at.key))
     if (step.do !== 'open') return
     if (step.session) return opened.current(step.session)
@@ -216,7 +223,7 @@ export function Sessions({
     const waited = setTimeout(() => opened.current(null), settleMs)
     return () => clearTimeout(waited)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [here, view === null, installing === null, full])
+  }, [here, view === null, installing === null])
 
   /* Looked at again: this is the most recently shown, for when views are let go. */
   useEffect(() => {
@@ -225,12 +232,11 @@ export function Sessions({
   }, [view?.n])
 
   const stood = (one: View, next: Standing) => {
-    if (next.at === 'closed' && next.code === FULL) {
-      /* Refused for room. Nothing was ended; the person is shown what is running. */
+    if (next.at === 'closed' && next.code === RESTED) {
+      /* The server put a waiting process away behind this view. Nothing is
+         drawn about it: the view is let go, and the place opens its session
+         again — resumed — when it is next stood on. */
       drop(one.n)
-      setFull(true)
-      setListing(null)
-      setAgain((n) => n + 1)
       return
     }
     if (next.at === 'closed' && next.code === MISSING) {
@@ -257,13 +263,9 @@ export function Sessions({
   const step = here && !view ? decide(here, null) : null
   const standingNow = view ? standings[view.n] : undefined
   const ended = standingNow?.at === 'closed' ? standingNow : null
-  const fullNow = full && here !== null && here.running.length >= here.most
-  useEffect(() => {
-    if (full && here && here.running.length < here.most) setFull(false)
-  }, [full, here])
 
-  const choosing = Boolean(at && here && !installing && (fullNow || asking || (!view && step?.do === 'choose')))
-  const wanting = Boolean(at && here && !installing && !view && !fullNow && step?.do === 'install')
+  const choosing = Boolean(at && here && !installing && (asking || (!view && step?.do === 'choose')))
+  const wanting = Boolean(at && here && !installing && !view && step?.do === 'install')
   const terminal = Boolean(at && view && !choosing && !installing)
   const label = view ? brief((view.session && (labels[view.session] || here?.sessions.find((one) => one.id === view.session)?.label)) || '') : ''
 
@@ -305,9 +307,8 @@ export function Sessions({
       {choosing && here && (
         <div className="min-h-0 flex-1">
           <Chooser
-            mode={fullNow ? 'full' : view ? 'sessions' : 'ask'}
+            mode={view ? 'sessions' : 'ask'}
             listing={here}
-            project={here.running.find((one) => one.here)?.projectPath ?? at?.projectPath ?? null}
             current={view?.session ?? null}
             onOpen={open}
             onClose={view ? () => setAsking(false) : undefined}
@@ -366,6 +367,7 @@ export function Sessions({
                   session: one.session,
                 }}
                 shown={shown}
+                watched={one.n === view?.n}
                 onStanding={(next) => stood(one, next)}
                 onSaid={(heard) => said(one, heard)}
               />

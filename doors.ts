@@ -1,6 +1,6 @@
 import { establishBuild, refuseTicket, type Reply } from 'kehikot-module-protocol/serve'
 
-import { MOST_RUNNING, TICKET, theRuns, type Runs } from './live.ts'
+import { TICKET, theRuns, type Runs } from './live.ts'
 import { ID, MANIFEST, VERSION } from './manifest.ts'
 import { isKehikkoKey, readPlaceKey } from './place.ts'
 import { PROGRAM, home, type Program } from './program.ts'
@@ -79,9 +79,11 @@ export interface Listing {
   sessions: Row[]
   /** The project's other sessions: they belong to no place, or to another. */
   others: Row[]
-  /** Everything running, in any project, for the list a person ends one from. */
+  /**
+   * Everything running, in any project. Said, and not counted against
+   * anything: there is no number of sessions at which an open is refused.
+   */
   running: { id: string; label: string; projectPath: string; place: string | null; here: boolean; startedAt: number }[]
-  most: number
 }
 
 /**
@@ -97,7 +99,6 @@ export async function listing(
   key: string,
   runs: Runs = theRuns(),
   program: Program = PROGRAM,
-  most = MOST_RUNNING,
 ): Promise<Listing | { ok: false; error: string }> {
   const root = projectRoot(projectPath)
   if (!root.ok) return root
@@ -156,7 +157,6 @@ export async function listing(
       here: run.projectPath === root.value && run.key === key,
       startedAt: run.startedAt,
     })),
-    most,
   }
 }
 
@@ -309,8 +309,8 @@ export async function answer(
     return written.ok ? ok({ ok: true, moved: written.value.moved }) : bad(written.error)
   }
 
-  /* End a running session, because a person chose that one. The only way a
-     session is ever ended that is not the program exiting by itself. */
+  /* End a running session, because a person chose that one. Never asked OF a
+     person: nothing is refused for want of one being ended (see live.ts). */
   if (path === '/api/end' && method === 'POST') {
     const id = typeof body?.session === 'string' ? body.session : ''
     if (!PROGRAM.isId(id)) return bad('that is not a session id')

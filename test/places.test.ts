@@ -15,7 +15,6 @@ const listing = (sessions: Row[], program: Partial<Listing['program']> = {}): Li
   sessions,
   others: [],
   running: [],
-  most: 6,
 })
 
 describe('opening the module on a place', () => {

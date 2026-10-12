@@ -5,7 +5,9 @@
 # a record where Claude Code keeps one — `$CLAUDE_CONFIG_DIR/projects/<folder>/
 # <session id>.jsonl`, written when the first line is typed and not before,
 # which is when the real program first writes one. `--resume` of an id with no
-# record is refused, as the real program refuses it. `/exit` ends it.
+# record is refused, as the real program refuses it. `/exit` ends it, and
+# `/work` makes it print a dot a second from then on, as a program that is
+# busy does and one waiting at its prompt does not.
 #
 # STANDIN_OLD=1 makes its --help that of a copy too old to take a session id.
 
@@ -41,6 +43,7 @@ echo "cwd: $(pwd -P)"
 trap 'echo "stand-in claude: hung up"; exit 0' HUP TERM
 while printf '> ' && IFS= read -r line; do
   [ "$line" = "/exit" ] && { echo "bye"; exit 0; }
+  [ "$line" = "/work" ] && { (trap - HUP TERM; while printf '.'; do sleep 1; done) & echo "working"; continue; }
   [ -z "$line" ] && continue
   mkdir -p "$dir"
   safe=$(printf '%s' "$line" | sed 's/\\/\\\\/g; s/"/\\"/g')

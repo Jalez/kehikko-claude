@@ -18,7 +18,6 @@ const listing = (more: Partial<Listing> = {}): Listing => ({
   sessions: [row('a', { label: 'tighten the methods section', lastActive: NOW - 3 * 3_600_000 }), row('b', { label: '', running: true, lastActive: NOW - 60_000 })],
   others: [row('c', { label: 'from another place', lastActive: NOW - 86_400_000 })],
   running: [],
-  most: 6,
   ...more,
 })
 
@@ -152,34 +151,31 @@ describe('the list of a place’s sessions', () => {
   })
 })
 
-describe('at the bound', () => {
-  const full = listing({
-    running: [
-      { id: 'x', label: 'the oldest', projectPath: '/p/thesis', place: 'epic=thesis;parts=methods+results;kehikko=3', here: false, startedAt: 1 },
-      { id: 'y', label: '', projectPath: '/p/other', place: 'epic=-;parts=-;kehikko=1', here: true, startedAt: 2 },
-      { id: 'z', label: 'next door', projectPath: '/p/other', place: 'epic=paper;parts=-;kehikko=1', here: false, startedAt: 3 },
-    ],
-    most: 3,
+describe('never in the way', () => {
+  /* Twelve running, here and elsewhere: there is no number at which the list becomes a demand. */
+  const busy = listing({
+    running: Array.from({ length: 12 }, (_, n) => ({ id: `r${n}`, label: '', projectPath: '/p/other', place: null, here: false, startedAt: n })),
   })
 
-  test('says how many are running and lists them; nothing is offered but ending one', () => {
-    const { list } = drawn({ mode: 'full', listing: full, project: '/p/other' })
-    expect(list.textContent).toContain('3 sessions are running, which is as many as this module keeps — end one to open this one.')
-    expect(list.querySelectorAll('[data-row="running"]').length).toBe(3)
-    expect(list.querySelector('[data-row="new"]')).toBeNull()
-    /* Where each one is: its project when it is another one, then the epic and the parts. */
-    const rows = [...list.querySelectorAll('[data-row="running"]')].map((one) => one.textContent)
-    expect(rows[0]).toContain('thesis · thesis · methods + results')
-    expect(rows[1]).toContain('here')
-    expect(rows[2]).toContain('paper · all parts')
-    expect(rows[2]).not.toContain('other ·')
+  test('however many are running, the list is this place’s sessions and never a request to end one', () => {
+    for (const mode of ['ask', 'sessions'] as const) {
+      const { list } = drawn({ mode, listing: busy })
+      expect(list.textContent).not.toContain('as many as')
+      expect(list.textContent).not.toContain('end one')
+      expect(list.querySelector('[data-row="running"]')).toBeNull()
+      expect(list.querySelector('[data-row="new"]')).not.toBeNull()
+      expect(list.querySelectorAll('[data-row="session"]').length).toBe(2)
+      cleanup()
+    }
   })
 
-  test('the one that is ended is the one the person chose', () => {
-    const { list, ended, opened } = drawn({ mode: 'full', listing: full })
-    fireEvent.click(list.querySelectorAll('[data-row="running"] button')[1] as HTMLElement)
-    fireEvent.keyDown(list, { key: 'Enter' })
-    expect(ended).toEqual(['y', 'x'])
+  test('End stays where it was, on a running session’s own row, for whoever wants it', () => {
+    const { list, ended, opened } = drawn({ mode: 'sessions', listing: busy })
+    const buttons = [...list.querySelectorAll('[data-session="b"] button')].filter((one) => one.textContent === 'End')
+    expect(buttons.length).toBe(1)
+    expect([...list.querySelectorAll('[data-session="a"] button')].some((one) => one.textContent === 'End')).toBe(false)
+    fireEvent.click(buttons[0] as HTMLElement)
+    expect(ended).toEqual(['b'])
     expect(opened).toEqual([])
   })
 })

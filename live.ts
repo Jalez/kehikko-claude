@@ -3,6 +3,7 @@ import type { Duplex } from 'node:stream'
 
 import { mintTicket, sameTicket } from 'kehikot-module-protocol/serve'
 
+import { typedByPerson } from './input.ts'
 import { isKehikkoKey, placeKey, sortedParts, type Kehikko } from './place.ts'
 import { PROGRAM, home, type Program } from './program.ts'
 import { attach, note, projectRoot, type NamedPlace } from './record.ts'
@@ -28,14 +29,37 @@ import { attach, note, projectRoot, type NamedPlace } from './record.ts'
  * seen had it never left.
  *
  * A session ends when the program in it exits, when a person ends it from the
- * list, or when this process stops. Never because nobody is looking, and
- * never to make room (see `MOST_RUNNING`). The one exception is something
- * that is not yet a session at all: see `UNTOUCHED_GRACE`.
+ * list, or when this process stops. Never merely because nobody is looking:
+ * an agent at work is left to finish.
+ *
+ * ## There is no limit, and nothing is ever refused for room
+ *
+ * A place has its session, and going to the place opens it — every time,
+ * however many others are running. There used to be a bound here (six), and
+ * at it every open was refused and the person was shown a list and asked to
+ * end something. Nobody had asked for that, and it locked a person out of
+ * their own work: the app does not make a person do its housekeeping. So
+ * there is no count anywhere in this file, and no open is refused because of
+ * what else is running.
+ *
+ * What keeps the number of processes down is quiet, and is not a person's
+ * business. Two things are ended without anybody choosing, and neither loses
+ * anything:
+ *
+ *  - what was never a session — opened by looking at a place, never typed
+ *    into, never recorded — a moment after nobody is looking
+ *    (`UNTOUCHED_GRACE`);
+ *  - a session nobody is looking at whose program has printed nothing for a
+ *    long time, which is one waiting at its prompt (`QUIET_REST`). It is a
+ *    process put away, not a conversation: a session is resumable by id, and
+ *    the next visit to its place starts the program again on the same one,
+ *    without a question and without a message.
+ *
+ * Never one somebody has on screen, and never one that is printing.
  *
  * When this process stops, its sessions stop with it — nothing is left
- * running with no owner — and that costs nothing lasting, because a session
- * is resumable by id: the next open of that place starts the program again
- * on the same conversation.
+ * running with no owner — and that costs nothing lasting, for the same
+ * reason.
  *
  * ## The fence
  *
@@ -54,17 +78,6 @@ import { attach, note, projectRoot, type NamedPlace } from './record.ts'
 
 export const TICKET = mintTicket()
 
-/**
- * How many sessions may run at once, across every project and place.
- *
- * Each is an agent holding a few hundred megabytes, and a session keeps
- * running when a person looks elsewhere, so without a bound one would
- * accumulate for every place ever opened. At the bound nothing is ended to
- * make room: the open is refused, the page lists what is running, and the
- * person chooses one to end. `KEHIKOT_CLAUDE_MOST_RUNNING` moves it.
- */
-export const MOST_RUNNING = Math.max(1, Math.trunc(Number(process.env.KEHIKOT_CLAUDE_MOST_RUNNING) || 6))
-
 /** How long a connection may stay silent before it has proved itself. */
 const MUST_SPEAK_WITHIN = 5_000
 /** What the program is told it is running in. */
@@ -81,11 +94,48 @@ const SETTLE_EVERY = 2_000
  * process behind at every stop. One that nobody has typed a character into
  * and that the program has recorded nothing for holds nothing at all: when
  * its last viewer leaves it is given this long (a page reload is back well
- * inside it) and then ended. This is the one thing ended without a person
- * choosing, and it is not a session: anything typed into, and anything that
- * exists, is never touched.
+ * inside it) and then ended. It is not a session: anything typed into, and
+ * anything that exists, is left to `QUIET_REST`.
+ *
+ * "Typed" means by a person. What the page's emulator answers the program by
+ * itself, and where the pointer is, arrive on the same channel and are not
+ * typing (see `input.ts`) — counted as such, every session was typed into a
+ * third of a second after it started and none was ever ended.
  */
 const UNTOUCHED_GRACE = 20_000
+/**
+ * How long a session nobody is looking at may print nothing before its
+ * process is put away.
+ *
+ * Each running session is an agent holding a few hundred megabytes, and a
+ * session keeps running when a person looks elsewhere, so one would
+ * accumulate for every place ever worked in. The ones worth keeping are the
+ * ones doing something, and the program says which those are by itself:
+ *
+ *  - Waiting at its prompt, Claude Code prints NOTHING. Measured on 2.1.296:
+ *    started in a pty, brought to its prompt, nothing typed, and every byte
+ *    it printed in twenty minutes timed. There were 1133 of them, and the
+ *    last came eleven seconds after it started.
+ *  - Working, it draws a spinner and a running clock for as long as a turn
+ *    or a tool lasts. That half is NOT measured here — it would have meant
+ *    sending a prompt, which nothing in this module does, a test included —
+ *    and it is why the time below is long instead of a minute.
+ *
+ * So silence is what "waiting" looks like from outside, and the question is
+ * how long to be sure. Half an hour: far longer than the gap between two
+ * frames of a spinner, and long enough that a person who stepped
+ * away from a place mid-thought comes back to the same process. Counted from
+ * the last byte the program printed, the last thing a person typed, or the
+ * moment the last person looked away — whichever is latest — so a session
+ * read for an hour and then left is given the whole time again.
+ *
+ * What is put away is the process. The conversation is the program's record,
+ * and the next visit to the place resumes it by id (`open`, below).
+ * `KEHIKOT_CLAUDE_QUIET_MS` moves it; it is not a limit anybody can run into.
+ */
+export const QUIET_REST = Math.max(1_000, Math.trunc(Number(process.env.KEHIKOT_CLAUDE_QUIET_MS) || 30 * 60_000))
+/** How often the quiet ones are looked for. */
+const REST_EVERY = 60_000
 /** A session that still has no first prompt after this many looks is not asked again until it ends. */
 const LABEL_TRIES = 8
 
@@ -95,12 +145,13 @@ const LABEL_TRIES = 8
  */
 export const CLOSED = {
   ended: 4000,
+  /** Put away for being quiet with nobody looking: not news, and the page draws nothing for it. */
+  rested: 4001,
   installed: 4010,
   notInstalled: 4011,
   refused: 4403,
   missing: 4404,
   silent: 4408,
-  full: 4429,
   failed: 4500,
 } as const
 
@@ -269,14 +320,24 @@ export interface Run {
   label: string
   /** How many times the program has been asked what this session is called. Bounded: some never have a first prompt. */
   asked: number
-  /** Whether anybody has typed anything into it. */
+  /** Whether a person has typed anything into it. The emulator's own replies do not count (see `input.ts`). */
   touched: boolean
+  /** When the program last printed, a person last typed, or the last person looked away: what `QUIET_REST` counts from. */
+  stirredAt: number
+  /** Put away by `rest`, so that its viewers are told that and not that it ended. */
+  rested: boolean
   /** The clock on an untouched, unrecorded run nobody is watching (see `UNTOUCHED_GRACE`). */
   idle: ReturnType<typeof setTimeout> | null
   startedAt: number
   pty: Pty
   screen: Screen
   viewers: Set<Viewer>
+  /**
+   * The viewers that have it on screen. A page keeps views of other places
+   * mounted behind the one it shows, each with its socket open, so "has a
+   * viewer" is not "is being looked at"; the page says which (`look`).
+   */
+  looking: Set<Viewer>
   ended: boolean
 }
 
@@ -286,9 +347,12 @@ export interface RunsOptions {
   spawn: Spawn
   screen: (cols: number, rows: number) => Screen | Promise<Screen>
   program?: Program
-  most?: number
   /** How long an untouched, unrecorded session outlives its last viewer. */
   grace?: number
+  /** How long a session nobody is looking at may print nothing before it is put away. */
+  quiet?: number
+  /** How often the quiet ones are looked for; null for never, when a test calls `rest` itself. */
+  every?: number | null
   now?: () => number
   log?: (line: string) => void
 }
@@ -300,8 +364,8 @@ export interface RunsOptions {
 export class Runs {
   readonly runs = new Map<string, Run>()
   private readonly program: Program
-  private readonly most: number
   private readonly grace: number
+  private readonly quiet: number
   private readonly now: () => number
   private readonly log: (line: string) => void
   /** Opens in flight, by id, so two viewers arriving together get one run and not two. */
@@ -309,10 +373,12 @@ export class Runs {
 
   constructor(private readonly options: RunsOptions) {
     this.program = options.program ?? PROGRAM
-    this.most = options.most ?? MOST_RUNNING
     this.grace = options.grace ?? UNTOUCHED_GRACE
+    this.quiet = options.quiet ?? QUIET_REST
     this.now = options.now ?? Date.now
     this.log = options.log ?? (() => {})
+    const every = options.every === undefined ? Math.min(REST_EVERY, this.quiet) : options.every
+    if (every !== null) setInterval(() => this.rest(), every).unref?.()
   }
 
   /** The run a session id names — by the id it was opened under or the one it settled as. */
@@ -376,9 +442,7 @@ export class Runs {
     if (asked.session && !settled) {
       return { code: CLOSED.refused, why: `${this.program.name} has no session by that id for this project on this computer.` }
     }
-    if (this.sessions().length >= this.most) {
-      return { code: CLOSED.full, why: `${this.most} sessions are running, which is as many as this module keeps.` }
-    }
+    /* And nothing about how many are running: see "There is no limit" at the top. */
 
     const args = settled ? this.program.resume(settled) : this.program.fresh(id)
     let pty: Pty
@@ -407,11 +471,14 @@ export class Runs {
       label: '',
       asked: 0,
       touched: false,
+      stirredAt: this.now(),
+      rested: false,
       idle: null,
       startedAt: this.now(),
       pty,
       screen,
       viewers: new Set(),
+      looking: new Set(),
       ended: false,
     }
     this.runs.set(id, run)
@@ -434,6 +501,7 @@ export class Runs {
   private follow(run: Run): void {
     let asked = 0
     run.pty.onData((chunk) => {
+      run.stirredAt = this.now()
       run.screen.write(chunk)
       for (const viewer of run.viewers) viewer.output(chunk)
       /* A new session exists once the program has written its record, which
@@ -477,8 +545,8 @@ export class Runs {
   }
 
   private async finish(run: Run, exitCode: number): Promise<void> {
-    let code: number = CLOSED.ended
-    let why = `the session ended (${exitCode})`
+    let code: number = run.rested ? CLOSED.rested : CLOSED.ended
+    let why = run.rested ? 'put away while it was quiet' : `the session ended (${exitCode})`
     if (run.what === 'install') {
       const found = this.program.find()
       const done = exitCode === 0 && found.file !== null
@@ -491,6 +559,7 @@ export class Runs {
     }
     for (const viewer of run.viewers) viewer.close(code, why)
     run.viewers.clear()
+    run.looking.clear()
     run.screen.dispose()
   }
 
@@ -507,6 +576,8 @@ export class Runs {
     if (run.idle) clearTimeout(run.idle)
     run.idle = null
     viewer.say({ opened: how, session: run.what === 'session' ? (run.settled ?? run.id) : null, label: run.label, exists: Boolean(run.settled) })
+    /* On screen until the page says otherwise: a view connects when it is shown. */
+    run.looking.add(viewer)
     run.screen.write('', () => {
       if (run.ended) return
       const screen = run.screen.serialize()
@@ -516,8 +587,46 @@ export class Runs {
     })
   }
 
+  /**
+   * The page says whether this viewer has the run on screen. A view mounted
+   * behind another keeps following, and is not somebody looking.
+   */
+  look(run: Run, viewer: Viewer, looking: boolean): void {
+    if (run.ended) return
+    if (looking) {
+      run.looking.add(viewer)
+      return
+    }
+    if (run.looking.delete(viewer) && run.looking.size === 0) run.stirredAt = this.now()
+  }
+
+  /**
+   * Put away the sessions that are waiting and that nobody is looking at
+   * (see `QUIET_REST`). Called on a clock; returns the ones it ended.
+   *
+   * Never one somebody has on screen, never one that has printed inside the
+   * time, and never the installer. Nothing is recorded and nothing is said to
+   * a person: a viewer still following from behind another view is told
+   * `rested` and lets go, and the place resumes the session when it is next
+   * opened.
+   */
+  rest(): Run[] {
+    const put: Run[] = []
+    for (const run of this.runs.values()) {
+      if (run.what !== 'session' || run.ended || run.rested || run.looking.size > 0) continue
+      const quietFor = this.now() - run.stirredAt
+      if (quietFor < this.quiet) continue
+      run.rested = true
+      this.log(`claude: put away ${run.settled ?? run.id}, which nobody was looking at and which had printed nothing for ${Math.round(quietFor / 60_000)} min — its place resumes it`)
+      kill(run.pty)
+      put.push(run)
+    }
+    return put
+  }
+
   detach(run: Run, viewer: Viewer): void {
     run.viewers.delete(viewer)
+    if (run.looking.delete(viewer) && run.looking.size === 0) run.stirredAt = this.now()
     if (run.what !== 'session' || run.ended || run.viewers.size > 0 || run.touched || run.settled || run.idle) return
     run.idle = setTimeout(() => {
       run.idle = null
@@ -544,9 +653,17 @@ export class Runs {
     }
   }
 
+  /**
+   * Hand the program what the page's emulator sent. All of it reaches the
+   * program — its questions have to be answered — and only what a person
+   * typed marks the session as typed into (see `input.ts`).
+   */
   type(run: Run, data: string): void {
     if (run.ended) return
-    run.touched = true
+    if (typedByPerson(data)) {
+      run.touched = true
+      run.stirredAt = this.now()
+    }
     run.pty.write(data)
   }
 
@@ -594,11 +711,14 @@ export class Runs {
       label: '',
       asked: 0,
       touched: false,
+      stirredAt: this.now(),
+      rested: false,
       idle: null,
       startedAt: this.now(),
       pty,
       screen,
       viewers: new Set(),
+      looking: new Set(),
       ended: false,
     }
     this.runs.set(INSTALL, run)
@@ -812,8 +932,10 @@ function hold(ws: import('ws').WebSocket, runs: Runs, log: (line: string) => voi
       return
     }
 
-    /* Every frame after the first is an envelope: `d` is typing, `r` a resize,
-       and anything else is dropped rather than typed into somebody's session. */
+    /* Every frame after the first is an envelope: `d` is what the emulator
+       sent (typing, and its own replies), `r` a resize, `w` whether the view
+       is the one on screen, and anything else is dropped rather than typed
+       into somebody's session. */
     let said: unknown
     try {
       said = JSON.parse(text)
@@ -823,6 +945,7 @@ function hold(ws: import('ws').WebSocket, runs: Runs, log: (line: string) => voi
     if (typeof said !== 'object' || said === null) return
     const frame = said as Record<string, unknown>
     if (typeof frame.d === 'string') return runs.type(run, frame.d)
+    if (typeof frame.w === 'boolean') return runs.look(run, viewer, frame.w)
     if (typeof frame.r === 'object' && frame.r !== null) {
       const asked = frame.r as { cols?: unknown; rows?: unknown }
       runs.resize(run, size(asked.cols, 20, 500, 80), size(asked.rows, 5, 200, 24))
