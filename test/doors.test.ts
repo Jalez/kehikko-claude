@@ -224,7 +224,7 @@ describe('a session’s own report, and where its state is read', () => {
   const was = held[HELD]
   const D = '55555555-5555-4555-8555-555555555555'
   const live = new Runs({
-    program: { ...PROGRAM, find: () => ({ file: '/fake/claude', looked: [], usual: [] }), supports: async () => ({ ok: true, missing: null, tells: true }), newId: () => D },
+    program: { ...PROGRAM, find: () => ({ file: '/fake/claude', looked: [], usual: [] }), supports: async () => ({ ok: true, missing: null, tells: true, lists: false }), newId: () => D },
     every: null,
     port: () => 9590,
     screen: headless,

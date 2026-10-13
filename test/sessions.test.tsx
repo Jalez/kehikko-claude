@@ -10,7 +10,7 @@ import { NOTICES } from '../manifest.ts'
 import type { Api } from '../src/api.ts'
 import type { Hosted } from '../src/app.tsx'
 import { standing } from '../src/view/places.ts'
-import type { Standing, Target } from '../src/view/terminal-view.tsx'
+import type { Said, Standing, Target } from '../src/view/terminal-view.tsx'
 
 /**
  * The component that keeps a session per place, rendered with a stand-in for
@@ -30,7 +30,7 @@ import type { Standing, Target } from '../src/view/terminal-view.tsx'
 interface Mounted {
   target: Target
   tell: (standing: Standing) => void
-  say: (said: { session?: string | null; label?: string; exists?: boolean; typed?: boolean; state?: 'working' | 'needs-you' | 'finished' | null; since?: number }) => void
+  say: (said: Said) => void
 }
 const mounted: Mounted[] = []
 const unmounted: Target[] = []
@@ -80,7 +80,7 @@ function server(start: Record<string, Row[]> = {}) {
       order.push(`read ${key}`)
       return {
         ok: true,
-        program: { name: 'Claude Code', found: state.found, foundAt: state.found, looked: ['/usr/bin', '/Users/someone/.local/bin'], where: 'PATH, ~/.local/bin', lacks: state.lacks, install: { line: 'curl -fsSL https://claude.ai/install.sh | bash', lands: '~/.local/bin/claude' } },
+        program: { name: 'Claude Code', found: state.found, foundAt: state.found, looked: ['/usr/bin', '/Users/someone/.local/bin'], where: 'PATH, ~/.local/bin', lacks: state.lacks, install: { line: 'curl -fsSL https://claude.ai/install.sh | bash', lands: '~/.local/bin/claude' }, asked: 'yes' },
         sessions: held[key] ?? [],
         others: state.others,
         running: state.running,
@@ -808,5 +808,143 @@ describe('the sessions, declared for the container’s header', () => {
     render(<Sessions theme="dark" at={null} cover="no-project" api={none.api} hosted={none.hosted} />)
     await flush()
     expect(none.headers.at(-1)).toEqual([])
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * A session that is running somewhere this module did not start it (#5)
+ * ------------------------------------------------------------------ */
+
+describe('a session that is already running somewhere else', () => {
+  const terminal = { kind: 'interactive' as const, called: 'interactive', pid: 82070, cwd: '/Users/someone/Projects/thesis', since: Date.now() - 17 * 60_000, name: 'project-ea' }
+  const job = { kind: 'background' as const, called: 'background', pid: 82454, cwd: '/Users/someone/Projects/thesis', since: Date.now() - 60 * 60_000, name: 'stand-in' }
+  /** The server refuses to resume it: it says who has it, and closes. */
+  const refuse = (name: string) => {
+    const one = view(name)
+    act(() => one.say({ elsewhere: terminal, session: 'a' }))
+    act(() => one.tell({ at: 'closed', code: 4409, why: 'open in another process; nothing was started' }))
+  }
+
+  test('open in another terminal: the place says where and for how long, and offers the two choices in words — nothing is started by itself', async () => {
+    const s = server({ [KEY()]: [row('a', { label: 'tighten the methods' })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    expect(shown(container)).toEqual(['whole@3:a'])
+    refuse('whole@3:a')
+    await flush()
+    await flush()
+    /* The view is gone and nothing took its place: no second attempt, however often the list is read. */
+    expect(all(container)).toEqual([])
+    expect(mounted.length).toBe(0)
+    const question = container.querySelector('[data-elsewhere-question]') as HTMLElement
+    expect(question.getAttribute('data-elsewhere-question')).toBe('interactive')
+    expect(question.textContent).toContain('“tighten the methods” is already open in another Claude Code process on this computer: an interactive session, in a terminal or an editor, process 82070, in /Users/someone/Projects/thesis, started 17 min ago.')
+    expect(question.textContent).toContain('nothing has been started')
+    const rows = [...question.querySelectorAll('[data-row]')]
+    expect(rows.map((one) => one.getAttribute('data-row'))).toEqual(['leave', 'copy'])
+    expect(rows[0]?.textContent).toContain('Leave it')
+    expect(rows[1]?.textContent).toContain('Open a copy anyway')
+    /* What a copy means is beside the word, before it is chosen. */
+    expect(rows[1]?.textContent).toContain('Remote Control stays with the other one until /remote-control is run here, and the two do not see each other’s turns.')
+    /* The keyboard starts on the answer that starts nothing. */
+    expect(question.querySelector('[aria-selected="true"]')?.getAttribute('data-row')).toBe('leave')
+    expect(document.activeElement).toBe(question)
+  })
+
+  test('"Open a copy anyway" opens it with the word for a copy, and the corner says it is one for as long as it is on screen', async () => {
+    const s = server({ [KEY()]: [row('a', { label: 'tighten the methods' })] })
+    const { container, getByText } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    const before = view('whole@3:a').target
+    expect(before.what === 'session' && before.copy).toBeFalsy()
+    refuse('whole@3:a')
+    await flush()
+    fireEvent.click(getByText('Open a copy anyway'))
+    await flush()
+    expect(shown(container)).toEqual(['whole@3:a'])
+    const target = view('whole@3:a').target
+    expect(target.what === 'session' && target.copy).toBe(true)
+    expect(container.querySelector('[data-elsewhere-question]')).toBeNull()
+
+    act(() => view('whole@3:a').say({ opened: 'copy', session: 'a', label: 'tighten the methods', exists: true, copyOf: terminal }))
+    const control = container.querySelector('[data-sessions]') as HTMLElement
+    expect(control.textContent).toBe('tighten the methods · copy ▾')
+    expect(control.getAttribute('title')).toContain('A copy. This conversation is also open in another Claude Code process')
+    expect(control.getAttribute('title')).toContain('Remote Control stays with the other one until /remote-control is run here, and the two do not see each other’s turns.')
+  })
+
+  test('"Leave it" starts nothing: the list is shown, and reading it again does not try the session again', async () => {
+    const s = server({ [KEY()]: [row('a', { label: 'tighten the methods', elsewhere: terminal })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    refuse('whole@3:a')
+    await flush()
+    fireEvent.keyDown(container.querySelector('[data-elsewhere-question]') as HTMLElement, { key: 'Enter' })
+    await flush()
+    await flush()
+    expect(container.querySelector('[data-elsewhere-question]')).toBeNull()
+    const list = container.querySelector('[data-chooser]') as HTMLElement
+    expect(list).not.toBeNull()
+    expect(list.querySelector('[data-session="a"]')?.textContent).toContain('open elsewhere')
+    expect(mounted.length).toBe(0)
+    expect(all(container)).toEqual([])
+  })
+
+  test('coming back to the place asks the program again: what was running is never remembered', async () => {
+    const s = server({ [KEY()]: [row('a')] })
+    const { container, rerender } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    refuse('whole@3:a')
+    await flush()
+    expect(container.querySelector('[data-elsewhere-question]')).not.toBeNull()
+    rerender(<Sessions theme="dark" at={at(['results'])} api={s.api} />)
+    await flush()
+    rerender(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    /* A fresh view, which is a fresh socket and a fresh check on the server. */
+    expect(container.querySelector('[data-elsewhere-question]')).toBeNull()
+    expect(shown(container)).toEqual(['whole@3:a'])
+  })
+
+  test('a server that closes that way without saying who has it is still asked about, never retried silently', async () => {
+    const s = server({ [KEY()]: [row('a')] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    act(() => view('whole@3:a').tell({ at: 'closed', code: 4409, why: 'open in another process; nothing was started' }))
+    await flush()
+    expect(container.querySelector('[data-elsewhere-question]')?.textContent).toContain('This conversation is already open in another Claude Code process on this computer.')
+    expect(mounted.length).toBe(0)
+  })
+
+  test('running in the background: it is simply on screen, attached, and the corner says so without a row', async () => {
+    const s = server({ [KEY()]: [row('a', { label: 'a background job' })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    act(() => view('whole@3:a').say({ opened: 'background', session: 'a', label: 'a background job', exists: true, background: job }))
+    expect(container.querySelector('[data-elsewhere-question]')).toBeNull()
+    expect(shown(container)).toEqual(['whole@3:a'])
+    const control = container.querySelector('[data-sessions]') as HTMLElement
+    expect(control.textContent).toBe('a background job · background ▾')
+    expect(control.getAttribute('data-how')).toBe('background')
+    expect(control.getAttribute('title')).toContain('no second process was started')
+  })
+
+  test('resumed by a copy too old to be asked: the corner says it was not checked', async () => {
+    const s = server({ [KEY()]: [row('a', { label: 'an old install' })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    act(() => view('whole@3:a').say({ opened: 'resumed', session: 'a', label: 'an old install', exists: true, unchecked: 'too-old' }))
+    const control = container.querySelector('[data-sessions]') as HTMLElement
+    expect(control.textContent).toBe('an old install · unchecked ▾')
+    expect(control.getAttribute('title')).toContain('this Claude Code is too old to say')
+  })
+
+  test('an ordinary session says none of it', async () => {
+    const s = server({ [KEY()]: [row('a', { label: 'only here' })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    act(() => view('whole@3:a').say({ opened: 'resumed', session: 'a', label: 'only here', exists: true }))
+    expect(container.querySelector('[data-sessions]')?.textContent).toBe('only here ▾')
+    expect(container.querySelector('[data-sessions]')?.hasAttribute('data-how')).toBe(false)
   })
 })

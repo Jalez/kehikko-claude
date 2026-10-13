@@ -1,9 +1,9 @@
 import { establishBuild, refuseTicket, sameTicket, type Reply, type Stream } from 'kehikot-module-protocol/serve'
 
-import { TICKET, theRuns, type Run, type Runs } from './live.ts'
+import { TICKET, elsewhereOf, theRuns, type Elsewhere, type Run, type Runs } from './live.ts'
 import { ID, MANIFEST, VERSION } from './manifest.ts'
 import { isKehikkoKey, readPlaceKey } from './place.ts'
-import { PROGRAM, home, type Program, type State } from './program.ts'
+import { PROGRAM, home, type Program, type Running, type State } from './program.ts'
 import { WHERE, detach, projectRoot, readPlaces, rekey, sessionsAt } from './record.ts'
 
 /**
@@ -76,6 +76,21 @@ export interface Row {
    * list agrees with the file.
    */
   missing?: true
+  /**
+   * Set when Claude Code is running it in a process this module did not
+   * start, as the program itself said a moment ago (`agents --json`):
+   * `background` is a session with no terminal, and opening it here attaches
+   * to it — no second process; anything else is open in a terminal or an
+   * editor, cannot be attached to, and opening it here asks first. Absent
+   * when nothing else has it, and when the program cannot be asked.
+   */
+  elsewhere?: Elsewhere
+  /**
+   * For one this module is running: `background` when what runs here is a
+   * view of a background session, `copy` when a person opened it here beside
+   * another process that has it too. Absent for a session that is only here.
+   */
+  as?: 'background' | 'copy'
 }
 
 export interface Listing {
@@ -91,6 +106,13 @@ export interface Listing {
     /** What an installed copy lacks, when it is too old to use. Null otherwise. */
     lacks: string | null
     install: { line: string; lands: string }
+    /**
+     * Whether the program could be asked what is running elsewhere: `yes`, or
+     * why not. `too-old` is a copy from before `agents --json` and `attach`;
+     * its rows never say `elsewhere`, which is then not the same as nothing
+     * running elsewhere.
+     */
+    asked: 'yes' | 'too-old' | 'failed'
   }
   /** The sessions of this place, in the order they were added. */
   sessions: Row[]
@@ -105,6 +127,24 @@ export interface Listing {
 
 /** A running session's state, as the fields a row carries: nothing when nothing is known. */
 const stated = (run: Run | undefined): { state?: State; since?: number } => (run?.state ? { state: run.state, since: run.stateSince } : {})
+
+/**
+ * Where a session is running besides here, as a row says it.
+ *
+ * For one this module runs, what the run itself knows: the background
+ * session it is a view of, or the process it was opened as a copy beside.
+ * For one it does not, what the program said just now.
+ */
+function besides(id: string, run: Run | undefined, running: Running, runs: Runs): { elsewhere?: Elsewhere; as?: 'background' | 'copy' } {
+  if (run) {
+    if (run.joined) return { elsewhere: elsewhereOf(run.joined), as: 'background' }
+    if (run.copyOf) return { elsewhere: elsewhereOf(run.copyOf), as: 'copy' }
+    return {}
+  }
+  const { background, open } = runs.others(running, id)
+  const there = background ?? open
+  return there ? { elsewhere: elsewhereOf(there) } : {}
+}
 
 /**
  * What the page draws a place from.
@@ -127,13 +167,16 @@ export async function listing(
   if (!read.ok) return read
 
   const found = program.find()
-  const able = found.file ? await program.supports(found.file) : { ok: true, missing: null, tells: false }
+  const able = found.file ? await program.supports(found.file) : { ok: true, missing: null, tells: false, lists: false }
   const live = runs.sessions()
   /* A running session that had not been recorded, or named, the last time the
      program spoke may have been since: somebody is about to read the list. */
   await Promise.all(live.filter((run) => !run.settled || !run.label).map((run) => runs.settle(run).catch(() => {})))
   const held = await program.sessions(root.value)
   const known = new Map(held.map((one) => [one.id, one]))
+  /* Asked now, for this list, and kept nowhere: what is running elsewhere a
+     moment from now is asked again when a session is opened (live.ts). */
+  const running: Running = found.file && able.ok ? await runs.running(found.file) : { known: false, why: 'failed' }
 
   const row = (id: string): Row => {
     const run = live.find((one) => one.id === id || one.settled === id)
@@ -147,6 +190,7 @@ export async function listing(
       ...stated(run),
       /* Neither the program's nor running: all there is of it here is the row in the record. */
       ...(known.has(id) || run ? {} : { missing: true as const }),
+      ...besides(id, run, running, runs),
     }
   }
 
@@ -167,6 +211,7 @@ export async function listing(
       where: lookedIn(found.usual),
       lacks: able.ok ? null : able.missing,
       install: { line: install.line, lands: install.lands },
+      asked: running.known ? 'yes' : running.why,
     },
     sessions: here.map(row),
     others: held.filter((one) => !here.includes(one.id)).map((one) => row(one.id)),
@@ -207,9 +252,12 @@ function tools() {
         + 'computer (sessions stay on the computer they ran on). A running session that has said so also has `state` — '
         + '`working` (a turn is under way), `needs-you` (it has stopped at a question only its person can answer) or '
         + '`finished` (its turn is over and it is at its prompt) — and `since`. No `state` means it has not said, not that '
-        + `it is idle. Read from ${WHERE}. Give the absolute project directory as `
-        + 'projectPath, and an epic slug to see only that epic’s places. Reads only: nothing here starts, ends or types '
-        + 'into a session.',
+        + 'it is idle. `runningElsewhere` is on a session Claude Code is running in a process this module did not start: '
+        + 'kind `background` is attached to when it is opened here (no second process), anything else is open in a '
+        + 'terminal or an editor and its person is asked before a copy is started. '
+        + `Read from ${WHERE}. Give the absolute project directory as `
+        + 'projectPath, and an epic slug to see only that epic’s places. Reads only: nothing here starts, ends, '
+        + 'attaches or types into a session.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -231,7 +279,24 @@ async function call(name: string, args: Record<string, unknown>): Promise<string
   if (!read.ok) throw new Error(read.error)
   const epic = typeof args.epic === 'string' && args.epic ? args.epic : null
   const held = new Map((await PROGRAM.sessions(root.value)).map((one) => [one.id, one]))
-  const live = theRuns().sessions()
+  const runs = theRuns()
+  const live = runs.sessions()
+  const running = await runs.running()
+  const session = (id: string) => {
+    const kept = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id] : undefined
+    const at = held.get(id)?.lastActive
+    const run = live.find((one) => one.id === id || one.settled === id)
+    const { elsewhere } = besides(id, run, running, runs)
+    return {
+      id,
+      firstPrompt: held.get(id)?.label || kept?.label || '',
+      lastActive: at ? new Date(at).toISOString() : (kept?.lastActive ?? null),
+      running: Boolean(run),
+      ...(run?.state ? { state: run.state, since: new Date(run.stateSince).toISOString() } : {}),
+      ...(elsewhere ? { runningElsewhere: { kind: elsewhere.called || elsewhere.kind, since: elsewhere.since ? new Date(elsewhere.since).toISOString() : null, pid: elsewhere.pid, cwd: elsewhere.cwd } } : {}),
+      ...(held.has(id) || run ? {} : { missing: true }),
+    }
+  }
   const places = Object.entries(read.value.places)
     .filter(([, place]) => epic === null || place.epic === epic)
     .map(([key, place]) => ({
@@ -239,22 +304,12 @@ async function call(name: string, args: Record<string, unknown>): Promise<string
       epic: place.epic,
       parts: place.parts,
       kehikko: place.kehikko,
-      sessions: place.sessions.map((id) => {
-        const kept = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id] : undefined
-        const at = held.get(id)?.lastActive
-        const run = live.find((one) => one.id === id || one.settled === id)
-        const running = Boolean(run)
-        return {
-          id,
-          firstPrompt: held.get(id)?.label || kept?.label || '',
-          lastActive: at ? new Date(at).toISOString() : (kept?.lastActive ?? null),
-          running,
-          ...(run?.state ? { state: run.state, since: new Date(run.stateSince).toISOString() } : {}),
-          ...(held.has(id) || running ? {} : { missing: true }),
-        }
-      }),
+      sessions: place.sessions.map(session),
     }))
-  if (!places.length) return epic ? `No session is recorded for the epic "${epic}" in that project.` : 'No session is recorded for that project yet.'
+  if (!places.length) {
+    const said = epic ? `No session is recorded for the epic "${epic}" in that project.` : 'No session is recorded for that project yet.'
+    return said
+  }
   return JSON.stringify(places, null, 2)
 }
 

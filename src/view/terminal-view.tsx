@@ -6,6 +6,7 @@ import '@xterm/xterm/css/xterm.css'
 import { probeServer, ticket } from 'kehikot-module-protocol/client'
 
 import { typedByPerson } from '../../input.ts'
+import type { Elsewhere } from '../../live.ts'
 import type { Kehikko } from '../../place.ts'
 import type { State } from '../../program.ts'
 
@@ -64,6 +65,17 @@ export interface Said {
   /** What the session's program says it is doing, when it has said; null takes back what was said. */
   state?: State | null
   since?: number
+  /**
+   * The session is open in another process that cannot be attached to, and
+   * nothing was started: who has it. Said just before the socket is closed.
+   */
+  elsewhere?: Elsewhere
+  /** This is a view of a session Claude Code runs in the background: the process that holds it. */
+  background?: Elsewhere
+  /** This is a copy, opened on purpose beside another process that has the conversation: that process. */
+  copyOf?: Elsewhere
+  /** The session was resumed without the program having been asked whether it runs elsewhere, and why. */
+  unchecked?: 'too-old' | 'failed'
 }
 
 /** What this view asks the server to put it on. Fixed for the life of the view. */
@@ -75,6 +87,8 @@ export type Target =
       place: { epic: string | null; parts: string[]; kehikko: Kehikko | null; kehikkoName: string; kehikkoId?: number; partNames?: Record<string, string> }
       /** Null is a new session. */
       session: string | null
+      /** The person chose to open a copy of a session another process has open. Said in the opening frame, as a word. */
+      copy?: boolean
     }
 
 export function TerminalView({
@@ -171,6 +185,7 @@ export function TerminalView({
                   projectPath: asked.projectPath,
                   place: asked.place,
                   session: asked.session,
+                  ...(asked.copy ? { copy: true } : {}),
                   cols: terminal.cols,
                   rows: terminal.rows,
                 },

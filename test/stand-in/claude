@@ -22,8 +22,32 @@
 #   /interrupt            stops /work's dots and reports NOTHING, as Esc does
 #   /fail                 UserPromptSubmit, then StopFailure
 #
+# It says what is running as the real one does, measured on the same release.
+# Every running session keeps `$CLAUDE_CONFIG_DIR/sessions/<pid>.json`, as the
+# real program does, and:
+#
+#   agents --json         prints those of them whose process is alive, as a JSON
+#                         array: `[]` when there are none. Every folder's, not
+#                         only this one's. Fields as the real one prints them:
+#                         pid, cwd, kind (interactive | background), startedAt,
+#                         sessionId, name, status — and for a background one its
+#                         short `id` and a `state`.
+#   --bg --resume <id>    continues a recorded session in the background and
+#                         returns at once, printing `backgrounded · <short id>`:
+#                         the way a walk gets a background session to attach to
+#   attach <short id>     opens that background session in this terminal. The
+#                         session's own process is another one and stays one:
+#                         this is a view of it. Refuses the full session id and
+#                         the id of an interactive session in the real one's
+#                         words, `No job matching '<x>'. …`, exit 1. Ctrl+Z
+#                         leaves the view (exit 0) and so does a hang-up; the
+#                         session runs on either way.
+#   stop <short id>       stops a background session. Never run by the module.
+#
 # STANDIN_OLD=1 makes its --help that of a copy too old to take a session id.
 # STANDIN_MUTE=1 makes it one that takes a session id and has no --settings.
+# STANDIN_NOAGENTS=1 makes it one from before `agents --json` and `attach`:
+# neither is in its help, and asking for either is an error.
 
 if [ "$1" = "--help" ]; then
   echo "Usage: claude [options] [command] [prompt]"
@@ -31,11 +55,69 @@ if [ "$1" = "--help" ]; then
     echo "  -r, --resume [value]     Resume a conversation by session ID"
     echo "  --session-id <uuid>      Use a specific session ID for the conversation"
     [ -z "$STANDIN_MUTE" ] && echo "  --settings <file-or-json>  Path to a settings JSON file or a JSON string to load additional settings from"
+    if [ -z "$STANDIN_NOAGENTS" ]; then
+      echo "Commands:"
+      echo "  agents [options]         Manage background agents"
+      echo "  attach <id|name>         Open a background session in this terminal"
+    fi
   fi
   exit 0
 fi
 
 config="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+running="$config/sessions"
+jobs="$config/jobs"
+
+if [ "$1" = "agents" ] || [ "$1" = "attach" ] || [ "$1" = "stop" ] || [ "$1" = "--bg" ]; then
+  if [ -n "$STANDIN_OLD$STANDIN_NOAGENTS" ]; then echo "error: unknown option or command '$1 $2'" >&2; exit 1; fi
+fi
+
+if [ "$1" = "agents" ]; then
+  [ "$2" = "--json" ] || { echo "stand-in claude: only \`agents --json\` is imitated"; exit 2; }
+  out=""
+  for file in "$running"/*.json; do
+    [ -f "$file" ] || continue
+    pid=$(basename "$file" .json)
+    kill -0 "$pid" 2>/dev/null || continue
+    out="$out${out:+,}
+  $(cat "$file")"
+  done
+  if [ -z "$out" ]; then echo "[]"; else printf '[%s\n]\n' "$out"; fi
+  exit 0
+fi
+
+if [ "$1" = "--bg" ]; then
+  folder=$(pwd -P | sed 's/[^a-zA-Z0-9]/-/g')
+  if [ "$2" != "--resume" ] || [ ! -f "$config/projects/$folder/$3.jsonl" ]; then echo "stand-in claude: --bg is imitated only as \`--bg --resume <an id with a record here>\`"; exit 2; fi
+  short=$(printf '%s' "$3" | cut -c1-8)
+  mkdir -p "$running" "$jobs/$short"
+  # The background session's own process: it outlives this command and every view of it.
+  nohup /bin/sh -c 'trap "exit 0" TERM INT; while :; do sleep 1; done' >/dev/null 2>&1 &
+  bg=$!
+  printf '{"pid":%s,"id":"%s","cwd":"%s","kind":"background","startedAt":%s000,"sessionId":"%s","name":"stand-in","status":"idle","state":"working"}' "$bg" "$short" "$(pwd -P)" "$(date +%s)" "$3" > "$running/$bg.json"
+  printf '%s' "$bg" > "$jobs/$short/pid"; printf '%s' "$3" > "$jobs/$short/session"; pwd -P > "$jobs/$short/cwd"
+  echo "backgrounded · $short"
+  echo "  claude attach $short    open in this terminal"
+  exit 0
+fi
+
+if [ "$1" = "stop" ]; then
+  pid=$(cat "$jobs/$2/pid" 2>/dev/null)
+  if [ -z "$pid" ]; then echo "No job matching '$2'. Run 'claude agents' to list running sessions."; exit 1; fi
+  kill "$pid" 2>/dev/null; rm -f "$running/$pid.json"; rm -rf "$jobs/$2"
+  echo "stopped $2"
+  exit 0
+fi
+
+attached=""
+if [ "$1" = "attach" ]; then
+  pid=$(cat "$jobs/$2/pid" 2>/dev/null)
+  if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then echo "No job matching '$2'. Run 'claude agents' to list running sessions."; exit 1; fi
+  attached="$2"
+  cd "$(cat "$jobs/$2/cwd")" || exit 1
+  set -- --attached "$(cat "$jobs/$2/session")"
+fi
+
 folder=$(pwd -P | sed 's/[^a-zA-Z0-9]/-/g')
 dir="$config/projects/$folder"
 mode="$1"
@@ -64,10 +146,22 @@ case "$mode" in
   --resume)
     if [ ! -f "$record" ]; then echo "No conversation found with session ID: $id"; exit 1; fi
     echo "stand-in claude: RESUMED session $id ($(grep -c '"type":"user"' "$record") earlier lines)" ;;
+  --attached)
+    echo "stand-in claude: ATTACHED to background session $attached ($id), which is process $pid — this is a view of it" ;;
   *)
     echo "stand-in claude: started with no session id: $*"; exit 2 ;;
 esac
-echo "args: $1 $2${settings:+ --settings (${#settings} characters)}"
+if [ -n "$attached" ]; then
+  echo "args: attach $attached"
+  # Ctrl+Z leaves the view and the session runs on, as measured.
+  trap 'echo "stand-in claude: left the view; the session keeps running"; exit 0' TSTP
+else
+  echo "args: $1 $2${settings:+ --settings (${#settings} characters)}"
+  # Running, and said to be: what `agents --json` lists, for as long as this process lives.
+  mkdir -p "$running"
+  printf '{"pid":%s,"cwd":"%s","kind":"interactive","startedAt":%s000,"sessionId":"%s","name":"stand-in","status":"idle"}' "$$" "$(pwd -P)" "$(date +%s)" "$id" > "$running/$$.json"
+  trap 'rm -f "$running/$$.json"' EXIT
+fi
 echo "cwd: $(pwd -P)"
 
 busy=""

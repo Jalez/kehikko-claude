@@ -4,10 +4,12 @@ import { held, probeServer, type PressAnswer } from 'kehikot-module-protocol/cli
 import { Cover, coverFor, useFocus, useHost, useServerStanding, type CoverState } from 'kehikot-module-protocol/client/react'
 
 import type { Listing } from '../doors.ts'
+import type { Elsewhere } from '../live.ts'
 import { ID, NOTICES } from '../manifest.ts'
 import type { State } from '../program.ts'
 import { api as realApi, type Api } from './api.ts'
 import { Chooser } from './view/chooser.tsx'
+import { ElsewhereQuestion } from './view/elsewhere.tsx'
 import {
   MARKS,
   MOST_VIEWS,
@@ -19,6 +21,7 @@ import {
   placeId,
   since,
   standing,
+  standingWords,
   surplus,
   type Standing as Place,
   type View,
@@ -34,6 +37,8 @@ const INSTALLED = 4010
 const MISSING = 4404
 /** Put away while it was quiet and nobody was looking. Not news: the view is let go and nothing is drawn. */
 const RESTED = 4001
+/** The session is open in another process that cannot be attached to. Nothing was started: the person is asked. */
+const ELSEWHERE = 4409
 
 /** Try again: ask whether this module's own server is there now. The standing it reports is what redraws. */
 const knock = () => void probeServer()
@@ -126,6 +131,18 @@ export function App() {
  * (`QUIET_REST` in live.ts); its view here is told so, is let go without a
  * word, and coming back to the place resumes the same session.
  *
+ * ## A session that is running elsewhere
+ *
+ * A session another Claude Code process has open, and that cannot be
+ * attached to, is not resumed: the server says who has it and closes the
+ * socket (`ELSEWHERE`), and the person chooses between leaving it and opening
+ * a copy, with what a copy means beside the word — in the terminal's own
+ * space, which is empty, since nothing was started. While that stands for a
+ * place, nothing is opened there by itself (`blocked`).
+ *
+ * A session Claude Code runs in the background needs no question: the server
+ * attaches to it, and the corner says so.
+ *
  * ## What is drawn besides the terminal
  *
  * Nothing that costs a row while a session is running. The session's short
@@ -188,6 +205,15 @@ export function Sessions({
   const [refusal, setRefusal] = useState<string | null>(null)
   /** The person opened the list over a running terminal. */
   const [asking, setAsking] = useState(false)
+  /**
+   * The session this place would open is open in another process, and nothing
+   * was started: who has it, and whether the person has said to leave it.
+   * Kept only while the canvas stays on the place — coming back asks the
+   * program again, since what is running is never remembered.
+   */
+  const [blocked, setBlocked] = useState<{ place: string; session: string; there: Elsewhere | null; left: boolean } | null>(null)
+  /** What each view turned out to be: a view of a background session, a copy, or one resumed unchecked. */
+  const [hows, setHows] = useState<Record<number, { background?: Elsewhere; copyOf?: Elsewhere; unchecked?: 'too-old' | 'failed' }>>({})
   /** The installer's own view, while it runs and after it fails. */
   const [installing, setInstalling] = useState<{ n: number; failed: string | null } | null>(null)
   const [again, setAgain] = useState(0)
@@ -258,6 +284,7 @@ export function Sessions({
    */
   useEffect(() => {
     setAsking(false)
+    setBlocked(null)
     const gone = views.filter((one) => !one.kept && placeId(one.at) !== id).map((one) => one.n)
     if (!gone.length) return
     setViews((all) => all.filter((one) => !gone.includes(one.n)))
@@ -269,16 +296,18 @@ export function Sessions({
     setViews((all) => all.filter((one) => one.n !== n))
     setShownBy((all) => Object.fromEntries(Object.entries(all).filter(([, shown]) => shown !== n)))
     setStandings(({ [n]: _gone, ...rest }) => rest)
+    setHows(({ [n]: _was, ...rest }) => rest)
   }
 
-  /** Put a session on screen for this place: null is a new one. */
-  const open = (session: string | null) => {
+  /** Put a session on screen for this place: null is a new one. `copy` is a person's answer to "it is open elsewhere". */
+  const open = (session: string | null, copy = false) => {
     if (!at || id === null) return
     setAsking(false)
+    setBlocked(null)
     const was = views.find((one) => one.n === shownBy[id])
     if (was && session && was.session === session && standings[was.n]?.at !== 'closed') return
     count.current += 1
-    const next: View = { n: count.current, at, session, shownAt: Date.now(), kept: false }
+    const next: View = { n: count.current, at, session, shownAt: Date.now(), kept: false, ...(copy && session ? { copy: true } : {}) }
     const kept = [...views.filter((one) => one.n !== was?.n), next]
     const gone = surplus(kept, next.n, MOST_VIEWS).map((one) => one.n)
     setViews(kept.filter((one) => !gone.includes(one.n)))
@@ -298,6 +327,8 @@ export function Sessions({
   opened.current = open
   useEffect(() => {
     if (!at || !here || view || installing) return
+    /* Asked about, and not answered with "open it": nothing opens here by itself. */
+    if (blocked && blocked.place === id) return
     const step = decide(here, remembered.at(at.projectPath).read(at.key))
     if (step.do !== 'open') return
     if (step.session) return opened.current(step.session)
@@ -305,7 +336,7 @@ export function Sessions({
     const waited = setTimeout(() => opened.current(null), settleMs)
     return () => clearTimeout(waited)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [here, view === null, installing === null])
+  }, [here, view === null, installing === null, blocked === null])
 
   /* Looked at again: this is the most recently shown, for when views are let go. */
   useEffect(() => {
@@ -321,6 +352,14 @@ export function Sessions({
       drop(one.n)
       return
     }
+    if (next.at === 'closed' && next.code === ELSEWHERE) {
+      /* Nothing was started. The view is let go, and the question stands in its place — set by
+         what the server said just before it closed, or here if it said nothing. */
+      const session = one.session
+      if (session) setBlocked((was) => was ?? { place: placeId(one.at), session, there: null, left: false })
+      drop(one.n)
+      return
+    }
     if (next.at === 'closed' && next.code === MISSING) {
       /* What was known about this place said the program was there. It is
          asked again before anything is decided from it. */
@@ -333,6 +372,12 @@ export function Sessions({
   }
 
   const said = (one: View, heard: Said) => {
+    if (heard.elsewhere) {
+      const session = heard.session ?? one.session
+      if (session) setBlocked({ place: placeId(one.at), session, there: heard.elsewhere, left: false })
+      return
+    }
+    if (heard.opened) setHows((all) => ({ ...all, [one.n]: { background: heard.background, copyOf: heard.copyOf, unchecked: heard.unchecked } }))
     if (heard.typed || heard.exists) setViews((all) => all.map((each) => (each.n === one.n && !each.kept ? { ...each, kept: true } : each)))
     const session = heard.session
     if (session) {
@@ -374,10 +419,15 @@ export function Sessions({
   const standingNow = view ? standings[view.n] : undefined
   const ended = standingNow?.at === 'closed' ? standingNow : null
 
-  const choosing = Boolean(at && here && !installing && (asking || (!view && step?.do === 'choose')))
+  /* The question about a session that is open elsewhere, for this place, until it is answered. */
+  const stuck = blocked && blocked.place === id && !view ? blocked : null
+  const questioning = Boolean(at && here && !installing && stuck && !stuck.left && !asking)
+  const choosing = Boolean(at && here && !installing && !questioning && (asking || (!view && step?.do === 'choose') || stuck?.left))
   const wanting = Boolean(at && here && !installing && !view && step?.do === 'install')
   const terminal = Boolean(at && view && !choosing && !installing)
   const label = view ? brief((view.session && (labels[view.session] || here?.sessions.find((one) => one.id === view.session)?.label)) || '') : ''
+  /* What the session on screen is besides this module's own: a view of a background one, a copy, or unchecked. */
+  const how = view ? standingWords(hows[view.n], here?.program.name ?? 'Claude Code', Date.now()) : null
   const doing = (view?.session && Object.hasOwn(states, view.session) ? states[view.session] : undefined) ?? null
   const mark = doing?.state ? MARKS[doing.state] : null
 
@@ -457,7 +507,9 @@ export function Sessions({
       {choosing && here && (
         <div className="min-h-0 flex-1">
           <Chooser
-            mode={view ? 'sessions' : 'ask'}
+            /* Remounted when the occasion changes: where the keyboard starts depends on it. */
+            key={view ? 'sessions' : (step?.do ?? 'sessions')}
+            mode={view ? 'sessions' : step?.do === 'choose' ? 'ask' : 'sessions'}
             listing={here}
             current={view?.session ?? null}
             onOpen={open}
@@ -468,6 +520,23 @@ export function Sessions({
               if (remembered.at(at.projectPath).read(at.key) === session) remembered.at(at.projectPath).keep(at.key, null)
               void api.detach(at.projectPath, at.key, session).finally(() => setAgain((n) => n + 1))
             }}
+          />
+        </div>
+      )}
+
+      {/* A session another process has open: nothing was started, and the two answers are put in
+          words where the terminal would be. */}
+      {questioning && here && stuck && (
+        <div className="min-h-0 flex-1">
+          <ElsewhereQuestion
+            program={here.program.name}
+            label={labels[stuck.session] || [...here.sessions, ...here.others].find((one) => one.id === stuck.session)?.label || ''}
+            there={stuck.there}
+            onLeave={() => {
+              setBlocked((was) => (was ? { ...was, left: true } : was))
+              setAgain((n) => n + 1)
+            }}
+            onCopy={() => open(stuck.session, true)}
           />
         </div>
       )}
@@ -516,6 +585,7 @@ export function Sessions({
                     ...(Object.keys(one.at.partNames).length ? { partNames: one.at.partNames } : {}),
                   },
                   session: one.session,
+                  ...(one.copy ? { copy: true } : {}),
                 }}
                 shown={shown}
                 watched={one.n === view?.n}
@@ -533,9 +603,10 @@ export function Sessions({
         <button
           type="button"
           data-sessions
-          aria-label={`Sessions — ${label}${mark ? ` (${mark.word})` : ''}`}
-          title={doing?.state ? `Sessions for this place — this one: ${since(doing.state, doing.since, Date.now())}` : 'Sessions for this place'}
+          aria-label={`Sessions — ${label}${mark ? ` (${mark.word})` : ''}${how ? ` (${how.word})` : ''}`}
+          title={`${doing?.state ? `Sessions for this place — this one: ${since(doing.state, doing.since, Date.now())}` : 'Sessions for this place'}${how ? `. ${how.means}` : ''}`}
           data-state={doing?.state ?? undefined}
+          data-how={how?.word}
           className="bg-background/70 text-muted-foreground hover:text-foreground hover:bg-background absolute top-1 right-4 z-10 max-w-[60%] truncate rounded border px-1.5 py-0.5 font-mono text-[10px] opacity-60 backdrop-blur-sm hover:opacity-100 focus-visible:opacity-100"
           onClick={() => {
             setAsking(true)
@@ -547,7 +618,8 @@ export function Sessions({
               {mark.glyph}
             </span>
           ) : null}
-          {label} ▾
+          {label}
+          {how ? ` · ${how.word}` : ''} ▾
         </button>
       )}
 

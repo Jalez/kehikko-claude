@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import type { Listing, Row } from '../../doors.ts'
-import { MARKS, ago, named, since } from './places.ts'
+import { MARKS, ago, elsewhereRow, named, since } from './places.ts'
 
 /**
  * The list a person chooses a session from, drawn where the terminal would be.
@@ -13,7 +13,6 @@ import { MARKS, ago, named, since } from './places.ts'
  *  - **`sessions`**: the person pressed the control in the corner of a
  *    running terminal. The same list with the one on screen marked; Escape
  *    goes back to it.
- *
  * It is never drawn to stand in the way. There was a third occasion — as
  * many sessions running as the module would keep, and a list to end one from
  * — and it is gone with the limit it belonged to (see live.ts). `End` is on a
@@ -41,6 +40,16 @@ import { MARKS, ago, named, since } from './places.ts'
  * last said it is doing — working, needs you, finished — as a glyph and the
  * word, in the same place on the same line. One that has not said (a copy
  * too old to, or a session nobody has spoken to) still says "running".
+ *
+ * ## One that is running somewhere this module did not start it
+ *
+ * Said in the same place again, from what Claude Code itself reported a
+ * moment before the list was drawn: *running in the background* for a
+ * background session — opening it attaches to it — and *open elsewhere* for
+ * one in a terminal or an editor, which cannot be attached to and is asked
+ * about before a copy is started. The sentence is the row's `title`. A row
+ * this module is running as a view of a background session, or as a copy,
+ * says which after its state.
  */
 
 /** Why a row cannot be opened, in the fewest words that are true of both ways it happens. */
@@ -149,6 +158,7 @@ export function Chooser({
         }
 
         const { row } = item
+        const there = elsewhereRow(row.elsewhere, now)
         if (row.missing) {
           return (
             <div key={row.id} role="option" aria-selected={on} aria-disabled data-row="missing" data-session={row.id} className={shell} onMouseMove={() => setAt(index)}>
@@ -176,6 +186,13 @@ export function Chooser({
             <button type="button" className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => onOpen(row.id)} title={row.id}>
               <span className="min-w-0 flex-1 truncate">{named(row)}</span>
               {row.id === current ? <span className="text-muted-foreground shrink-0">on screen</span> : null}
+              {!row.running && there ? (
+                /* Running, and not here: said where "running" would be, in the program's own terms. */
+                <span className="flex shrink-0 items-center gap-1" data-elsewhere={row.elsewhere?.kind} title={there.means}>
+                  <span className={row.elsewhere?.kind === 'background' ? 'bg-running size-1.5 rounded-full' : 'border-running size-1.5 rounded-full border'} aria-hidden />
+                  {there.word}
+                </span>
+              ) : null}
               {row.running ? (
                 row.state ? (
                   /* What its program says it is doing, where "running" was: a glyph and the word, in the same place. */
@@ -192,11 +209,21 @@ export function Chooser({
                   </span>
                 )
               ) : null}
+              {row.running && row.as ? (
+                <span className="text-muted-foreground shrink-0" data-as={row.as} title={row.as === 'background' ? 'What runs here is a view of a background session: its own process is another one.' : 'Opened here as a copy: another process has this conversation open too.'}>
+                  {row.as}
+                </span>
+              ) : null}
               <span className="text-muted-foreground shrink-0">{ago(row.lastActive, now)}</span>
             </button>
             {row.running ? (
-              <button type="button" className="hover:bg-background shrink-0 rounded border px-1.5" title="End this session’s process. It can be resumed." onClick={() => onEnd(row.id)}>
-                End
+              <button
+                type="button"
+                className="hover:bg-background shrink-0 rounded border px-1.5"
+                title={row.as === 'background' ? 'Close this view. The session keeps running in the background.' : 'End this session’s process. It can be resumed.'}
+                onClick={() => onEnd(row.id)}
+              >
+                {row.as === 'background' ? 'Close' : 'End'}
               </button>
             ) : null}
             {!item.attach ? (

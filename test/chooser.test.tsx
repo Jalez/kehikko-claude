@@ -14,7 +14,7 @@ const NOW = Date.parse('2026-10-12T12:00:00Z')
 const row = (id: string, more: Partial<Row> = {}): Row => ({ id, label: '', lastActive: null, running: false, ...more })
 const listing = (more: Partial<Listing> = {}): Listing => ({
   ok: true,
-  program: { name: 'Claude Code', found: '/bin/claude', foundAt: '/bin/claude', looked: [], where: 'PATH', lacks: null, install: { line: 'install', lands: '' } },
+  program: { name: 'Claude Code', found: '/bin/claude', foundAt: '/bin/claude', looked: [], where: 'PATH', lacks: null, install: { line: 'install', lands: '' }, asked: 'yes' },
   sessions: [row('a', { label: 'tighten the methods section', lastActive: NOW - 3 * 3_600_000 }), row('b', { label: '', running: true, lastActive: NOW - 60_000 })],
   others: [row('c', { label: 'from another place', lastActive: NOW - 86_400_000 })],
   running: [],
@@ -217,5 +217,25 @@ describe('what a running session is doing, in the list', () => {
     const marked = drawn({ listing: listing({ sessions: [row('a', { label: 'one', running: true, state: 'needs-you', since: NOW }), row('b', { label: 'two', running: true, state: 'finished', since: NOW })] }) })
     expect(marked.list.querySelectorAll('[data-row]').length).toBe(before)
     expect(marked.list.children.length).toBe(children)
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * Rows for sessions running elsewhere (#5)
+ * ------------------------------------------------------------------ */
+
+describe('rows for sessions this module runs as a view or a copy', () => {
+  test('a view of a background session says so, and its button closes the view — it does not end the session', () => {
+    const { list, ended } = drawn({ mode: 'sessions', listing: listing({ sessions: [row('a', { label: 'a background job', running: true, as: 'background' })], others: [] }) })
+    expect(list.querySelector('[data-session="a"] [data-as]')?.textContent).toBe('background')
+    const button = [...list.querySelectorAll('[data-session="a"] button')].find((one) => one.textContent === 'Close') as HTMLElement
+    expect(button.getAttribute('title')).toBe('Close this view. The session keeps running in the background.')
+    fireEvent.click(button)
+    expect(ended).toEqual(['a'])
+  })
+
+  test('a copy says it is one', () => {
+    const { list } = drawn({ mode: 'sessions', listing: listing({ sessions: [row('a', { label: 'x', running: true, as: 'copy' })], others: [] }) })
+    expect(list.querySelector('[data-session="a"] [data-as]')?.textContent).toBe('copy')
   })
 })

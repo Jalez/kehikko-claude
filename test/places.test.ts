@@ -3,7 +3,7 @@ import { notificationPayload } from 'kehikot-module-protocol'
 
 import type { Listing, Row } from '../doors.ts'
 import { STATES } from '../program.ts'
-import { MARKS, ago, brief, decide, noticeLine, placeId, placeWords, since, standing, surplus, type View } from '../src/view/places.ts'
+import { COPY, LEAVE, MARKS, ago, brief, decide, elsewhereRow, elsewhereSaid, noticeLine, placeId, placeWords, since, standing, standingWords, surplus, whereWords, type View } from '../src/view/places.ts'
 
 /**
  * What the page does when the canvas names a place. Pure, so the rule that
@@ -13,7 +13,7 @@ import { MARKS, ago, brief, decide, noticeLine, placeId, placeWords, since, stan
 const row = (id: string, more: Partial<Row> = {}): Row => ({ id, label: '', lastActive: null, running: false, ...more })
 const listing = (sessions: Row[], program: Partial<Listing['program']> = {}): Listing => ({
   ok: true,
-  program: { name: 'Claude Code', found: '/bin/claude', foundAt: '/bin/claude', looked: [], where: 'PATH', lacks: null, install: { line: 'install', lands: '~/.local/bin/claude' }, ...program },
+  program: { name: 'Claude Code', found: '/bin/claude', foundAt: '/bin/claude', looked: [], where: 'PATH', lacks: null, install: { line: 'install', lands: '~/.local/bin/claude' }, asked: 'yes', ...program },
   sessions,
   others: [],
   running: [],
@@ -211,5 +211,60 @@ describe('the mark for what a session is doing', () => {
       kehikko: { id: 3, name: 'writing' },
     })
     expect(at?.partNames).toEqual({ methods: 'Methods' })
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * The words for a session running elsewhere (#5)
+ * ------------------------------------------------------------------ */
+
+describe('the words for a session that is running somewhere else', () => {
+  const NOW = Date.parse('2026-10-12T12:00:00Z')
+  const terminal = { kind: 'interactive' as const, called: 'interactive', pid: 82070, cwd: '/Users/someone/Projects/thesis', since: NOW - 17 * 60_000, name: 'project-ea' }
+  const job = { kind: 'background' as const, called: 'background', pid: 82454, cwd: '/Users/someone/Projects/thesis', since: NOW - 3 * 3_600_000, name: 'stand-in' }
+
+  test('say where it is running and for how long, from what the program reported', () => {
+    expect(whereWords(terminal, NOW)).toBe('an interactive session, in a terminal or an editor, process 82070, in /Users/someone/Projects/thesis, started 17 min ago')
+    expect(whereWords(job, NOW)).toBe('a background session, process 82454, in /Users/someone/Projects/thesis, started 3 h ago')
+    /* What the program did not say is left out, not made up. */
+    expect(whereWords({ kind: 'other', called: 'sdk', pid: null, cwd: '', since: null, name: '' }, NOW)).toBe('a “sdk” session')
+  })
+
+  test('the question says what is true and that nothing has been started', () => {
+    expect(elsewhereSaid('Claude Code', 'tighten the methods', terminal, NOW)).toBe(
+      '“tighten the methods” is already open in another Claude Code process on this computer: an interactive session, in a terminal or an editor, process 82070, in /Users/someone/Projects/thesis, started 17 min ago. '
+        + 'It cannot be shown here — only a background session can be attached to — and nothing has been started.',
+    )
+    expect(elsewhereSaid('Claude Code', '', null, NOW)).toBe('This conversation is already open in another Claude Code process on this computer. It cannot be shown here — only a background session can be attached to — and nothing has been started.')
+  })
+
+  test('the two answers are in words, and a copy says what it means before it is chosen', () => {
+    expect(LEAVE.word).toBe('Leave it')
+    expect(LEAVE.means).toContain('the other process is not touched')
+    expect(COPY.word).toBe('Open a copy anyway')
+    expect(COPY.means).toContain('Remote Control stays with the other one until /remote-control is run here')
+    expect(COPY.means).toContain('the two do not see each other’s turns')
+  })
+
+  test('a session on screen says what it is when it is not simply this module’s own', () => {
+    expect(standingWords(undefined, 'Claude Code', NOW)).toBeNull()
+    expect(standingWords({}, 'Claude Code', NOW)).toBeNull()
+    expect(standingWords({ background: job }, 'Claude Code', NOW)).toEqual({
+      word: 'background',
+      means: 'Attached to a background session, process 82454, in /Users/someone/Projects/thesis, started 3 h ago: no second process was started, and Remote Control is where it was. Closing this view leaves the session running.',
+    })
+    const copy = standingWords({ copyOf: terminal }, 'Claude Code', NOW)
+    expect(copy?.word).toBe('copy')
+    expect(copy?.means).toContain('also open in another Claude Code process (an interactive session, in a terminal or an editor, process 82070')
+    expect(copy?.means).toContain('Remote Control stays with the other one until /remote-control is run here, and the two do not see each other’s turns.')
+    expect(standingWords({ unchecked: 'too-old' }, 'Claude Code', NOW)?.means).toBe('Resumed without checking whether it is already running somewhere else: this Claude Code is too old to say. Update it to have that checked.')
+    expect(standingWords({ unchecked: 'failed' }, 'Claude Code', NOW)?.means).toContain('could not be asked')
+  })
+
+  test('a row says which of the two it is, and what opening it will do', () => {
+    expect(elsewhereRow(undefined, NOW)).toBeNull()
+    expect(elsewhereRow(job, NOW)).toEqual({ word: 'running in the background', means: 'Running as a background session, process 82454, in /Users/someone/Projects/thesis, started 3 h ago. Opening it here attaches to it: no second process is started.' })
+    expect(elsewhereRow(terminal, NOW)?.word).toBe('open elsewhere')
+    expect(elsewhereRow(terminal, NOW)?.means).toContain('It cannot be attached to: opening it here asks before a copy is started.')
   })
 })
