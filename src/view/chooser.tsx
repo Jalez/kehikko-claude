@@ -6,13 +6,25 @@ import { MARKS, ago, elsewhereRow, named, since } from './places.ts'
 /**
  * The list a person chooses a session from, drawn where the terminal would be.
  *
- * Two occasions, one list:
+ * Three occasions, one list:
  *
  *  - **`ask`**: the place has more than one session, and nothing is opened
  *    until one is chosen. There is no way out of it but choosing.
  *  - **`sessions`**: the person pressed the control in the corner of a
  *    running terminal. The same list with the one on screen marked; Escape
  *    goes back to it.
+ *  - **`offer`**: the place has no session and the project has others, so
+ *    nothing is started until the person has said which. *New session* is
+ *    the first row and the one the keyboard starts on — Enter, and a person
+ *    who always wants a new one has lost one key press. Under it, laid out
+ *    and not folded away, the project's sessions in the order the server
+ *    put them: the ones another place of this epic holds, then the rest by
+ *    when each was last active. Choosing one makes it this place's session;
+ *    it stays where else it was.
+ *
+ * It is drawn where the terminal would be, which is empty on all three
+ * occasions: it takes no row from anything.
+ *
  * It is never drawn to stand in the way. There was a third occasion — as
  * many sessions running as the module would keep, and a list to end one from
  * — and it is gone with the limit it belonged to (see live.ts). `End` is on a
@@ -58,6 +70,9 @@ const NOT_HERE_WHY =
   'Claude Code has no record of this session on this computer: it was started on another one, or its transcript has '
   + 'since been cleaned away. It stays in the record, and opens where it exists.'
 
+/** The one line over the list when a place has no session and the project has others. */
+export const OFFER_SAID = 'No session here yet. Start a new one, or carry on with one this project already has.'
+
 type Item =
   | { kind: 'session'; row: Row; attach: boolean }
   | { kind: 'new' }
@@ -73,7 +88,7 @@ export function Chooser({
   onDetach,
   onClose,
 }: {
-  mode: 'ask' | 'sessions'
+  mode: 'ask' | 'sessions' | 'offer'
   listing: Listing
   /** The session on screen behind this list, if there is one. */
   current?: string | null
@@ -88,19 +103,29 @@ export function Chooser({
   /* Where the keyboard starts: the first row that can be opened. A session that is not on this
      computer is listed where it was added, which may be first, and Enter on it would do nothing. */
   const [at, setAt] = useState(() => {
+    /* Offered: the new one is the first row, and where Enter lands. */
+    if (mode === 'offer') return 0
     const first = listing.sessions.findIndex((row) => !row.missing)
     return first === -1 ? listing.sessions.length : first
   })
   const list = useRef<HTMLDivElement>(null)
 
   const items = useMemo<Item[]>(() => {
+    if (mode === 'offer') {
+      return [
+        { kind: 'new' },
+        ...listing.others.map((row): Item => ({ kind: 'session', row, attach: true })),
+        /* What the record lists for this place and this computer does not have: still shown, last, and still not openable. */
+        ...listing.sessions.map((row): Item => ({ kind: 'session', row, attach: false })),
+      ]
+    }
     return [
       ...listing.sessions.map((row): Item => ({ kind: 'session', row, attach: false })),
       { kind: 'new' },
       ...(listing.others.length ? [{ kind: 'attach' } as Item] : []),
       ...(others ? listing.others.map((row): Item => ({ kind: 'session', row, attach: true })) : []),
     ]
-  }, [listing, others])
+  }, [listing, others, mode])
 
   /* The list takes the keyboard as it appears: a person who was typing in a
      terminal a moment ago should not have to reach for the pointer. */
@@ -130,7 +155,7 @@ export function Chooser({
     event.preventDefault()
   }
 
-  const said = mode === 'ask' ? 'More than one session belongs here. Which one?' : 'Sessions here'
+  const said = mode === 'ask' ? 'More than one session belongs here. Which one?' : mode === 'offer' ? OFFER_SAID : 'Sessions here'
 
   return (
     <div
@@ -185,6 +210,11 @@ export function Chooser({
             {number}
             <button type="button" className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => onOpen(row.id)} title={row.id}>
               <span className="min-w-0 flex-1 truncate">{named(row)}</span>
+              {row.near?.length ? (
+                <span className="text-muted-foreground shrink-0" data-near title={`Already the session of another place of this epic: ${row.near.join('; ')}`}>
+                  this epic
+                </span>
+              ) : null}
               {row.id === current ? <span className="text-muted-foreground shrink-0">on screen</span> : null}
               {!row.running && there ? (
                 /* Running, and not here: said where "running" would be, in the program's own terms. */

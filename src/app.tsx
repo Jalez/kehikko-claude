@@ -131,14 +131,18 @@ export function App() {
  * (`QUIET_REST` in live.ts); its view here is told so, is let go without a
  * word, and coming back to the place resumes the same session.
  *
- * ## A session that is running elsewhere
+ * ## A place with no session, and a session that is running elsewhere
  *
- * A session another Claude Code process has open, and that cannot be
- * attached to, is not resumed: the server says who has it and closes the
- * socket (`ELSEWHERE`), and the person chooses between leaving it and opening
- * a copy, with what a copy means beside the word — in the terminal's own
- * space, which is empty, since nothing was started. While that stands for a
- * place, nothing is opened there by itself (`blocked`).
+ * Two questions are put before anything is started, both in the terminal's
+ * own space, which is empty when they are asked:
+ *
+ *  - a place with no session, in a project that has others, is offered them
+ *    (`offer` in view/places.ts) with *New session* first;
+ *  - a session another Claude Code process has open, and that cannot be
+ *    attached to, is not resumed: the server says who has it and closes the
+ *    socket (`ELSEWHERE`), and the person chooses between leaving it and
+ *    opening a copy, with what a copy means beside the word. While that
+ *    stands for a place, nothing is opened there by itself (`blocked`).
  *
  * A session Claude Code runs in the background needs no question: the server
  * attaches to it, and the corner says so.
@@ -422,7 +426,7 @@ export function Sessions({
   /* The question about a session that is open elsewhere, for this place, until it is answered. */
   const stuck = blocked && blocked.place === id && !view ? blocked : null
   const questioning = Boolean(at && here && !installing && stuck && !stuck.left && !asking)
-  const choosing = Boolean(at && here && !installing && !questioning && (asking || (!view && step?.do === 'choose') || stuck?.left))
+  const choosing = Boolean(at && here && !installing && !questioning && (asking || (!view && (step?.do === 'choose' || step?.do === 'offer')) || stuck?.left))
   const wanting = Boolean(at && here && !installing && !view && step?.do === 'install')
   const terminal = Boolean(at && view && !choosing && !installing)
   const label = view ? brief((view.session && (labels[view.session] || here?.sessions.find((one) => one.id === view.session)?.label)) || '') : ''
@@ -509,7 +513,7 @@ export function Sessions({
           <Chooser
             /* Remounted when the occasion changes: where the keyboard starts depends on it. */
             key={view ? 'sessions' : (step?.do ?? 'sessions')}
-            mode={view ? 'sessions' : step?.do === 'choose' ? 'ask' : 'sessions'}
+            mode={view ? 'sessions' : step?.do === 'offer' ? 'offer' : step?.do === 'choose' ? 'ask' : 'sessions'}
             listing={here}
             current={view?.session ?? null}
             onOpen={open}

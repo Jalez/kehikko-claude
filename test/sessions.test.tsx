@@ -812,6 +812,86 @@ describe('the sessions, declared for the container’s header', () => {
 })
 
 /* ------------------------------------------------------------------ *
+ * A place with no session in a project that has some (#6)
+ * ------------------------------------------------------------------ */
+
+describe('a place with no session, in a project that has others', () => {
+  const others = [row('near', { label: 'the whole epic’s conversation', near: ['whole epic · writing'] }), row('far', { label: 'started in a plain terminal' })]
+
+  test('the list is drawn before anything is started — "New session" first — and nothing is mounted for nothing', async () => {
+    const s = server()
+    s.state.others = others
+    const { container } = render(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
+    await flush()
+    await flush()
+    const list = container.querySelector('[data-chooser]') as HTMLElement
+    expect(list.getAttribute('data-chooser')).toBe('offer')
+    expect([...list.querySelectorAll('[data-row]')].map((one) => one.getAttribute('data-row'))).toEqual(['new', 'other', 'other'])
+    expect(list.querySelector('[aria-selected="true"]')?.getAttribute('data-row')).toBe('new')
+    /* No empty session was started to be dealt with afterwards. */
+    expect(mounted.length).toBe(0)
+    expect(all(container)).toEqual([])
+    /* And no row or strip beside the list: it is all there is in the terminal's place. */
+    expect(container.querySelector('[data-sessions]')).toBeNull()
+    expect(container.querySelector('[data-ended]')).toBeNull()
+  })
+
+  test('Enter takes the new one, at once', async () => {
+    const s = server()
+    s.state.others = others
+    const { container } = render(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
+    await flush()
+    fireEvent.keyDown(container.querySelector('[data-chooser]') as HTMLElement, { key: 'Enter' })
+    await round()
+    expect(shown(container)).toEqual(['methods@3:new'])
+    expect(container.querySelector('[data-chooser]')).toBeNull()
+  })
+
+  test('choosing an existing one opens it here — which is what attaches it — and the next open of the place is direct', async () => {
+    const s = server()
+    s.state.others = others
+    const first = render(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
+    await flush()
+    fireEvent.click(first.getByText('the whole epic’s conversation'))
+    await flush()
+    expect(shown(first.container)).toEqual(['methods@3:near'])
+    const target = view('methods@3:near').target
+    expect(target.what === 'session' && target.session).toBe('near')
+    first.unmount()
+    mounted.length = 0
+    sessionStorage.clear()
+
+    /* The server attached it when it opened it (live.ts): the place has a session now, and is not asked again. */
+    s.held[KEY(['methods'])] = [row('near', { label: 'the whole epic’s conversation' })]
+    s.state.others = [others[1]!]
+    const again = render(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
+    await flush()
+    expect(again.container.querySelector('[data-chooser]')).toBeNull()
+    expect(shown(again.container)).toEqual(['methods@3:near'])
+  })
+
+  test('a project with no other session starts a new one as before, with no list', async () => {
+    const s = server()
+    const { container } = render(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
+    await flush()
+    expect(container.querySelector('[data-chooser]')).toBeNull()
+    expect(shown(container)).toEqual(['methods@3:new'])
+  })
+
+  test('walking on to another place leaves nothing behind: no session was started at the one that only asked', async () => {
+    const s = server()
+    s.state.others = others
+    const { container, rerender } = render(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
+    await flush()
+    rerender(<Sessions theme="dark" at={at(['results'])} api={s.api} />)
+    await flush()
+    expect(container.querySelector('[data-chooser]')?.getAttribute('data-chooser')).toBe('offer')
+    expect(mounted.length).toBe(0)
+    expect(unmounted.length).toBe(0)
+  })
+})
+
+/* ------------------------------------------------------------------ *
  * A session that is running somewhere this module did not start it (#5)
  * ------------------------------------------------------------------ */
 

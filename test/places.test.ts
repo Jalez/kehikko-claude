@@ -215,8 +215,36 @@ describe('the mark for what a session is doing', () => {
 })
 
 /* ------------------------------------------------------------------ *
- * The words for a session running elsewhere (#5)
+ * A place with no session in a project that has some (#6), and the words for a session running elsewhere (#5)
  * ------------------------------------------------------------------ */
+
+describe('a place with no session', () => {
+  const others = (rows: Row[]): Listing => ({ ...listing([]), others: rows })
+
+  test('in a project that has other sessions: they are offered before anything is started', () => {
+    expect(decide(others([row('x')]))).toEqual({ do: 'offer' })
+    /* Whatever this page remembers showing: it no longer belongs here. */
+    expect(decide(others([row('x')]), 'x')).toEqual({ do: 'offer' })
+  })
+
+  test('in a project with no other session there is nothing to choose from: a new one, at once', () => {
+    expect(decide(others([]))).toEqual({ do: 'open', session: null })
+  })
+
+  test('asked once per place: a place that has a session opens it directly, whatever else the project holds', () => {
+    expect(decide({ ...listing([row('a')]), others: [row('x'), row('y')] })).toEqual({ do: 'open', session: 'a' })
+  })
+
+  test('a place whose only recorded session is not on this computer is a place with none', () => {
+    const away = row('away', { missing: true })
+    expect(decide({ ...listing([away]), others: [row('x')] })).toEqual({ do: 'offer' })
+    expect(decide({ ...listing([away]), others: [] })).toEqual({ do: 'open', session: null })
+  })
+
+  test('the program missing still comes first', () => {
+    expect(decide({ ...listing([], { found: null }), others: [row('x')] })).toEqual({ do: 'install', update: false })
+  })
+})
 
 describe('the words for a session that is running somewhere else', () => {
   const NOW = Date.parse('2026-10-12T12:00:00Z')

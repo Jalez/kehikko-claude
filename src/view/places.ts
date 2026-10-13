@@ -13,9 +13,26 @@ import type { State } from '../../program.ts'
  * kehikko, and if there are more than one session associated with it, then it
  * asks which one to open before it opens it."
  *
- *   - none recorded → a new session, at once;
+ *   - none recorded → a new session, at once — unless the project already
+ *     has sessions, and then the person is offered them first (below);
  *   - exactly one → that one, at once;
  *   - more than one → ask, and open nothing until the person has chosen.
+ *
+ * ## A place with none, in a project that has some
+ *
+ * Starting a new conversation without a word was right only when there was
+ * nothing else to carry on with. Work on an epic often begins in a plain
+ * terminal, on another kehikko, or before the parts were picked this way —
+ * and every combination of parts is its own place, so narrowing from the
+ * whole epic to one part used to start an empty conversation beside the one
+ * the person was just having. So: when the place has no session and Claude
+ * Code holds others for the project's folder, the list is drawn before
+ * anything is started (`offer`), "New session" first so that Enter is all a
+ * person who wants a new one has to press. When the project has no other
+ * session there is nothing to choose from, and a new one starts as before.
+ *
+ * It is asked once per place: choosing a session makes it the place's, and a
+ * place with a session opens it directly.
  *
  * Nothing is remembered as a default. The one thing that is remembered is
  * narrower and is not a default: which session THIS PAGE was showing for a
@@ -38,6 +55,8 @@ export type Step =
   | { do: 'open'; session: string | null }
   /** More than one belongs here: ask. */
   | { do: 'choose' }
+  /** None belongs here, and the project has others: offer them, a new one first, before anything is started. */
+  | { do: 'offer' }
 
 /**
  * `showing` is the session this page was showing for the place, if it was
@@ -56,7 +75,7 @@ export function decide(listing: Listing, showing: string | null = null): Step {
   if (listing.program.lacks) return { do: 'install', update: true }
   const here = listing.sessions.filter((one) => !one.missing)
   if (showing && here.some((one) => one.id === showing)) return { do: 'open', session: showing }
-  if (here.length === 0) return { do: 'open', session: null }
+  if (here.length === 0) return listing.others.length ? { do: 'offer' } : { do: 'open', session: null }
   if (here.length === 1) return { do: 'open', session: here[0]!.id }
   return { do: 'choose' }
 }
