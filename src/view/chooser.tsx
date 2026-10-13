@@ -1,18 +1,29 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import type { Listing, Row } from '../../doors.ts'
-import { MARKS, ago, named, since } from './places.ts'
+import { MARKS, ago, elsewhereRow, named, since } from './places.ts'
 
 /**
  * The list a person chooses a session from, drawn where the terminal would be.
  *
- * Two occasions, one list:
+ * Three occasions, one list:
  *
  *  - **`ask`**: the place has more than one session, and nothing is opened
  *    until one is chosen. There is no way out of it but choosing.
  *  - **`sessions`**: the person pressed the control in the corner of a
  *    running terminal. The same list with the one on screen marked; Escape
  *    goes back to it.
+ *  - **`offer`**: the place has no session and the project has others, so
+ *    nothing is started until the person has said which. *New session* is
+ *    the first row and the one the keyboard starts on — Enter, and a person
+ *    who always wants a new one has lost one key press. Under it, laid out
+ *    and not folded away, the project's sessions in the order the server
+ *    put them: the ones another place of this epic holds, then the rest by
+ *    when each was last active. Choosing one makes it this place's session;
+ *    it stays where else it was.
+ *
+ * It is drawn where the terminal would be, which is empty on all three
+ * occasions: it takes no row from anything.
  *
  * It is never drawn to stand in the way. There was a third occasion — as
  * many sessions running as the module would keep, and a list to end one from
@@ -41,6 +52,16 @@ import { MARKS, ago, named, since } from './places.ts'
  * last said it is doing — working, needs you, finished — as a glyph and the
  * word, in the same place on the same line. One that has not said (a copy
  * too old to, or a session nobody has spoken to) still says "running".
+ *
+ * ## One that is running somewhere this module did not start it
+ *
+ * Said in the same place again, from what Claude Code itself reported a
+ * moment before the list was drawn: *running in the background* for a
+ * background session — opening it attaches to it — and *open elsewhere* for
+ * one in a terminal or an editor, which cannot be attached to and is asked
+ * about before a copy is started. The sentence is the row's `title`. A row
+ * this module is running as a view of a background session, or as a copy,
+ * says which after its state.
  */
 
 /** Why a row cannot be opened, in the fewest words that are true of both ways it happens. */
@@ -48,6 +69,9 @@ export const NOT_HERE = 'not on this computer'
 const NOT_HERE_WHY =
   'Claude Code has no record of this session on this computer: it was started on another one, or its transcript has '
   + 'since been cleaned away. It stays in the record, and opens where it exists.'
+
+/** The one line over the list when a place has no session and the project has others. */
+export const OFFER_SAID = 'No session here yet. Start a new one, or carry on with one this project already has.'
 
 type Item =
   | { kind: 'session'; row: Row; attach: boolean }
@@ -64,7 +88,7 @@ export function Chooser({
   onDetach,
   onClose,
 }: {
-  mode: 'ask' | 'sessions'
+  mode: 'ask' | 'sessions' | 'offer'
   listing: Listing
   /** The session on screen behind this list, if there is one. */
   current?: string | null
@@ -79,19 +103,29 @@ export function Chooser({
   /* Where the keyboard starts: the first row that can be opened. A session that is not on this
      computer is listed where it was added, which may be first, and Enter on it would do nothing. */
   const [at, setAt] = useState(() => {
+    /* Offered: the new one is the first row, and where Enter lands. */
+    if (mode === 'offer') return 0
     const first = listing.sessions.findIndex((row) => !row.missing)
     return first === -1 ? listing.sessions.length : first
   })
   const list = useRef<HTMLDivElement>(null)
 
   const items = useMemo<Item[]>(() => {
+    if (mode === 'offer') {
+      return [
+        { kind: 'new' },
+        ...listing.others.map((row): Item => ({ kind: 'session', row, attach: true })),
+        /* What the record lists for this place and this computer does not have: still shown, last, and still not openable. */
+        ...listing.sessions.map((row): Item => ({ kind: 'session', row, attach: false })),
+      ]
+    }
     return [
       ...listing.sessions.map((row): Item => ({ kind: 'session', row, attach: false })),
       { kind: 'new' },
       ...(listing.others.length ? [{ kind: 'attach' } as Item] : []),
       ...(others ? listing.others.map((row): Item => ({ kind: 'session', row, attach: true })) : []),
     ]
-  }, [listing, others])
+  }, [listing, others, mode])
 
   /* The list takes the keyboard as it appears: a person who was typing in a
      terminal a moment ago should not have to reach for the pointer. */
@@ -121,7 +155,7 @@ export function Chooser({
     event.preventDefault()
   }
 
-  const said = mode === 'ask' ? 'More than one session belongs here. Which one?' : 'Sessions here'
+  const said = mode === 'ask' ? 'More than one session belongs here. Which one?' : mode === 'offer' ? OFFER_SAID : 'Sessions here'
 
   return (
     <div
@@ -149,6 +183,7 @@ export function Chooser({
         }
 
         const { row } = item
+        const there = elsewhereRow(row.elsewhere, now)
         if (row.missing) {
           return (
             <div key={row.id} role="option" aria-selected={on} aria-disabled data-row="missing" data-session={row.id} className={shell} onMouseMove={() => setAt(index)}>
@@ -175,7 +210,19 @@ export function Chooser({
             {number}
             <button type="button" className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => onOpen(row.id)} title={row.id}>
               <span className="min-w-0 flex-1 truncate">{named(row)}</span>
+              {row.near?.length ? (
+                <span className="text-muted-foreground shrink-0" data-near title={`Already the session of another place of this epic: ${row.near.join('; ')}`}>
+                  this epic
+                </span>
+              ) : null}
               {row.id === current ? <span className="text-muted-foreground shrink-0">on screen</span> : null}
+              {!row.running && there ? (
+                /* Running, and not here: said where "running" would be, in the program's own terms. */
+                <span className="flex shrink-0 items-center gap-1" data-elsewhere={row.elsewhere?.kind} title={there.means}>
+                  <span className={row.elsewhere?.kind === 'background' ? 'bg-running size-1.5 rounded-full' : 'border-running size-1.5 rounded-full border'} aria-hidden />
+                  {there.word}
+                </span>
+              ) : null}
               {row.running ? (
                 row.state ? (
                   /* What its program says it is doing, where "running" was: a glyph and the word, in the same place. */
@@ -192,11 +239,21 @@ export function Chooser({
                   </span>
                 )
               ) : null}
+              {row.running && row.as ? (
+                <span className="text-muted-foreground shrink-0" data-as={row.as} title={row.as === 'background' ? 'What runs here is a view of a background session: its own process is another one.' : 'Opened here as a copy: another process has this conversation open too.'}>
+                  {row.as}
+                </span>
+              ) : null}
               <span className="text-muted-foreground shrink-0">{ago(row.lastActive, now)}</span>
             </button>
             {row.running ? (
-              <button type="button" className="hover:bg-background shrink-0 rounded border px-1.5" title="End this session’s process. It can be resumed." onClick={() => onEnd(row.id)}>
-                End
+              <button
+                type="button"
+                className="hover:bg-background shrink-0 rounded border px-1.5"
+                title={row.as === 'background' ? 'Close this view. The session keeps running in the background.' : 'End this session’s process. It can be resumed.'}
+                onClick={() => onEnd(row.id)}
+              >
+                {row.as === 'background' ? 'Close' : 'End'}
               </button>
             ) : null}
             {!item.attach ? (

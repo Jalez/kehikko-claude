@@ -7,7 +7,7 @@ import { mintTicket, sameTicket } from 'kehikot-module-protocol/serve'
 
 import { typedByPerson } from './input.ts'
 import { isKehikkoKey, placeKey, sortedParts, type Kehikko } from './place.ts'
-import { PROGRAM, home, type Program, type State } from './program.ts'
+import { PROGRAM, home, type Active, type Program, type Running, type State } from './program.ts'
 import { attach, note, projectRoot, type NamedPlace } from './record.ts'
 
 /**
@@ -97,6 +97,40 @@ import { attach, note, projectRoot, type NamedPlace } from './record.ts'
  * When this process stops, its sessions stop with it — nothing is left
  * running with no owner — and that costs nothing lasting, for the same
  * reason.
+ *
+ * ## A conversation that is already running somewhere else
+ *
+ * A session this process started is found in `runs`, and a second viewer is
+ * put on it. One it did NOT start — a Claude Code background session, one
+ * left open in another terminal or in an editor — is not in `runs`, and
+ * `claude --resume` on it would be a second process on the same conversation:
+ * Remote Control stays with the first, each appends to the one history, and
+ * neither sees the other's turns. So before every resume the program is asked
+ * what is running (`active` in program.ts), and it is asked every time: a
+ * session can start or stop between two opens, so no answer is kept.
+ *
+ *  - **Running in the background**: the pty is given `claude attach <handle>`
+ *    in place of `--resume`. That is a view of the process that is already
+ *    there. No second process holds the conversation, and Remote Control is
+ *    where it was. The view is this module's to close; the session is not —
+ *    ending the run here, putting it away, or this server stopping hangs up
+ *    the view and leaves the session running (measured: the client gone, the
+ *    session's own process untouched).
+ *  - **Open in a process with a terminal of its own**: it cannot be attached
+ *    to (`attach` answers "No job matching …" for one). Nothing is started.
+ *    The socket is told who has it, since when and where (`elsewhere`), and
+ *    is closed with `CLOSED.elsewhere`; the page puts the choice to the
+ *    person in words. Only an opening frame that says `copy` — which only
+ *    that press sends — resumes it anyway, and the run remembers what it is a
+ *    copy of so that it can be said for as long as it is on screen.
+ *  - **Nothing running**: resumed, exactly as before.
+ *  - **The program cannot be asked** — a copy from before `agents --json` and
+ *    `attach`, or one where the asking failed: resumed as before, and SAID,
+ *    on the first line of the terminal and to the page. Not being able to ask
+ *    is never treated as having heard "nothing is running".
+ *
+ * Nothing here stops, signals or takes over a process this module did not
+ * start. The other process may be mid-task.
  *
  * ## The fence
  *
@@ -242,6 +276,8 @@ export const CLOSED = {
   refused: 4403,
   missing: 4404,
   silent: 4408,
+  /** The session is open in another process that cannot be attached to, and nothing was started. The page asks. */
+  elsewhere: 4409,
   failed: 4500,
 } as const
 
@@ -285,6 +321,12 @@ export type Opening =
       place: NamedPlace
       /** The session to open, or null for a new one. */
       session: string | null
+      /**
+       * A person, told that the session is open in another process, chose to
+       * open a copy anyway. A word and not an argument: the command it leads
+       * to is `--resume <id>`, the same as ever. Absent unless it was said.
+       */
+      copy?: true
       cols: number
       rows: number
     }
@@ -364,7 +406,7 @@ export function opening(raw: unknown, ticket: string = TICKET): Opening | string
   if (!place) return 'That did not say which place the session is for.'
   const session = held.session ?? null
   if (session !== null && (typeof session !== 'string' || !PROGRAM.isId(session))) return 'That is not a session id.'
-  return { what: 'session', projectPath: held.projectPath, place, session, cols, rows }
+  return { what: 'session', projectPath: held.projectPath, place, session, ...(held.copy === true && session !== null ? { copy: true as const } : {}), cols, rows }
 }
 
 /* ------------------------------------------------------------------------ *
@@ -434,6 +476,16 @@ export interface Run {
   secret: string | null
   /** How many notices it may still raise, and when that was last true (see `NOTICES_AT_ONCE`). */
   notices: { left: number; at: number }
+  /**
+   * The background session this run is a VIEW of: the pty holds `claude
+   * attach`, and the session's own process is another one, started elsewhere.
+   * Null for a session this module started itself.
+   */
+  joined: Active | null
+  /** The other process that had this conversation open when a person chose to open a copy of it here. Null otherwise. */
+  copyOf: Active | null
+  /** Why the program could not be asked whether the session was running elsewhere before it was resumed. Null when it was asked. */
+  unchecked: 'too-old' | 'failed' | null
   /** Put away by `rest`, so that its viewers are told that and not that it ended. */
   rested: boolean
   /** The clock on an untouched, unrecorded run nobody is watching (see `UNTOUCHED_GRACE`). */
@@ -451,7 +503,37 @@ export interface Run {
   ended: boolean
 }
 
-export type Refusal = { code: number; why: string }
+export type Refusal = { code: number; why: string; elsewhere?: Elsewhere }
+
+/**
+ * Where a session is running that this module did not start, as a page is
+ * told it: what the program said, and nothing read off a process table.
+ */
+export interface Elsewhere {
+  kind: Active['kind']
+  /** The program's own word for the kind. */
+  called: string
+  pid: number | null
+  cwd: string
+  /** Since when, in milliseconds, or null when the program did not say. */
+  since: number | null
+  name: string
+}
+
+export const elsewhereOf = (one: Active): Elsewhere => ({ kind: one.kind, called: one.called, pid: one.pid, cwd: one.cwd, since: one.startedAt, name: one.name })
+
+/**
+ * The line put on a terminal's first row when a session was resumed without
+ * the program having been asked whether it was already running. Dim, one
+ * line, and only ever for a copy that cannot be asked.
+ */
+export function uncheckedLine(name: string, why: 'too-old' | 'failed'): string {
+  const said =
+    why === 'too-old'
+      ? `This ${name} is too old to say whether a conversation is already running somewhere else (it has no \`agents --json\` or no \`attach\`), so this one was resumed without checking. Update ${name} to have that checked.`
+      : `${name} could not be asked whether this conversation is already running somewhere else, so it was resumed without checking.`
+  return `\x1b[2m${said}\x1b[0m\r\n`
+}
 
 /**
  * Something worth telling a person who is not looking: a session of theirs
@@ -594,9 +676,36 @@ export class Runs {
       void started.finally(() => this.starting.delete(id))
     }
     const run = await started
-    if ('code' in run) return run
-    this.attach(run, viewer, asked.cols, asked.rows, inFlight ? 'attached' : run.settled ? 'resumed' : 'new')
+    if ('code' in run) {
+      /* Said before the socket closes: a close reason is 123 bytes, and this is what the page asks its person with. */
+      if (run.elsewhere) viewer.say({ elsewhere: run.elsewhere, session: id })
+      return run
+    }
+    this.attach(run, viewer, asked.cols, asked.rows, inFlight ? 'attached' : run.joined ? 'background' : run.copyOf ? 'copy' : run.settled ? 'resumed' : 'new')
     return run
+  }
+
+  /**
+   * What the program says is running, asked now. Not asked of a copy that
+   * cannot answer, and that is said as what it is.
+   */
+  async running(file: string | null = this.program.find().file): Promise<Running> {
+    if (!file) return { known: false, why: 'failed' }
+    if (!(await this.program.supports(file)).lists) return { known: false, why: 'too-old' }
+    return this.program.active(file).catch((): Running => ({ known: false, why: 'failed' }))
+  }
+
+  /**
+   * Of what is running, the processes that hold this session and are not
+   * this module's own: the background one if there is one — a view of it
+   * starts nothing, so it is always the one to take — and otherwise a process
+   * with a terminal of its own.
+   */
+  others(running: Running, session: string): { background: Active | null; open: Active | null } {
+    if (!running.known) return { background: null, open: null }
+    const mine = new Set([...this.runs.values()].map((run) => run.pty.pid))
+    const there = running.active.filter((one) => one.session === session && !(one.pid !== null && mine.has(one.pid)))
+    return { background: there.find((one) => one.kind === 'background' && one.handle) ?? null, open: there.find((one) => !(one.kind === 'background' && one.handle)) ?? null }
   }
 
   private async start(projectPath: string, id: string, asked: Extract<Opening, { what: 'session' }>): Promise<Run | Refusal> {
@@ -609,13 +718,34 @@ export class Runs {
     }
     /* And nothing about how many are running: see "There is no limit" at the top. */
 
+    /* A session that exists may be running somewhere this module did not
+       start it. Asked now, every time, and never remembered: see "A
+       conversation that is already running somewhere else" at the top. */
+    let joined: Active | null = null
+    let copyOf: Active | null = null
+    let unchecked: Run['unchecked'] = null
+    if (settled) {
+      const running = await this.running(found.file)
+      if (!running.known) unchecked = running.why
+      const { background, open } = this.others(running, settled)
+      if (background) joined = background
+      else if (open && asked.copy) copyOf = open
+      else if (open) {
+        this.log(`claude: ${settled} is open in another ${this.program.name} process (${open.called || 'unknown kind'}, pid ${open.pid ?? '?'}) — nothing was started, and the page asks`)
+        return { code: CLOSED.elsewhere, why: 'open in another process; nothing was started', elsewhere: elsewhereOf(open) }
+      }
+    }
+
     /* Asked to report only when this copy can take the asking and there is
        somewhere to report to. Otherwise the command is the two words it
-       always was, and the session has no state. */
+       always was, and the session has no state. A view of a background
+       session is never asked: its process was started elsewhere. */
     const port = this.port()
-    const tells = port !== null && (await this.program.supports(found.file)).tells
+    const tells = !joined && port !== null && (await this.program.supports(found.file)).tells
     const secret = tells ? randomBytes(24).toString('hex') : null
-    const args = [...(settled ? this.program.resume(settled) : this.program.fresh(id)), ...(tells ? this.program.reports(tellLine) : [])]
+    const args = joined
+      ? this.program.attach(joined.handle!)
+      : [...(settled ? this.program.resume(settled) : this.program.fresh(id)), ...(tells ? this.program.reports(tellLine) : [])]
     let pty: Pty
     let screen: Screen
     try {
@@ -656,6 +786,9 @@ export class Runs {
       stateSince: this.now(),
       secret,
       notices: { left: NOTICES_AT_ONCE, at: this.now() },
+      joined,
+      copyOf,
+      unchecked,
       rested: false,
       idle: null,
       startedAt: this.now(),
@@ -667,6 +800,13 @@ export class Runs {
     }
     this.runs.set(id, run)
     this.log(`claude: ${found.file} ${args.slice(0, 2).join(' ')}${tells ? ', asked to report' : ''} in ${projectPath} (pid ${pty.pid})`)
+    if (joined) this.log(`claude: ${settled} is running in the background (pid ${joined.pid ?? '?'}) — attached to it, and no second process was started`)
+    if (copyOf) this.log(`claude: ${settled} is open in another process (pid ${copyOf.pid ?? '?'}) and a person chose to open a copy here`)
+    if (unchecked) {
+      this.log(`claude: ${settled} was resumed without asking whether it is running elsewhere — ${unchecked === 'too-old' ? 'this copy has no `agents --json` or no `attach`' : 'the asking failed'}`)
+      /* Said where the person is looking, before anything the program prints. */
+      run.screen.write(uncheckedLine(this.program.name, unchecked))
+    }
     if (settled) this.remember(run, asked.place)
     this.follow(run)
     return run
@@ -744,6 +884,12 @@ export class Runs {
       code = done ? CLOSED.installed : CLOSED.notInstalled
       why = done ? `installed at ${found.file}` : exitCode === 0 ? 'the installer finished and no binary was found' : `the installer exited with ${exitCode}`
       this.log(`claude: the installer exited with ${exitCode}; ${found.file ?? 'no binary found'}`)
+    } else if (run.joined) {
+      /* What ended is the view. Whether the session did is the program's to
+         say, so it is asked rather than assumed either way. */
+      const still = run.rested ? null : this.others(await this.running(), run.id).background
+      if (!run.rested) why = still ? 'this view closed; the session is still running in the background' : `the background session ended (${exitCode})`
+      this.log(`claude: the view of background session ${run.id} closed (${exitCode})${still ? '; the session runs on' : ''}`)
     } else {
       await this.settle(run).catch(() => {})
       this.log(`claude: session ${run.settled ?? run.id} ended (${exitCode})`)
@@ -763,7 +909,7 @@ export class Runs {
    * told this viewer's size, which is also what makes a full-screen program
    * redraw itself for the window it is now in.
    */
-  attach(run: Run, viewer: Viewer, cols: number, rows: number, how: 'new' | 'resumed' | 'attached' | 'install'): void {
+  attach(run: Run, viewer: Viewer, cols: number, rows: number, how: 'new' | 'resumed' | 'attached' | 'background' | 'copy' | 'install'): void {
     if (run.idle) clearTimeout(run.idle)
     run.idle = null
     viewer.say({
@@ -773,6 +919,12 @@ export class Runs {
       exists: Boolean(run.settled),
       state: run.state,
       since: run.stateSince,
+      /* What this run is, for as long as it is on screen: a view of a session
+         running in the background, a copy beside another process, or one
+         resumed without the program having been asked. */
+      ...(run.joined ? { background: elsewhereOf(run.joined) } : {}),
+      ...(run.copyOf ? { copyOf: elsewhereOf(run.copyOf) } : {}),
+      ...(run.unchecked ? { unchecked: run.unchecked } : {}),
     })
     /* On screen until the page says otherwise: a view connects when it is shown. */
     run.looking.add(viewer)
@@ -1049,6 +1201,9 @@ export class Runs {
       stateSince: this.now(),
       secret: null,
       notices: { left: NOTICES_AT_ONCE, at: this.now() },
+      joined: null,
+      copyOf: null,
+      unchecked: null,
       rested: false,
       idle: null,
       startedAt: this.now(),
@@ -1066,7 +1221,11 @@ export class Runs {
     return run
   }
 
-  /** End a session because a person chose to. False when nothing by that id is running. */
+  /**
+   * End a session because a person chose to. False when nothing by that id is
+   * running. For a view of a background session what ends is the view: the
+   * pty holds `claude attach`, and hanging that up leaves the session running.
+   */
   end(id: string): boolean {
     const run = this.find(id)
     if (!run) return false

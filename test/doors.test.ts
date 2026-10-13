@@ -1,16 +1,16 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { WELL_KNOWN } from 'kehikot-module-protocol'
 
-import { MANIFEST, TICKET, answer, listing, lookedIn, stream, type Listing } from '../doors.ts'
+import { MANIFEST, TICKET, answer, listing, lookedIn, ordered, stream, type Listing } from '../doors.ts'
 import { Runs, TELL_ENV, headless, theRuns, type Notice, type Pty, type Run, type Stated } from '../live.ts'
 import { ID } from '../manifest.ts'
 import { placeKey } from '../place.ts'
-import { PROGRAM, recordDirs } from '../program.ts'
-import { attach, readPlaces } from '../record.ts'
+import { PROGRAM, recordDirs, type Active } from '../program.ts'
+import { attach, detach as detachFrom, readPlaces } from '../record.ts'
 
 const project = realpathSync(mkdtempSync(join(tmpdir(), 'kehikko-claude-doors-')))
 const bin = realpathSync(mkdtempSync(join(tmpdir(), 'kehikko-claude-bin-')))
@@ -224,7 +224,7 @@ describe('a session’s own report, and where its state is read', () => {
   const was = held[HELD]
   const D = '55555555-5555-4555-8555-555555555555'
   const live = new Runs({
-    program: { ...PROGRAM, find: () => ({ file: '/fake/claude', looked: [], usual: [] }), supports: async () => ({ ok: true, missing: null, tells: true }), newId: () => D },
+    program: { ...PROGRAM, find: () => ({ file: '/fake/claude', looked: [], usual: [] }), supports: async () => ({ ok: true, missing: null, tells: true, lists: false }), newId: () => D },
     every: null,
     port: () => 9590,
     screen: headless,
@@ -329,5 +329,162 @@ describe('a session’s own report, and where its state is read', () => {
     opened.close()
     await state(D, 'PostToolUse', secret)
     expect(events.length).toBe(4)
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * Running elsewhere, as a row says it (#5), and a place with no session (#6)
+ * ------------------------------------------------------------------ */
+
+describe('what the list says about sessions running elsewhere, and a place with none', () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'kehikko-claude-offer-')))
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+  const WRITING = { key: '4072c9e5' }
+  const place = (parts: string[], epic = 'thesis', kehikko: { key: string } = WRITING, kehikkoName = 'writing') => ({ epic, parts, kehikko, kehikkoName })
+  const E = '55555555-5555-4555-8555-555555555555'
+  const at = (id: string, said: string, when: string) => {
+    const [folder] = recordDirs(dir)
+    mkdirSync(folder!, { recursive: true })
+    writeFileSync(join(folder!, `${id}.jsonl`), `${JSON.stringify({ type: 'user', message: { content: said } })}\n`)
+    utimesSync(join(folder!, `${id}.jsonl`), new Date(when), new Date(when))
+  }
+  /** A program that can be asked, saying what a test puts in `elsewhere`. */
+  const elsewhere: Active[] = []
+  const lists = { yes: true }
+  const program = {
+    ...PROGRAM,
+    find: () => ({ file: '/fake/claude', looked: [], usual: [] }),
+    supports: async () => ({ ok: true, missing: null, tells: false, lists: lists.yes }),
+    active: async () => ({ known: true as const, active: [...elsewhere] }),
+  }
+  const runs = new Runs({ program, every: null, spawn: () => { throw new Error('nothing is started by reading') }, screen: headless })
+  const held = globalThis as Record<symbol, unknown>
+  const HELD = Symbol.for('kehikot.claude.runs')
+  const text = async (args: Record<string, unknown>) => {
+    const was = held[HELD]
+    held[HELD] = runs
+    try {
+      return (await rpc('tools/call', { name: 'sessions', arguments: { projectPath: dir, ...args } })).result
+    } finally {
+      held[HELD] = was
+    }
+  }
+
+  test('the project’s others come most likely first: the ones another place of this epic holds, then the rest by when each was last active', async () => {
+    at(A, 'the whole epic’s conversation', '2026-10-01T10:00:00Z')
+    at(B, 'belongs to another epic', '2026-10-05T10:00:00Z')
+    at(C, 'started in a plain terminal', '2026-10-04T10:00:00Z')
+    at(E, 'the same epic on another kehikko', '2026-10-02T10:00:00Z')
+    attach(dir, place([]), A)
+    attach(dir, place(['intro'], 'another'), B)
+    attach(dir, place(['results'], 'thesis', { key: 'aaaa1111' }, 'reading'), E)
+
+    const said = (await listing(dir, placeKey(place(['methods'])), runs, program)) as Listing
+    expect(said.sessions).toEqual([])
+    /* Same epic first — E is more recent than A — then the rest, most recent first. */
+    expect(said.others.map((one) => one.id)).toEqual([E, A, B, C])
+    expect(said.others.map((one) => one.near)).toEqual([['results · reading'], ['whole epic · writing'], undefined, undefined])
+    expect(said.others.map((one) => one.label)).toEqual(['the same epic on another kehikko', 'the whole epic’s conversation', 'belongs to another epic', 'started in a plain terminal'])
+    expect(ordered(await PROGRAM.sessions(dir), [A], placeKey(place([])), (readPlaces(dir) as { value: Parameters<typeof ordered>[3] }).value).map((each) => each.one.id)).toEqual([E, B, C])
+    /* A place with no epic has no "same epic". */
+    expect(((await listing(dir, 'epic=-;parts=-;kehikko=-', runs, program)) as Listing).others.map((one) => one.near)).toEqual([undefined, undefined, undefined, undefined])
+  })
+
+  test('a row says when Claude Code is running it somewhere this module did not start it — in the background, or open in another process', async () => {
+    elsewhere.push(
+      { session: A, kind: 'background', called: 'background', handle: '11111111', pid: 4242, cwd: dir, startedAt: 1_000, name: 'stand-in' },
+      { session: C, kind: 'interactive', called: 'interactive', handle: null, pid: 5151, cwd: dir, startedAt: 2_000, name: 'project-ea' },
+    )
+    try {
+      const said = (await listing(dir, placeKey(place(['methods'])), runs, program)) as Listing
+      expect(said.program.asked).toBe('yes')
+      const row = (id: string) => said.others.find((one) => one.id === id)
+      expect(row(A)).toMatchObject({ running: false, elsewhere: { kind: 'background', pid: 4242, since: 1_000 } })
+      expect(row(C)).toMatchObject({ running: false, elsewhere: { kind: 'interactive', pid: 5151, since: 2_000 } })
+      expect(row(B)).not.toHaveProperty('elsewhere')
+
+      const told = await text({ place: { epic: 'thesis', parts: [], kehikko: '4072c9e5' } })
+      expect(told?.content?.[0]?.text).toContain('has one session, and opening the module here opens it at once — which is running in the background: it is attached to, and no second process is started')
+      expect(told?.content?.[0]?.text).toContain('"runningElsewhere"')
+    } finally {
+      elsewhere.length = 0
+    }
+  })
+
+  test('a copy too old to be asked says so in the listing, and no row is called running elsewhere', async () => {
+    lists.yes = false
+    elsewhere.push({ session: A, kind: 'interactive', called: 'interactive', handle: null, pid: 5151, cwd: dir, startedAt: 2_000, name: 'x' })
+    try {
+      const said = (await listing(dir, placeKey(place(['methods'])), runs, program)) as Listing
+      expect(said.program.asked).toBe('too-old')
+      expect(said.others.some((one) => 'elsewhere' in one)).toBe(false)
+      expect((await text({ place: { epic: 'thesis', parts: ['methods'], kehikko: '4072c9e5' } }))?.content?.[0]?.text).toContain('too old to say')
+    } finally {
+      lists.yes = true
+      elsewhere.length = 0
+    }
+  })
+
+  test('an agent asking about a place with no session is told so in words, and which sessions the project has, in the order they are offered', async () => {
+    const told = await text({ place: { epic: 'thesis', parts: ['methods'], kehikko: '4072c9e5' } })
+    expect(told?.isError).toBeUndefined()
+    const said = told?.content?.[0]?.text ?? ''
+    expect(said).toContain('This place (epic=thesis;parts=methods;kehikko=key:4072c9e5) has no session yet.')
+    expect(said).toContain('Claude Code has 4 other sessions for this project, so opening the module here starts nothing')
+    expect(said).toContain('"New session" first, which Enter takes')
+    expect(said).toContain('without taking it from any other place')
+    const offered = JSON.parse(said.slice(said.indexOf('\n'))) as { id: string; firstPrompt: string; sameEpicAt?: string[] }[]
+    expect(offered.map((one) => one.id)).toEqual([E, A, B, C])
+    expect(offered[0]).toMatchObject({ firstPrompt: 'the same epic on another kehikko', sameEpicAt: ['results · reading'] })
+    expect(offered[3]?.sameEpicAt).toBeUndefined()
+  })
+
+  test('and about a place in a project with no other session: a new one starts at once', async () => {
+    const empty = realpathSync(mkdtempSync(join(tmpdir(), 'kehikko-claude-empty-')))
+    try {
+      const was = held[HELD]
+      held[HELD] = runs
+      try {
+        const told = (await rpc('tools/call', { name: 'sessions', arguments: { projectPath: empty, place: { epic: 'thesis', parts: [], kehikko: '4072c9e5' } } })).result
+        expect(told?.content?.[0]?.text).toBe('This place (epic=thesis;parts=-;kehikko=key:4072c9e5) has no session, and Claude Code has no other session for this project: opening the module here starts a new one at once.')
+      } finally {
+        held[HELD] = was
+      }
+    } finally {
+      rmSync(empty, { recursive: true, force: true })
+    }
+  })
+
+  test('a place that has its session is said to open it directly, and one with several to ask which', async () => {
+    expect((await text({ place: { epic: 'thesis', parts: [], kehikko: '4072c9e5' } }))?.content?.[0]?.text).toContain('has one session, and opening the module here opens it at once — which is resumed.')
+    attach(dir, place([]), C)
+    try {
+      expect((await text({ place: { epic: 'thesis', parts: [], kehikko: '4072c9e5' } }))?.content?.[0]?.text).toContain('has 2 sessions, so opening the module here asks its person which one')
+    } finally {
+      detachFrom(dir, placeKey(place([])), C)
+    }
+  })
+
+  test('a project where nothing is attached anywhere says which sessions exist for its folder', async () => {
+    const loose = realpathSync(mkdtempSync(join(tmpdir(), 'kehikko-claude-loose-')))
+    try {
+      const [folder] = recordDirs(loose)
+      mkdirSync(folder!, { recursive: true })
+      writeFileSync(join(folder!, `${A}.jsonl`), `${JSON.stringify({ type: 'user', message: { content: 'from a plain terminal' } })}\n`)
+      const said = (await rpc('tools/call', { name: 'sessions', arguments: { projectPath: loose } })).result?.content?.[0]?.text ?? ''
+      expect(said).toContain('No session is recorded for that project yet. Claude Code has 1 session for the folder that belongs to no place')
+      expect(said).toContain('from a plain terminal')
+    } finally {
+      rmSync(loose, { recursive: true, force: true })
+      rmSync(recordDirs(loose)[0]!, { recursive: true, force: true })
+    }
+  })
+
+  test('a place that is not one is refused in words', async () => {
+    for (const not of ['thesis', { epic: 'Not A Slug' }, { epic: 'thesis', parts: 'methods' }, { epic: 'thesis', kehikko: 'Not A Key' }, { epic: 'thesis', kehikko: {} }]) {
+      expect((await text({ place: not }))?.isError).toBe(true)
+    }
+    /* A host with no keys names the kehikko by its row number. */
+    expect((await text({ place: { epic: 'thesis', parts: [], kehikko: 3 } }))?.content?.[0]?.text).toContain('epic=thesis;parts=-;kehikko=3')
   })
 })

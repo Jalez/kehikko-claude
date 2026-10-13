@@ -1,10 +1,10 @@
 import { establishBuild, refuseTicket, sameTicket, type Reply, type Stream } from 'kehikot-module-protocol/serve'
 
-import { TICKET, theRuns, type Run, type Runs } from './live.ts'
+import { TICKET, elsewhereOf, theRuns, type Elsewhere, type Run, type Runs } from './live.ts'
 import { ID, MANIFEST, VERSION } from './manifest.ts'
-import { isKehikkoKey, readPlaceKey } from './place.ts'
-import { PROGRAM, home, type Program, type State } from './program.ts'
-import { WHERE, detach, projectRoot, readPlaces, rekey, sessionsAt } from './record.ts'
+import { isKehikkoKey, kehikkoOf, placeKey, readPlaceKey, type Place } from './place.ts'
+import { PROGRAM, home, type Program, type Recorded, type Running, type State } from './program.ts'
+import { WHERE, detach, projectRoot, readPlaces, rekey, sessionsAt, type Places } from './record.ts'
 
 /**
  * The HTTP doors, as one function: `answer` takes a request and returns a
@@ -76,6 +76,27 @@ export interface Row {
    * list agrees with the file.
    */
   missing?: true
+  /**
+   * Set when Claude Code is running it in a process this module did not
+   * start, as the program itself said a moment ago (`agents --json`):
+   * `background` is a session with no terminal, and opening it here attaches
+   * to it — no second process; anything else is open in a terminal or an
+   * editor, cannot be attached to, and opening it here asks first. Absent
+   * when nothing else has it, and when the program cannot be asked.
+   */
+  elsewhere?: Elsewhere
+  /**
+   * For one this module is running: `background` when what runs here is a
+   * view of a background session, `copy` when a person opened it here beside
+   * another process that has it too. Absent for a session that is only here.
+   */
+  as?: 'background' | 'copy'
+  /**
+   * Among the project's others: the places of the SAME EPIC that already
+   * hold this session — under other parts, or on another kehikko — in words.
+   * Those are the ones most likely to be wanted, and they are listed first.
+   */
+  near?: string[]
 }
 
 export interface Listing {
@@ -91,10 +112,21 @@ export interface Listing {
     /** What an installed copy lacks, when it is too old to use. Null otherwise. */
     lacks: string | null
     install: { line: string; lands: string }
+    /**
+     * Whether the program could be asked what is running elsewhere: `yes`, or
+     * why not. `too-old` is a copy from before `agents --json` and `attach`;
+     * its rows never say `elsewhere`, which is then not the same as nothing
+     * running elsewhere.
+     */
+    asked: 'yes' | 'too-old' | 'failed'
   }
   /** The sessions of this place, in the order they were added. */
   sessions: Row[]
-  /** The project's other sessions: they belong to no place, or to another. */
+  /**
+   * The project's other sessions: they belong to no place, or to another.
+   * The ones another place of this epic holds first (`near`), then the rest,
+   * each by when it was last active.
+   */
   others: Row[]
   /**
    * Everything running, in any project. Said, and not counted against
@@ -105,6 +137,48 @@ export interface Listing {
 
 /** A running session's state, as the fields a row carries: nothing when nothing is known. */
 const stated = (run: Run | undefined): { state?: State; since?: number } => (run?.state ? { state: run.state, since: run.stateSince } : {})
+
+/**
+ * Where a session is running besides here, as a row says it.
+ *
+ * For one this module runs, what the run itself knows: the background
+ * session it is a view of, or the process it was opened as a copy beside.
+ * For one it does not, what the program said just now.
+ */
+function besides(id: string, run: Run | undefined, running: Running, runs: Runs): { elsewhere?: Elsewhere; as?: 'background' | 'copy' } {
+  if (run) {
+    if (run.joined) return { elsewhere: elsewhereOf(run.joined), as: 'background' }
+    if (run.copyOf) return { elsewhere: elsewhereOf(run.copyOf), as: 'copy' }
+    return {}
+  }
+  const { background, open } = runs.others(running, id)
+  const there = background ?? open
+  return there ? { elsewhere: elsewhereOf(there) } : {}
+}
+
+/** A recorded place in a few words: its parts, or "whole epic", and what its kehikko is called. */
+function placeSaid(entry: Places['places'][string]): string {
+  return [entry.parts.length ? entry.parts.join(' + ') : 'whole epic', entry.kehikko?.name || ''].filter(Boolean).join(' · ')
+}
+
+/**
+ * The project's sessions that are not this place's, most likely wanted first:
+ * the ones another place of the SAME EPIC holds — other parts, another
+ * kehikko — and then the rest, each group by when it was last active (which
+ * is the order `held` arrives in).
+ *
+ * A place with no epic has no "same epic": nothing is near it.
+ */
+export function ordered(held: readonly Recorded[], here: readonly string[], key: string, places: Places): { one: Recorded; near: string[] }[] {
+  const epic = readPlaceKey(key)?.epic ?? null
+  const all = held
+    .filter((one) => !here.includes(one.id))
+    .map((one) => ({
+      one,
+      near: epic === null ? [] : Object.entries(places.places).filter(([other, entry]) => other !== key && entry.epic === epic && entry.sessions.includes(one.id)).map(([, entry]) => placeSaid(entry)),
+    }))
+  return [...all.filter((each) => each.near.length), ...all.filter((each) => !each.near.length)]
+}
 
 /**
  * What the page draws a place from.
@@ -127,13 +201,16 @@ export async function listing(
   if (!read.ok) return read
 
   const found = program.find()
-  const able = found.file ? await program.supports(found.file) : { ok: true, missing: null, tells: false }
+  const able = found.file ? await program.supports(found.file) : { ok: true, missing: null, tells: false, lists: false }
   const live = runs.sessions()
   /* A running session that had not been recorded, or named, the last time the
      program spoke may have been since: somebody is about to read the list. */
   await Promise.all(live.filter((run) => !run.settled || !run.label).map((run) => runs.settle(run).catch(() => {})))
   const held = await program.sessions(root.value)
   const known = new Map(held.map((one) => [one.id, one]))
+  /* Asked now, for this list, and kept nowhere: what is running elsewhere a
+     moment from now is asked again when a session is opened (live.ts). */
+  const running: Running = found.file && able.ok ? await runs.running(found.file) : { known: false, why: 'failed' }
 
   const row = (id: string): Row => {
     const run = live.find((one) => one.id === id || one.settled === id)
@@ -147,6 +224,7 @@ export async function listing(
       ...stated(run),
       /* Neither the program's nor running: all there is of it here is the row in the record. */
       ...(known.has(id) || run ? {} : { missing: true as const }),
+      ...besides(id, run, running, runs),
     }
   }
 
@@ -167,9 +245,10 @@ export async function listing(
       where: lookedIn(found.usual),
       lacks: able.ok ? null : able.missing,
       install: { line: install.line, lands: install.lands },
+      asked: running.known ? 'yes' : running.why,
     },
     sessions: here.map(row),
-    others: held.filter((one) => !here.includes(one.id)).map((one) => row(one.id)),
+    others: ordered(held, here, key, read.value).map(({ one, near }) => ({ ...row(one.id), ...(near.length ? { near } : {}) })),
     running: live.map((run) => ({
       id: run.settled ?? run.id,
       label: run.label,
@@ -207,20 +286,52 @@ function tools() {
         + 'computer (sessions stay on the computer they ran on). A running session that has said so also has `state` — '
         + '`working` (a turn is under way), `needs-you` (it has stopped at a question only its person can answer) or '
         + '`finished` (its turn is over and it is at its prompt) — and `since`. No `state` means it has not said, not that '
-        + `it is idle. Read from ${WHERE}. Give the absolute project directory as `
-        + 'projectPath, and an epic slug to see only that epic’s places. Reads only: nothing here starts, ends or types '
-        + 'into a session.',
+        + 'it is idle. `runningElsewhere` is on a session Claude Code is running in a process this module did not start: '
+        + 'kind `background` is attached to when it is opened here (no second process), anything else is open in a '
+        + 'terminal or an editor and its person is asked before a copy is started. '
+        + `Read from ${WHERE}. Give the absolute project directory as `
+        + 'projectPath, and an epic slug to see only that epic’s places. Give `place` — the epic, the picked parts and '
+        + 'the kehikko — to be told in words what opening the module there will do: a place with a session opens it; a '
+        + 'place with none starts a new one at once only when the project has no other session, and otherwise asks its '
+        + 'person which to carry on with, and the answer lists those sessions in the order they are offered. Reads '
+        + 'only: nothing here starts, ends, attaches or types into a session.',
       inputSchema: {
         type: 'object',
         properties: {
           projectPath: { type: 'string', description: 'The absolute directory of the project.' },
           epic: { type: 'string', description: 'An epic’s slug, to list only its places.' },
+          place: {
+            type: 'object',
+            description: 'One place, to be told what it holds and what opening the module there does.',
+            properties: {
+              epic: { type: ['string', 'null'], description: 'The epic’s slug, or null when none is open.' },
+              parts: { type: 'array', items: { type: 'string' }, description: 'The ids of the picked parts. Empty, or left out, is the whole epic.' },
+              kehikko: { type: ['string', 'number', 'null'], description: 'The kehikko’s key (a string), or — for a host that has no keys — its row number.' },
+            },
+          },
         },
         required: ['projectPath'],
       },
       annotations: { title: 'Sessions by place', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
   ]
+}
+
+/** A place an agent named, or the sentence saying why it is not one. */
+function placeAsked(raw: unknown): Place | string {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return 'place must be an object: { epic, parts, kehikko }.'
+  const said = raw as { epic?: unknown; parts?: unknown; kehikko?: unknown }
+  const parts = said.parts ?? []
+  if (!Array.isArray(parts) || parts.some((one) => typeof one !== 'string')) return 'place.parts must be a list of part ids.'
+  const kehikko = said.kehikko ?? null
+  if (kehikko !== null && typeof kehikko !== 'string' && typeof kehikko !== 'number') return 'place.kehikko must be the kehikko’s key, or its row number.'
+  const epic = said.epic ?? null
+  if (epic !== null && typeof epic !== 'string') return 'place.epic must be an epic’s slug, or null.'
+  const which = kehikko === null ? null : kehikkoOf(typeof kehikko === 'string' ? { key: kehikko } : { id: kehikko })
+  if (kehikko !== null && which === null) return 'place.kehikko is not a kehikko’s key or row number.'
+  const place: Place = { epic, parts: parts as string[], kehikko: which }
+  /* Round-tripped: an epic or a part that is not a slug does not name a place this module could have written. */
+  return readPlaceKey(placeKey(place)) ? place : 'That is not a place: an epic and a part are named by their slugs.'
 }
 
 async function call(name: string, args: Record<string, unknown>): Promise<string> {
@@ -230,8 +341,66 @@ async function call(name: string, args: Record<string, unknown>): Promise<string
   const read = readPlaces(root.value)
   if (!read.ok) throw new Error(read.error)
   const epic = typeof args.epic === 'string' && args.epic ? args.epic : null
-  const held = new Map((await PROGRAM.sessions(root.value)).map((one) => [one.id, one]))
-  const live = theRuns().sessions()
+  const recorded = await PROGRAM.sessions(root.value)
+  const held = new Map(recorded.map((one) => [one.id, one]))
+  const runs = theRuns()
+  const live = runs.sessions()
+  const running = await runs.running()
+  const session = (id: string) => {
+    const kept = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id] : undefined
+    const at = held.get(id)?.lastActive
+    const run = live.find((one) => one.id === id || one.settled === id)
+    const { elsewhere } = besides(id, run, running, runs)
+    return {
+      id,
+      firstPrompt: held.get(id)?.label || kept?.label || '',
+      lastActive: at ? new Date(at).toISOString() : (kept?.lastActive ?? null),
+      running: Boolean(run),
+      ...(run?.state ? { state: run.state, since: new Date(run.stateSince).toISOString() } : {}),
+      ...(elsewhere ? { runningElsewhere: { kind: elsewhere.called || elsewhere.kind, since: elsewhere.since ? new Date(elsewhere.since).toISOString() : null, pid: elsewhere.pid, cwd: elsewhere.cwd } } : {}),
+      ...(held.has(id) || run ? {} : { missing: true }),
+    }
+  }
+  /* The project's sessions that are not one place's, as that place would offer them. */
+  const offered = (here: readonly string[], key: string) =>
+    ordered(recorded, here, key, read.value).map(({ one, near }) => ({ ...session(one.id), ...(near.length ? { sameEpicAt: near } : {}) }))
+  const unasked = running.known
+    ? ''
+    : ` (${PROGRAM.name} ${running.why === 'too-old' ? 'here is too old to say' : 'could not be asked'} what is running elsewhere, so no session below says \`runningElsewhere\` — which is not the same as none being so.)`
+
+  if (args.place !== undefined) {
+    const place = placeAsked(args.place)
+    if (typeof place === 'string') throw new Error(place)
+    const key = placeKey(place)
+    const all = sessionsAt(read.value, key)
+    for (const run of live) {
+      const id = run.settled ?? run.id
+      if (run.projectPath === root.value && run.key === key && !all.includes(id)) all.push(id)
+    }
+    const here = all.map(session)
+    const openable = here.filter((one) => !('missing' in one))
+    const others = offered(all, key)
+    const kept = here.length > openable.length ? ` It also lists ${here.length - openable.length} that ${PROGRAM.name} has no record of on this computer, which cannot be opened here.` : ''
+    if (openable.length > 1) return `This place (${key}) has ${openable.length} sessions, so opening the module here asks its person which one before anything is opened.${kept}${unasked}\n${JSON.stringify(here, null, 2)}`
+    if (openable.length === 1) {
+      const one = openable[0]!
+      const how = one.running
+        ? 'which this module is already running'
+        : one.runningElsewhere?.kind === 'background'
+          ? 'which is running in the background: it is attached to, and no second process is started'
+          : one.runningElsewhere
+            ? 'which is open in another process that cannot be attached to: its person is asked whether to open a copy anyway or leave it, and nothing is started until they answer'
+            : 'which is resumed'
+      return `This place (${key}) has one session, and opening the module here opens it at once — ${how}.${kept}${unasked}\n${JSON.stringify(here, null, 2)}`
+    }
+    if (!others.length) return `This place (${key}) has no session, and ${PROGRAM.name} has no other session for this project: opening the module here starts a new one at once.${kept}`
+    return (
+      `This place (${key}) has no session yet. ${PROGRAM.name} has ${others.length} other session${others.length === 1 ? '' : 's'} for this project, so opening the module here starts nothing: `
+      + 'it asks its person which to carry on with — "New session" first, which Enter takes, then these in this order (the ones another place of the same epic holds, `sameEpicAt`, then the rest by when '
+      + `each was last active). Choosing one makes it this place’s session without taking it from any other place.${kept}${unasked}\n${JSON.stringify(others, null, 2)}`
+    )
+  }
+
   const places = Object.entries(read.value.places)
     .filter(([, place]) => epic === null || place.epic === epic)
     .map(([key, place]) => ({
@@ -239,22 +408,17 @@ async function call(name: string, args: Record<string, unknown>): Promise<string
       epic: place.epic,
       parts: place.parts,
       kehikko: place.kehikko,
-      sessions: place.sessions.map((id) => {
-        const kept = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id] : undefined
-        const at = held.get(id)?.lastActive
-        const run = live.find((one) => one.id === id || one.settled === id)
-        const running = Boolean(run)
-        return {
-          id,
-          firstPrompt: held.get(id)?.label || kept?.label || '',
-          lastActive: at ? new Date(at).toISOString() : (kept?.lastActive ?? null),
-          running,
-          ...(run?.state ? { state: run.state, since: new Date(run.stateSince).toISOString() } : {}),
-          ...(held.has(id) || running ? {} : { missing: true }),
-        }
-      }),
+      sessions: place.sessions.map(session),
     }))
-  if (!places.length) return epic ? `No session is recorded for the epic "${epic}" in that project.` : 'No session is recorded for that project yet.'
+  if (!places.length) {
+    const said = epic ? `No session is recorded for the epic "${epic}" in that project.` : 'No session is recorded for that project yet.'
+    const loose = offered([], placeKey({ epic, parts: [], kehikko: null }))
+    if (!loose.length) return said
+    return (
+      `${said} ${PROGRAM.name} has ${loose.length} session${loose.length === 1 ? '' : 's'} for the folder that ${epic ? 'no place of that epic holds' : loose.length === 1 ? 'belongs to no place' : 'belong to no place'}: `
+      + `a place opened there asks its person which to carry on with before starting a new one.${unasked}\n${JSON.stringify(loose, null, 2)}`
+    )
+  }
   return JSON.stringify(places, null, 2)
 }
 

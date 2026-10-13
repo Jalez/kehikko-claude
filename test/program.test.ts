@@ -3,7 +3,9 @@ import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-import { PROGRAM, configDir, firstPrompt, home, recordDirs } from '../program.ts'
+import { spawnSync } from 'node:child_process'
+
+import { PROGRAM, configDir, firstPrompt, home, readActive, recordDirs } from '../program.ts'
 import { CONFIG, HOME } from './setup.ts'
 
 /**
@@ -74,13 +76,13 @@ describe('finding the binary', () => {
 
 describe('whether a copy can do what is asked of it', () => {
   test('one with both flags can', async () => {
-    expect(await PROGRAM.supports(STAND_IN)).toEqual({ ok: true, missing: null, tells: true })
+    expect(await PROGRAM.supports(STAND_IN)).toEqual({ ok: true, missing: null, tells: true, lists: true })
   })
 
   test('one whose help has no --session-id is too old, and the flag is named', async () => {
     const bin = scratch('old')
     writeFileSync(join(bin, 'claude'), `#!/bin/sh\nSTANDIN_OLD=1 exec "${STAND_IN}" "$@"\n`, { mode: 0o755 })
-    expect(await PROGRAM.supports(join(bin, 'claude'))).toEqual({ ok: false, missing: '--session-id', tells: false })
+    expect(await PROGRAM.supports(join(bin, 'claude'))).toEqual({ ok: false, missing: '--session-id', tells: false, lists: false })
   })
 
   test('one whose help cannot be read is not called too old: nothing was learned', async () => {
@@ -187,5 +189,136 @@ describe('installing', () => {
 
   test('a stand-in can be named by whoever started the server, for walking the flow without a real install', () => {
     expect(PROGRAM.install({ KEHIKOT_CLAUDE_INSTALL_LINE: '/tmp/stand-in.sh' }).line).toBe('/tmp/stand-in.sh')
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * What is already running, and the view of a background session (#5)
+ * ------------------------------------------------------------------ */
+
+describe('asking what is running', () => {
+  const wrapped = (name: string, env: string) => {
+    const bin = scratch(name)
+    writeFileSync(join(bin, 'claude'), `#!/bin/sh\n${env} exec "${STAND_IN}" "$@"\n`, { mode: 0o755 })
+    return join(bin, 'claude')
+  }
+  const entry = (more: Record<string, unknown>) => ({ pid: process.pid, cwd: '/p', kind: 'interactive', startedAt: 1791893581186, sessionId: A, name: 'project-ea', status: 'idle', ...more })
+
+  test('a copy with `agents` and `attach` in its help can be asked; one without either cannot, and is not called too old to use', async () => {
+    expect((await PROGRAM.supports(STAND_IN)).lists).toBe(true)
+    expect(await PROGRAM.supports(wrapped('noagents', 'STANDIN_NOAGENTS=1'))).toEqual({ ok: true, missing: null, tells: true, lists: false })
+  })
+
+  test('the option `--agents` in an older help is not the command `agents`', async () => {
+    const bin = scratch('older')
+    writeFileSync(join(bin, 'claude'), '#!/bin/sh\necho "  --agents <json>  JSON object defining custom agents"\necho "  -r, --resume [value]"\necho "  --session-id <uuid>"\n', { mode: 0o755 })
+    expect((await PROGRAM.supports(join(bin, 'claude'))).lists).toBe(false)
+  })
+
+  test('nothing running is an empty list, and it is KNOWN to be empty', async () => {
+    rmSync(join(CONFIG, 'sessions'), { recursive: true, force: true })
+    expect(await PROGRAM.active(STAND_IN)).toEqual({ known: true, active: [] })
+  })
+
+  test('an interactive session and a background one are read as the real program prints them', async () => {
+    mkdirSync(join(CONFIG, 'sessions'), { recursive: true })
+    /* The stand-in lists the files of processes that are alive: this test's own process stands for one. */
+    writeFileSync(join(CONFIG, 'sessions', `${process.pid}.json`), JSON.stringify(entry({})))
+    try {
+      expect(await PROGRAM.active(STAND_IN)).toEqual({
+        known: true,
+        active: [{ session: A, kind: 'interactive', called: 'interactive', handle: null, pid: process.pid, cwd: '/p', startedAt: 1791893581186, name: 'project-ea' }],
+      })
+      writeFileSync(join(CONFIG, 'sessions', `${process.pid}.json`), JSON.stringify(entry({ kind: 'background', id: 'df6bd259', sessionId: B, state: 'working' })))
+      const said = await PROGRAM.active(STAND_IN)
+      expect(said.known && said.active[0]).toMatchObject({ session: B, kind: 'background', handle: 'df6bd259' })
+    } finally {
+      rmSync(join(CONFIG, 'sessions'), { recursive: true, force: true })
+    }
+  })
+
+  test('a session whose process has gone is not listed', async () => {
+    mkdirSync(join(CONFIG, 'sessions'), { recursive: true })
+    writeFileSync(join(CONFIG, 'sessions', '999999.json'), JSON.stringify(entry({ pid: 999999 })))
+    try {
+      expect(await PROGRAM.active(STAND_IN)).toEqual({ known: true, active: [] })
+    } finally {
+      rmSync(join(CONFIG, 'sessions'), { recursive: true, force: true })
+    }
+  })
+
+  test('a copy that cannot answer has not said "nothing is running": an error, and anything that is not a JSON array, are `failed`', async () => {
+    expect(await PROGRAM.active(wrapped('refuses', 'STANDIN_NOAGENTS=1'))).toEqual({ known: false, why: 'failed' })
+    for (const [name, prints] of [['prose', 'echo "no sessions"'], ['object', 'echo "{}"'], ['nothing', 'true']] as const) {
+      const bin = scratch(name)
+      writeFileSync(join(bin, 'claude'), `#!/bin/sh\n${prints}\n`, { mode: 0o755 })
+      expect(await PROGRAM.active(join(bin, 'claude'))).toEqual({ known: false, why: 'failed' })
+    }
+    expect(await PROGRAM.active('/no/such/claude')).toEqual({ known: false, why: 'failed' })
+  })
+
+  test('an entry is taken for its shape and nothing more: no session id, no entry; a handle only for a background one, and only one word', () => {
+    expect(readActive(entry({ sessionId: 'not-an-id' }))).toBeNull()
+    expect(readActive(null)).toBeNull()
+    expect(readActive('x')).toBeNull()
+    /* A background entry that was just started has no pid, name or status yet. */
+    expect(readActive({ id: '5e2cbccb', cwd: '/p', kind: 'background', startedAt: 1, sessionId: B, state: 'blocked' })).toEqual({ session: B, kind: 'background', called: 'background', handle: '5e2cbccb', pid: null, cwd: '/p', startedAt: 1, name: '' })
+    /* An interactive session has no handle even if it claims one: it cannot be attached to. */
+    expect(readActive(entry({ id: 'abcd1234' }))?.handle).toBeNull()
+    for (const not of ['--dangerously-skip-permissions', '-x', 'two words', 'a;b', '', 'x'.repeat(65), 7]) {
+      expect(readActive(entry({ kind: 'background', id: not }))?.handle).toBeNull()
+    }
+    expect(readActive(entry({ kind: 'sdk' }))).toMatchObject({ kind: 'other', called: 'sdk', handle: null })
+  })
+
+  test('a view of a background session is `attach <handle>` and nothing else — no settings, no prompt, and never a flag', () => {
+    expect(PROGRAM.attach('df6bd259')).toEqual(['attach', 'df6bd259'])
+    for (const not of ['--resume', '-h', 'a b', '']) expect(() => PROGRAM.attach(not)).toThrow()
+  })
+
+  test('the stand-in keeps a background session as the real program does: listed, attached to by its short id only, and one process throughout', async () => {
+    const project = scratch('bgproject')
+    const [dir] = recordDirs(project)
+    mkdirSync(dir!, { recursive: true })
+    writeFileSync(join(dir!, `${A}.jsonl`), `${row('started in the background')}\n`)
+    const run = (args: string[], input = '') => spawnSync(STAND_IN, args, { cwd: project, env: { ...process.env }, input, encoding: 'utf8' })
+    try {
+      expect(run(['--bg', '--resume', A]).stdout).toContain('backgrounded · 11111111')
+      const listed = await PROGRAM.active(STAND_IN)
+      const one = listed.known ? listed.active.find((each) => each.session === A) : undefined
+      expect(one).toMatchObject({ kind: 'background', handle: '11111111', cwd: project })
+      /* As measured on 2.1.296: the full session id is not a job, and says so. */
+      const full = run(['attach', A])
+      expect(full.status).toBe(1)
+      expect(full.stdout).toContain(`No job matching '${A}'`)
+      /* By its handle it opens, what is typed is the same conversation, and the view ending leaves the session listed under the same pid. */
+      const view = run(PROGRAM.attach(one!.handle!), 'a second turn\n')
+      expect(view.stdout).toContain('ATTACHED to background session 11111111')
+      expect(view.stdout).toContain('you said: a second turn')
+      const after = await PROGRAM.active(STAND_IN)
+      expect(after.known && after.active.filter((each) => each.session === A).map((each) => each.pid)).toEqual([one!.pid])
+    } finally {
+      run(['stop', '11111111'])
+    }
+    const gone = await PROGRAM.active(STAND_IN)
+    expect(gone.known && gone.active.some((each) => each.session === A)).toBe(false)
+  })
+})
+
+describe('reading what the program prints', () => {
+  test('whole, however long: the commands at the end of a long help are found, and a long list of sessions is still a list', async () => {
+    /* The real program's help is 22 KB with "Commands:" last, and read over a socket it arrived as its first 8190 bytes. */
+    const bin = scratch('long')
+    const padding = Array.from({ length: 400 }, (_, index) => `echo "  --option-${index} <value>        a line of help that takes up room, as the real one's do"`).join('\n')
+    writeFileSync(
+      join(bin, 'claude'),
+      `#!/bin/sh\nif [ "$1" = "--help" ]; then\necho "  -r, --resume [value]"\necho "  --session-id <uuid>"\n${padding}\necho "Commands:"\necho "  agents [options]   Manage background agents"\necho "  attach <id|name>   Open a background session in this terminal"\nexit 0\nfi\n`
+        + `printf '['\ni=0\nwhile [ $i -lt 200 ]; do printf '{"pid":%s,"cwd":"/a/long/enough/path/to/a/project/folder","kind":"interactive","startedAt":1,"sessionId":"${A}","name":"n","status":"idle"},' $((i + 2)); i=$((i + 1)); done\nprintf '{"pid":9,"cwd":"/p","kind":"interactive","startedAt":1,"sessionId":"${B}"}]'\n`,
+      { mode: 0o755 },
+    )
+    expect((await PROGRAM.supports(join(bin, 'claude'))).lists).toBe(true)
+    const said = await PROGRAM.active(join(bin, 'claude'))
+    expect(said.known && said.active.length).toBe(201)
+    expect(said.known && said.active.at(-1)?.session).toBe(B)
   })
 })

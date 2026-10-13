@@ -82,7 +82,10 @@ export const MANIFEST: Manifest = manifestSchema.parse({
     + 'parts and the kehikko in front of them. It is theirs: they type in it, and nothing here lets you type into it, '
     + 'start one or end one. Call `sessions` with the project path to see which sessions belong to which place — '
     + 'their first prompt, when each was last active, and whether a running one is working, waiting for its person '
-    + 'or finished — before starting work that one of them may already hold.',
+    + 'or finished — before starting work that one of them may already hold. Placing this module on a kehikko '
+    + 'starts nothing by itself: a place with no session asks its person which of the project’s sessions to carry '
+    + 'on with (or a new one) when the project has any, and a session already open in another process is asked '
+    + 'about rather than copied. Call `sessions` with `place` to be told in words what a place holds.',
   entry: '/app',
   modes: [{ id: 'claude', label: 'Claude', scope: 'epic' }],
   mcp: {

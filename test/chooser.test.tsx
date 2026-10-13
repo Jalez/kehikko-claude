@@ -14,7 +14,7 @@ const NOW = Date.parse('2026-10-12T12:00:00Z')
 const row = (id: string, more: Partial<Row> = {}): Row => ({ id, label: '', lastActive: null, running: false, ...more })
 const listing = (more: Partial<Listing> = {}): Listing => ({
   ok: true,
-  program: { name: 'Claude Code', found: '/bin/claude', foundAt: '/bin/claude', looked: [], where: 'PATH', lacks: null, install: { line: 'install', lands: '' } },
+  program: { name: 'Claude Code', found: '/bin/claude', foundAt: '/bin/claude', looked: [], where: 'PATH', lacks: null, install: { line: 'install', lands: '' }, asked: 'yes' },
   sessions: [row('a', { label: 'tighten the methods section', lastActive: NOW - 3 * 3_600_000 }), row('b', { label: '', running: true, lastActive: NOW - 60_000 })],
   others: [row('c', { label: 'from another place', lastActive: NOW - 86_400_000 })],
   running: [],
@@ -217,5 +217,128 @@ describe('what a running session is doing, in the list', () => {
     const marked = drawn({ listing: listing({ sessions: [row('a', { label: 'one', running: true, state: 'needs-you', since: NOW }), row('b', { label: 'two', running: true, state: 'finished', since: NOW })] }) })
     expect(marked.list.querySelectorAll('[data-row]').length).toBe(before)
     expect(marked.list.children.length).toBe(children)
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * A place with no session (#6), and rows running elsewhere (#5)
+ * ------------------------------------------------------------------ */
+
+describe('the list for a place with no session', () => {
+  const job = { kind: 'background' as const, called: 'background', pid: 82454, cwd: '/p', since: NOW - 3 * 3_600_000, name: 'stand-in' }
+  const terminal = { kind: 'interactive' as const, called: 'interactive', pid: 82070, cwd: '/p', since: NOW - 17 * 60_000, name: 'project-ea' }
+  const offered = (more: Partial<Listing> = {}) =>
+    drawn({
+      mode: 'offer',
+      onClose: undefined,
+      listing: listing({
+        sessions: [],
+        others: [
+          row('near', { label: 'the whole epic’s conversation', lastActive: NOW - 2 * 86_400_000, near: ['whole epic · writing'] }),
+          row('recent', { label: 'started in a plain terminal', lastActive: NOW - 3_600_000 }),
+          row('old', { label: 'another epic’s', lastActive: NOW - 9 * 86_400_000 }),
+        ],
+        ...more,
+      }),
+    })
+  const words = (list: HTMLElement) => [...list.querySelectorAll('[data-row]')].map((one) => one.textContent?.replace(/\s+/g, ' ').trim() ?? '')
+
+  test('"New session" is the first row, then the project’s sessions in the order they were given, each with its first prompt and when it was last active', () => {
+    const { list } = offered()
+    const rows = words(list)
+    expect(rows.length).toBe(4)
+    expect(rows[0]).toBe('1New session')
+    expect(rows[1]).toContain('the whole epic’s conversation')
+    expect(rows[1]).toContain('this epic')
+    expect(rows[1]).toContain('2 d ago')
+    expect(rows[2]).toContain('started in a plain terminal')
+    expect(rows[2]).toContain('1 h ago')
+    expect(rows[2]).not.toContain('this epic')
+    expect(rows[3]).toContain('another epic’s')
+    expect(list.querySelector('[data-near]')?.getAttribute('title')).toBe('Already the session of another place of this epic: whole epic · writing')
+    /* Laid out, not folded behind a row that has to be pressed first. */
+    expect(list.querySelector('[data-row="attach"]')).toBeNull()
+    expect(list.textContent).toContain('No session here yet. Start a new one, or carry on with one this project already has.')
+  })
+
+  test('Enter takes the new one without moving: a person who always wants a new one presses one key', () => {
+    const { list, opened } = offered()
+    expect(list.querySelector('[aria-selected="true"]')?.getAttribute('data-row')).toBe('new')
+    fireEvent.keyDown(list, { key: 'Enter' })
+    expect(opened).toEqual([null])
+  })
+
+  test('an existing one is chosen with the arrows, a digit or the pointer', () => {
+    const { list, opened, getByText } = offered()
+    fireEvent.keyDown(list, { key: 'ArrowDown' })
+    fireEvent.keyDown(list, { key: 'Enter' })
+    fireEvent.keyDown(list, { key: '3' })
+    fireEvent.click(getByText('another epic’s'))
+    expect(opened).toEqual(['near', 'recent', 'old'])
+  })
+
+  test('there is no limit: every one of the project’s sessions is a row', () => {
+    const many = Array.from({ length: 140 }, (_, index) => row(`s${index}`, { label: `conversation ${index}`, lastActive: NOW - index * 60_000 }))
+    const { list } = offered({ others: many })
+    expect(list.querySelectorAll('[data-row="other"]').length).toBe(140)
+    expect(list.querySelectorAll('[data-row]').length).toBe(141)
+  })
+
+  test('a row says when its session is running: here with what it is doing, in the background, or open elsewhere', () => {
+    const { list } = offered({
+      others: [
+        row('here', { label: 'running on this module', running: true, state: 'working', since: NOW }),
+        row('bg', { label: 'a background job', elsewhere: job }),
+        row('term', { label: 'left open in a terminal', elsewhere: terminal }),
+        row('idle', { label: 'at rest' }),
+      ],
+    })
+    expect(list.querySelector('[data-session="here"] [data-state]')?.textContent).toContain('working')
+    const background = list.querySelector('[data-session="bg"] [data-elsewhere]') as HTMLElement
+    expect(background.getAttribute('data-elsewhere')).toBe('background')
+    expect(background.textContent).toBe('running in the background')
+    expect(background.getAttribute('title')).toBe('Running as a background session, process 82454, in /p, started 3 h ago. Opening it here attaches to it: no second process is started.')
+    const open = list.querySelector('[data-session="term"] [data-elsewhere]') as HTMLElement
+    expect(open.textContent).toBe('open elsewhere')
+    expect(open.getAttribute('title')).toContain('It cannot be attached to: opening it here asks before a copy is started.')
+    expect(list.querySelector('[data-session="idle"] [data-elsewhere]')).toBeNull()
+    expect(list.querySelector('[data-session="idle"]')?.textContent).not.toMatch(/running|elsewhere/)
+    /* Nothing here ends a process this module did not start: only the one it runs has the button. */
+    expect([...list.querySelectorAll('button')].filter((one) => one.textContent === 'End').length).toBe(1)
+    expect(list.querySelector('[data-session="bg"]')?.textContent).not.toContain('End')
+  })
+
+  test('a session not on this computer stays unopenable, is listed last, and is not where Enter lands', () => {
+    const { list, opened } = offered({ sessions: [row('away', { label: 'started on the laptop', missing: true })] })
+    const rows = [...list.querySelectorAll('[data-row]')]
+    expect(rows.at(-1)?.getAttribute('data-row')).toBe('missing')
+    expect(rows.at(-1)?.textContent).toContain('not on this computer')
+    fireEvent.keyDown(list, { key: '5' })
+    expect(opened).toEqual([])
+    fireEvent.keyDown(list, { key: 'Enter' })
+    expect(opened).toEqual([null])
+  })
+
+  test('it cannot be escaped into nothing: there is no session behind it to go back to', () => {
+    const { list, opened, closed } = offered()
+    fireEvent.keyDown(list, { key: 'Escape' })
+    expect(closed()).toBe(0)
+    expect(opened).toEqual([])
+  })
+})
+
+describe('rows for sessions this module runs as a view or a copy', () => {
+  test('a view of a background session says so, and its button closes the view — it does not end the session', () => {
+    const { list, ended } = drawn({ mode: 'sessions', listing: listing({ sessions: [row('a', { label: 'a background job', running: true, as: 'background' })], others: [] }) })
+    expect(list.querySelector('[data-session="a"] [data-as]')?.textContent).toBe('background')
+    const button = [...list.querySelectorAll('[data-session="a"] button')].find((one) => one.textContent === 'Close') as HTMLElement
+    expect(button.getAttribute('title')).toBe('Close this view. The session keeps running in the background.')
+    fireEvent.click(button)
+    expect(ended).toEqual(['a'])
+  })
+
+  test('a copy says it is one', () => {
+    const { list } = drawn({ mode: 'sessions', listing: listing({ sessions: [row('a', { label: 'x', running: true, as: 'copy' })], others: [] }) })
+    expect(list.querySelector('[data-session="a"] [data-as]')?.textContent).toBe('copy')
   })
 })

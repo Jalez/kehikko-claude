@@ -37,6 +37,13 @@ import { delimiter, join } from 'node:path'
  *     program itself as it happens, never read off its screen. A program that
  *     cannot is still a program this module opens; its sessions simply have
  *     no state.
+ *  8. **Is a session already running somewhere this module did not start
+ *     it, and can that one be shown instead?** (`active`, `attach`) Resuming
+ *     a conversation another process holds starts a second process on it, so
+ *     the program is asked first, every time. One it runs in the background
+ *     is opened by `attach` — a view of the process that is already there,
+ *     not another one. A program that cannot be asked says so (`known:
+ *     false`), which is not the same answer as "nothing is running".
  *
  * ## What is never here
  *
@@ -46,6 +53,22 @@ import { delimiter, join } from 'node:path'
  * command line — the program's own hooks, pointed at this module — and that
  * is the whole command. A session opened here has exactly the permissions
  * the same command would have in any terminal.
+ *
+ * ## Every command line this module ever runs, and it is the whole list
+ *
+ *     claude --help                                   once per binary: which flags and commands it has
+ *     claude --session-id <uuid> [--settings <json>]  a new session
+ *     claude --resume <uuid> [--settings <json>]      a session nothing else is running
+ *     claude agents --json                            before every resume and every list: what is running. Reads; starts nothing
+ *     claude attach <handle>                          a view of a session the program runs in the background
+ *
+ * The last two were added for the eighth question, deliberately. Neither
+ * carries a prompt or a permission. `<uuid>` is an id this module minted or
+ * the program holds a record for; `<handle>` is a word the program itself
+ * printed in `agents --json` a moment before, checked to be one word that
+ * cannot be read as a flag (`HANDLE`). Nothing a page sent is ever an
+ * argument. Never `stop`, `rm`, `respawn` or `--bg`: this module does not
+ * end, delete, restart or start anything in the background.
  */
 
 export interface Found {
@@ -67,7 +90,60 @@ export interface Able {
    * session is opened exactly as it always was, and has no state.
    */
   tells: boolean
+  /**
+   * Whether this copy can be asked what is running (`active`) and can open a
+   * background session (`attach`). False for one too old for either and for
+   * one whose help could not be read: nothing is asked, a session is resumed
+   * as it always was, and the person is told that it was not checked.
+   */
+  lists: boolean
 }
+
+/**
+ * One session the program says is running now, in a process of its own.
+ *
+ * Read from `claude agents --json`, measured on 2.1.296 with one session open
+ * in a terminal and one started with `--bg`:
+ *
+ *     { "pid": 82070, "cwd": "/…/project", "kind": "interactive", "startedAt": 1791893581186,
+ *       "sessionId": "62bc0067-…", "name": "project-ea", "status": "idle" }
+ *     { "pid": 82454, "id": "df6bd259", "cwd": "/…/project", "kind": "background", "startedAt": 1791893608110,
+ *       "sessionId": "df6bd259-…", "name": "stand-in", "status": "idle", "state": "working" }
+ *
+ * Every folder's sessions are in the one list (it is not narrowed to the
+ * directory it is asked from). A background entry may have no `pid`, `name`
+ * or `status` (one that was just started). A stopped background session is
+ * not in it at all — `--all` would add those, and is not passed.
+ */
+export interface Active {
+  /** The session it holds, by the id its record is filed under. */
+  session: string
+  /** `background`: the program runs it with no terminal, and `attach` opens it. Anything else is a process with a terminal of its own. */
+  kind: 'background' | 'interactive' | 'other'
+  /** The word the program itself gave that kind. For the sentence a person reads. */
+  called: string
+  /**
+   * What `attach` takes, for a background session: the `id` the program
+   * printed — its short one. Measured: `attach` refuses the full session id
+   * ("No job matching …"), and refuses the id of an interactive session the
+   * same way. Null for anything that cannot be attached to.
+   */
+  handle: string | null
+  pid: number | null
+  cwd: string
+  /** Milliseconds, or null when the program did not say. */
+  startedAt: number | null
+  name: string
+}
+
+/**
+ * What the program said is running — or that it could not be asked, which is
+ * a different answer from an empty list and must never be read as one.
+ */
+export type Running =
+  | { known: true; active: Active[] }
+  /** `too-old`: this copy has no `agents --json` or no `attach`. `failed`: it has, and the asking did not work. */
+  | { known: false; why: 'too-old' | 'failed' }
 
 /**
  * What a session is doing, as far as its program says.
@@ -135,6 +211,15 @@ export interface Program {
   reports(command: (event: string) => string): string[]
   /** What an event the program reported says about the session, or null for one that says nothing. */
   signal(event: string): State | null
+  /**
+   * Every session the program is running now, in any folder, in any process
+   * — this module's own among them. Asked afresh every time: a session can
+   * start or stop between two opens, so nothing here remembers an answer.
+   * Only ever asked of a copy whose `supports()` said `lists`.
+   */
+  active(file: string, env?: NodeJS.ProcessEnv): Promise<Running>
+  /** The arguments that open a view of a background session, by the handle `active` gave for it. */
+  attach(handle: string): string[]
 }
 
 /* ------------------------------------------------------------------------ *
@@ -218,7 +303,54 @@ const NEEDS = ['--session-id', '--resume']
  */
 const TELLS = '--settings'
 
+/**
+ * The two commands the eighth question is asked with. Not needed either: a
+ * copy without them resumes a session as before, and says it did not check.
+ * From the same help text, under "Commands:" —
+ *
+ *     agents [options]   Manage background agents
+ *     attach <id|name>   Open a background session in this terminal. <id> is the short id that
+ *                        `claude --bg` prints and `claude agents` lists. …
+ *
+ * and from `claude agents --help`:
+ *
+ *     --json   Print active sessions (interactive and background) as a JSON array and exit
+ *              (for scripting; does not require a TTY)
+ *
+ * Looked for as COMMANDS — a word at the start of a help line — because
+ * `--agents <json-or-file>` is an older, unrelated option whose name contains
+ * the first one.
+ */
+const LISTS = [/^\s*agents\b/m, /^\s*attach\b/m]
+
 const able = new Map<string, Able>()
+
+/**
+ * What the program prints for a command that only answers — `--help`,
+ * `agents --json` — read through a real pipe.
+ *
+ * Measured on 2.1.296: read directly by this process, `claude --help` arrives
+ * as its first 8190 bytes of 22116. Node hands a child a socket for its
+ * standard output, the program exits without waiting for one to drain, and
+ * the rest is lost — silently, and with exit code 0. The "Commands:" section
+ * is at the end of the help, and a list of thirty running sessions is longer
+ * than that too, so both answers this module depends on would be cut short
+ * and read as "has no such command" and "not a list".
+ *
+ * So the program writes into a pipe the shell made, and `cat` passes it on:
+ * all 22116 bytes arrive. The line given to `sh` is a constant; the binary
+ * and its arguments are positional parameters and are never part of it.
+ * Nothing is typed into the program (its standard input is closed), and what
+ * comes back is `''` for anything that went wrong.
+ */
+function answered(file: string, args: readonly string[], env?: NodeJS.ProcessEnv): Promise<string> {
+  return new Promise((done) => {
+    const child = execFile('/bin/sh', ['-c', '"$0" "$@" </dev/null | /bin/cat', file, ...args], { timeout: 8000, maxBuffer: 16 * 1024 * 1024, ...(env ? { env } : {}) }, (error, stdout) =>
+      done(error ? '' : stdout),
+    )
+    child.on('error', () => done(''))
+  })
+}
 
 /**
  * Whether this copy has the flags above, asked once per binary per build.
@@ -238,15 +370,15 @@ async function supports(file: string): Promise<Able> {
   }
   const known = able.get(stamp)
   if (known) return known
-  const said = await new Promise<Able>((done) => {
-    execFile(file, ['--help'], { timeout: 8000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
-      /* Nothing was learned, so nothing extra is passed either: a flag this copy
-         turned out not to have would stop it from starting at all. */
-      if (error || !stdout) return done({ ok: true, missing: null, tells: false })
-      const missing = NEEDS.find((flag) => !stdout.includes(flag)) ?? null
-      done({ ok: missing === null, missing, tells: stdout.includes(TELLS) })
-    })
-  })
+  const stdout = await answered(file, ['--help'])
+  /* Nothing was learned, so nothing extra is passed either: a flag this copy
+     turned out not to have would stop it from starting at all. */
+  const said: Able = !stdout
+    ? { ok: true, missing: null, tells: false, lists: false }
+    : (() => {
+        const missing = NEEDS.find((flag) => !stdout.includes(flag)) ?? null
+        return { ok: missing === null, missing, tells: stdout.includes(TELLS), lists: LISTS.every((command) => command.test(stdout)) }
+      })()
   able.set(stamp, said)
   return said
 }
@@ -519,6 +651,57 @@ function reports(command: (event: string) => string): string[] {
   return [TELLS, JSON.stringify({ hooks })]
 }
 
+/**
+ * A background session's handle, as `attach` is given it: one word of
+ * letters, digits, dashes and underscores that does not start with a dash,
+ * so that whatever the program printed it can never be read as a flag. (What
+ * 2.1.296 prints is eight hex characters, the head of the session id.)
+ */
+const HANDLE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
+
+/** One entry of `agents --json`, or null for anything that is not one. Nothing in it is trusted beyond its shape. */
+export function readActive(raw: unknown): Active | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const said = raw as { sessionId?: unknown; kind?: unknown; id?: unknown; pid?: unknown; cwd?: unknown; startedAt?: unknown; name?: unknown }
+  if (typeof said.sessionId !== 'string' || !SESSION_ID.test(said.sessionId)) return null
+  const called = typeof said.kind === 'string' ? said.kind.slice(0, 40) : ''
+  const kind = called === 'background' ? 'background' : called === 'interactive' ? 'interactive' : 'other'
+  return {
+    session: said.sessionId,
+    kind,
+    called,
+    handle: kind === 'background' && typeof said.id === 'string' && HANDLE.test(said.id) ? said.id : null,
+    pid: typeof said.pid === 'number' && Number.isSafeInteger(said.pid) && said.pid > 1 ? said.pid : null,
+    cwd: typeof said.cwd === 'string' ? said.cwd.slice(0, 400) : '',
+    startedAt: typeof said.startedAt === 'number' && Number.isFinite(said.startedAt) && said.startedAt > 0 ? said.startedAt : null,
+    name: typeof said.name === 'string' ? said.name.slice(0, 120) : '',
+  }
+}
+
+/**
+ * What is running, asked of the program itself: `claude agents --json`.
+ *
+ * It needs no terminal, starts no session and reads no project; measured at
+ * a tenth of a second. It is asked in the environment a session would be
+ * started in, so that it is the same Claude Code — the same config folder —
+ * whose sessions are listed.
+ *
+ * Anything but a JSON array is `failed`, never an empty list: a copy that
+ * answered with an error, a timeout, or something else entirely has not said
+ * that nothing is running.
+ */
+async function active(file: string, env: NodeJS.ProcessEnv = process.env): Promise<Running> {
+  let parsed: unknown
+  try {
+    /* Through a real pipe, whole (see `answered`): a list cut short is not a list. */
+    parsed = JSON.parse(await answered(file, ['agents', '--json'], environment(env)))
+  } catch {
+    return { known: false, why: 'failed' }
+  }
+  if (!Array.isArray(parsed)) return { known: false, why: 'failed' }
+  return { known: true, active: parsed.map(readActive).filter((one): one is Active => one !== null) }
+}
+
 export const PROGRAM: Program = {
   name: 'Claude Code',
   binary: BINARY,
@@ -536,5 +719,13 @@ export const PROGRAM: Program = {
   environment,
   reports,
   signal: (event) => (Object.hasOwn(SIGNALS, event) ? SIGNALS[event]! : null),
+  active,
+  /* The handle and nothing else, and only one `readActive` let through. No
+     `--settings`: the process that holds the session was started elsewhere,
+     and its hooks are not this module's to add. */
+  attach: (handle) => {
+    if (!HANDLE.test(handle)) throw new Error('that is not a background session’s handle')
+    return ['attach', handle]
+  },
 }
 

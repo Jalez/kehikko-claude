@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import { CLOSED, Runs, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
 import { placeKey } from '../place.ts'
-import { PROGRAM, type Program, type Recorded } from '../program.ts'
+import { PROGRAM, type Active, type Program, type Recorded } from '../program.ts'
 import { readPlaces, sessionsAt, type NamedPlace } from '../record.ts'
 
 /**
@@ -177,17 +177,25 @@ class Watcher implements Viewer {
 /** Long enough for the emulator's write queue and the promises behind an open to have run. */
 const settle = () => new Promise((done) => setTimeout(done, 25))
 
-function world(options: { found?: string | null; able?: boolean; tells?: boolean; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number } = {}) {
+function world(options: { found?: string | null; able?: boolean; tells?: boolean; lists?: boolean; asking?: 'fails'; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number } = {}) {
   const logged: string[] = []
   const ptys: FakePty[] = []
   /* What the stand-in program holds a record for, by folder. */
   const held = new Map<string, Recorded[]>()
   let clock = 1_000_000
+  /** What is running in processes this module did not start, as the program would list it. */
+  const elsewhere: Active[] = []
+  const asked = { count: 0 }
   let found: string | null = options.found === undefined ? '/fake/bin/claude' : options.found
   const program: Program = {
     ...PROGRAM,
     find: () => ({ file: found, looked: ['/fake/bin'], usual: [] }),
-    supports: async () => ({ ok: options.able ?? true, missing: options.able === false ? '--session-id' : null, tells: options.tells ?? false }),
+    supports: async () => ({ ok: options.able ?? true, missing: options.able === false ? '--session-id' : null, tells: options.tells ?? false, lists: options.lists ?? true }),
+    /* What the stand-in program says is running, asked every time: a test changes `elsewhere` between two opens. */
+    active: async () => {
+      asked.count += 1
+      return options.asking === 'fails' ? { known: false, why: 'failed' } : { known: true, active: [...elsewhere] }
+    },
     newId: (() => {
       const ids = [B, '33333333-3333-4333-8333-333333333333', '44444444-4444-4444-8444-444444444444', '55555555-5555-4555-8555-555555555555']
       return () => ids.shift() ?? PROGRAM.newId()
@@ -219,6 +227,8 @@ function world(options: { found?: string | null; able?: boolean; tells?: boolean
     runs,
     ptys,
     logged,
+    elsewhere,
+    asked,
     /** The program writes its record: from here on the session exists. */
     records: (projectPath: string, id: string, label = '') => held.set(projectPath, [...(held.get(projectPath) ?? []).filter((one) => one.id !== id), { id, label, lastActive: clock }]),
     later: (ms: number) => {
@@ -1317,5 +1327,244 @@ describe('putting away only what is finished', () => {
     expect(run.state).toBeNull()
     w.later(20 * 60_000)
     expect(w.runs.rest()).toEqual([run])
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * A conversation that is already running somewhere this module did not start it (#5)
+ * ------------------------------------------------------------------ */
+
+describe('a session that is already running somewhere else', () => {
+  const since = 900_000
+  const background = (session = A): Active => ({ session, kind: 'background', called: 'background', handle: session.slice(0, 8), pid: 4242, cwd: '/somewhere/project', startedAt: since, name: 'stand-in' })
+  const interactive = (session = A): Active => ({ session, kind: 'interactive', called: 'interactive', handle: null, pid: 5151, cwd: '/somewhere/project', startedAt: since, name: 'project-ea' })
+
+  test('the program is asked before every resume, and the answer is never kept: what starts or stops between two opens is seen', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A, 'an earlier conversation')
+    /* Nothing else has it: resumed, exactly as before. */
+    const first = new Watcher()
+    await w.runs.open(ask(dir, A), first)
+    expect(w.asked.count).toBe(1)
+    expect(w.ptys[0]!.args).toEqual(['--resume', A])
+    expect(first.said[0]).toMatchObject({ opened: 'resumed' })
+    w.ptys[0]!.ends(0)
+    await settle()
+
+    /* It was started in the background since. The second open asks again, and attaches. */
+    w.elsewhere.push(background())
+    await w.runs.open(ask(dir, A), new Watcher())
+    expect(w.asked.count).toBeGreaterThanOrEqual(2)
+    expect(w.ptys[1]!.args).toEqual(['attach', '11111111'])
+    w.ptys[1]!.ends(0)
+    await settle()
+
+    /* And stopped since. The third asks again, and resumes. */
+    const before = w.asked.count
+    w.elsewhere.length = 0
+    await w.runs.open(ask(dir, A), new Watcher())
+    expect(w.asked.count).toBeGreaterThan(before)
+    expect(w.ptys[2]!.args).toEqual(['--resume', A])
+  })
+
+  test('a new session is not asked about: nothing else can have an id minted a moment ago', async () => {
+    const w = world()
+    await w.runs.open(ask(project(), null), new Watcher())
+    expect(w.asked.count).toBe(0)
+    expect(w.ptys[0]!.args).toEqual(['--session-id', B])
+  })
+
+  test('one running in the background is attached to: `attach` by the handle the program gave, one process, and no hooks of this module’s', async () => {
+    const dir = project()
+    const w = world({ tells: true, port: 9590 })
+    w.records(dir, A, 'started as a background job')
+    w.elsewhere.push(background())
+    const viewer = new Watcher()
+    const run = (await w.runs.open(ask(dir, A), viewer)) as Run
+    expect(isRun(run)).toBe(true)
+    /* One pty, and what is in it is a view: not `--resume`, and not the full session id, which `attach` refuses. */
+    expect(w.ptys.length).toBe(1)
+    expect(w.ptys[0]!.args).toEqual(['attach', '11111111'])
+    expect(w.ptys[0]!.args.join(' ')).not.toMatch(/--resume|--settings|--session-id/)
+    /* The process that holds the session was started elsewhere: nothing of this module's is put in its environment. */
+    expect(w.ptys[0]!.options.env[TELL_ENV.secret]).toBeUndefined()
+    expect(run.secret).toBeNull()
+    expect(viewer.said[0]).toMatchObject({ opened: 'background', session: A, background: { kind: 'background', pid: 4242, cwd: '/somewhere/project', since } })
+    /* It is this place's session all the same. */
+    expect(listed(dir)).toEqual([A])
+    expect(w.logged.some((line) => line.includes('attached to it, and no second process was started'))).toBe(true)
+
+    /* A second viewer is put on the same run: still one process. */
+    const second = new Watcher()
+    await w.runs.open(ask(dir, A), second)
+    expect(w.ptys.length).toBe(1)
+    expect(second.said[0]).toMatchObject({ opened: 'attached', background: { pid: 4242 } })
+  })
+
+  test('closing the view of a background session ends the view and nothing else, and says which of the two ended', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A)
+    w.elsewhere.push(background())
+    const viewer = new Watcher()
+    await w.runs.open(ask(dir, A), viewer)
+    await settle()
+    /* A person pressed Close on its row. What is hung up is this module's own pty — the only thing it has. */
+    expect(w.runs.end(A)).toBe(true)
+    await settle()
+    expect(w.ptys[0]!.killed).toBe(true)
+    expect(viewer.closed).toEqual({ code: CLOSED.ended, reason: 'this view closed; the session is still running in the background' })
+    /* The program still lists it: this module stopped nothing. */
+    expect(w.elsewhere.length).toBe(1)
+
+    /* When the session itself has gone, that is what is said. */
+    const later = new Watcher()
+    await w.runs.open(ask(dir, A), later)
+    await settle()
+    w.elsewhere.length = 0
+    w.ptys[1]!.ends(0)
+    await settle()
+    expect(later.closed).toEqual({ code: CLOSED.ended, reason: 'the background session ended (0)' })
+  })
+
+  test('one open in another terminal is not resumed: nothing is started, and the page is told where it is running and since when', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A, 'left open in a terminal')
+    w.elsewhere.push(interactive())
+    const viewer = new Watcher()
+    const refused = await w.runs.open(ask(dir, A), viewer)
+    expect(refused).toMatchObject({ code: CLOSED.elsewhere })
+    expect(w.ptys.length).toBe(0)
+    expect(w.runs.sessions()).toEqual([])
+    expect(viewer.said).toEqual([{ elsewhere: { kind: 'interactive', called: 'interactive', pid: 5151, cwd: '/somewhere/project', since, name: 'project-ea' }, session: A }])
+    /* Not attached to the place by an open that opened nothing. */
+    expect(listed(dir)).toEqual([])
+    /* Asked again, it is asked about again: never silently. */
+    expect(await w.runs.open(ask(dir, A), new Watcher())).toMatchObject({ code: CLOSED.elsewhere })
+    expect(w.ptys.length).toBe(0)
+  })
+
+  test('a copy is started only when a person said so, and the run says what it is a copy of for as long as it is on screen', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A)
+    w.elsewhere.push(interactive())
+    const viewer = new Watcher()
+    const run = (await w.runs.open({ ...ask(dir, A), copy: true }, viewer)) as Run
+    expect(isRun(run)).toBe(true)
+    expect(w.ptys[0]!.args).toEqual(['--resume', A])
+    expect(viewer.said[0]).toMatchObject({ opened: 'copy', copyOf: { kind: 'interactive', pid: 5151 } })
+    expect(w.logged.some((line) => line.includes('a person chose to open a copy here'))).toBe(true)
+    /* A viewer that arrives later is told the same. */
+    const second = new Watcher()
+    await w.runs.open(ask(dir, A), second)
+    expect(second.said[0]).toMatchObject({ opened: 'attached', copyOf: { pid: 5151 } })
+    expect(w.ptys.length).toBe(1)
+  })
+
+  test('the word for a copy is a word: it rides the opening frame as `copy: true` and nothing else, and never without a session', () => {
+    const frame = (more: Record<string, unknown>) => JSON.stringify({ ticket: 'T', projectPath: '/p', place: HERE, session: A, cols: 100, rows: 30, ...more })
+    expect(opening(frame({ copy: true }), 'T')).toMatchObject({ session: A, copy: true })
+    for (const not of ['yes', 1, 'true', { force: true }, ['--fork-session']]) expect(opening(frame({ copy: not }), 'T')).not.toHaveProperty('copy')
+    expect(opening(frame({ copy: true, session: null }), 'T')).not.toHaveProperty('copy')
+  })
+
+  test('with both a background session and another process on it, the background one is attached to — that starts nothing', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A)
+    w.elsewhere.push(interactive(), background())
+    await w.runs.open(ask(dir, A), new Watcher())
+    expect(w.ptys[0]!.args).toEqual(['attach', '11111111'])
+  })
+
+  test('another conversation running elsewhere is nothing to this one', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A)
+    w.elsewhere.push(interactive(B), background('33333333-3333-4333-8333-333333333333'))
+    await w.runs.open(ask(dir, A), new Watcher())
+    expect(w.ptys[0]!.args).toEqual(['--resume', A])
+  })
+
+  test('nothing here stops or signals the other process: the only thing ever started or ended is this module’s own pty', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A)
+    w.elsewhere.push(background(), interactive())
+    const killed: number[] = []
+    const real = process.kill
+    process.kill = ((pid: number) => {
+      killed.push(pid)
+      return true
+    }) as typeof process.kill
+    try {
+      await w.runs.open(ask(dir, A), new Watcher())
+      await settle()
+      w.runs.end(A)
+      w.runs.endAll()
+      await settle()
+    } finally {
+      process.kill = real
+    }
+    /* A stand-in pty has no pid to signal, and neither of the other processes' pids was ever given to `kill`. */
+    expect(killed.filter((pid) => Math.abs(pid) === 4242 || Math.abs(pid) === 5151)).toEqual([])
+    for (const pty of w.ptys) expect(pty.args.join(' ')).not.toMatch(/\b(stop|kill|rm|respawn)\b|--bg/)
+  })
+
+  test('a copy too old to be asked is told apart from "nothing is running": resumed as before, and it is said — on the terminal’s first line, to the page and in the log', async () => {
+    const dir = project()
+    const w = world({ lists: false })
+    w.records(dir, A)
+    /* Even with something running elsewhere, an old copy cannot say so. */
+    w.elsewhere.push(interactive())
+    const viewer = new Watcher()
+    const run = (await w.runs.open(ask(dir, A), viewer)) as Run
+    await settle()
+    expect(w.asked.count).toBe(0)
+    expect(w.ptys[0]!.args).toEqual(['--resume', A])
+    expect(run.unchecked).toBe('too-old')
+    expect(viewer.said[0]).toMatchObject({ opened: 'resumed', unchecked: 'too-old' })
+    expect(viewer.out).toContain('too old to say whether a conversation is already running somewhere else')
+    expect(viewer.out).toContain('resumed without checking')
+    expect(w.logged.some((line) => line.includes('resumed without asking whether it is running elsewhere'))).toBe(true)
+    expect(await w.runs.running('/fake/bin/claude')).toEqual({ known: false, why: 'too-old' })
+  })
+
+  test('a copy that has the commands and could not be asked is the same: resumed, and said to be unchecked', async () => {
+    const dir = project()
+    const w = world({ asking: 'fails' })
+    w.records(dir, A)
+    const viewer = new Watcher()
+    await w.runs.open(ask(dir, A), viewer)
+    await settle()
+    expect(w.ptys[0]!.args).toEqual(['--resume', A])
+    expect(viewer.said[0]).toMatchObject({ opened: 'resumed', unchecked: 'failed' })
+    expect(viewer.out).toContain('could not be asked whether this conversation is already running somewhere else')
+  })
+
+  test('a session that WAS asked about says nothing of the kind', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A)
+    const viewer = new Watcher()
+    await w.runs.open(ask(dir, A), viewer)
+    await settle()
+    expect(viewer.said[0]).not.toHaveProperty('unchecked')
+    expect(viewer.out).not.toContain('without checking')
+  })
+
+  test('this module’s own process, as the program lists it, is not "somewhere else"', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A)
+    await w.runs.open(ask(dir, A), new Watcher())
+    w.ptys[0]!.pid = 7777
+    const mine: Active = { ...interactive(), pid: 7777 }
+    expect(w.runs.others({ known: true, active: [mine] }, A)).toEqual({ background: null, open: null })
+    expect(w.runs.others({ known: true, active: [mine, interactive()] }, A).open?.pid).toBe(5151)
+    expect(w.runs.others({ known: false, why: 'too-old' }, A)).toEqual({ background: null, open: null })
   })
 })
