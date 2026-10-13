@@ -35,14 +35,118 @@ order parts were picked in does not matter.
 
 Opening the module on a place:
 
-- **no session there** — a new Claude Code session starts in the project's folder;
-- **exactly one** — it is resumed at once;
+- **no session there, and none anywhere in the project** — a new Claude Code session starts in the
+  project's folder;
+- **no session there, and the project has others** — the list, before anything is started (see
+  [A place with no session](#a-place-with-no-session-in-a-project-that-has-some));
+- **exactly one** — it is opened at once: resumed, or — when Claude Code is already running it somewhere
+  else — attached to or asked about (see [A session that is already
+  running](#a-session-that-is-already-running-somewhere-else));
 - **more than one** — a short list, in the terminal's own space, before anything is opened: each
   session's first prompt, when it was last active and whether it is running, plus *New session* and
   *Attach an existing session*. Arrows (or `j`/`k`) and Enter, a digit, or the pointer.
 
 Only sessions that are on this computer count towards that (see [What is shared between
 computers](#what-is-shared-between-computers-and-what-is-not)).
+
+### A place with no session, in a project that has some
+
+Work on an epic often starts in a plain terminal, on another kehikko, or before the parts were picked
+this way — and every combination of parts is a place of its own, so narrowing from the whole epic to
+one part used to start an empty conversation beside the one the person was just having. So a place
+with no session asks first, when Claude Code holds other sessions for the project's folder:
+
+> No session here yet. Start a new one, or carry on with one this project already has.
+
+- **New session** is the first row and where the keyboard starts: Enter, and a person who always wants
+  a new one has pressed one key.
+- Under it, laid out and not folded away, **every** session of the project — there is no number at
+  which the list stops — most likely wanted first: the ones another place of the *same epic* already
+  holds (other parts, another kehikko; marked *this epic*, with those places as the `title`), then the
+  rest by when each was last active. Each with its first prompt and when it was last active.
+- A row says when its session is running: on this module with what it is doing, *running in the
+  background*, or *open elsewhere* (next section). One the record lists and this computer does not
+  have is last, muted and unopenable, as everywhere.
+- **Choosing one makes it this place's session** and takes it from nowhere: a session may belong to
+  several places.
+- **Asked once per place.** A place that has a session opens it directly from then on.
+- **Nothing is started before the answer.** No empty session exists to be dealt with afterwards, and
+  walking on to another place leaves nothing behind.
+- The list is drawn where the terminal would be, which is empty at that moment. It adds no row and no
+  banner to anything.
+
+When the project has no other session there is nothing to choose from, and a new one starts as before.
+
+### A session that is already running somewhere else
+
+A session this module started is found among its own and gets a second viewer. One it did **not**
+start — a Claude Code background session, one left open in another terminal or in an editor — used to
+be `claude --resume`d regardless: a second process on the same conversation, with Remote Control left
+behind on the first, both appending to one history and neither seeing the other's turns, and not a
+word about it.
+
+Now Claude Code is asked what is running **before every resume** (`claude agents --json`), and the
+answer is never kept: a session can start or stop between two opens.
+
+| Claude Code says the session is… | what opening it here does |
+|---|---|
+| not running | `claude --resume <id>`, exactly as before |
+| running in the **background** | `claude attach <handle>` in this module's terminal: a view of the process that is already there. No second process, and Remote Control stays where it is. The corner says *background* |
+| open in **another process** with a terminal of its own | nothing is started. The place says where and since when, and puts two answers in words |
+| *(cannot be asked)* | `claude --resume <id>` as before — and it is said |
+
+**The question**, drawn where the terminal would be:
+
+> “tighten the methods” is already open in another Claude Code process on this computer: an
+> interactive session, in a terminal or an editor, process 82070, in /Users/…/thesis, started 17 min
+> ago. It cannot be shown here — only a background session can be attached to — and nothing has been
+> started.
+>
+> 1 **Leave it** — Nothing is started here, and the other process is not touched.
+> 2 **Open a copy anyway** — A second process on the same conversation. Remote Control stays with the
+> other one until /remote-control is run here, and the two do not see each other's turns.
+
+*Leave it* is first and where Enter lands: a question somebody did not expect should start nothing. It
+goes to the list. What a copy means is beside the word **before** it is chosen, and stays in the
+corner control afterwards (*copy*, with the sentence as its `title`). Coming back to the place asks
+Claude Code again.
+
+**Nothing here stops, signals or takes over a process this module did not start** — it may be
+mid-task. A view of a background session is this module's to close (*Close* on its row; also what
+happens when it is put away for being quiet, and when this server stops) and the session runs on: the
+strip then says *this view closed; the session is still running in the background*, and **Resume**
+attaches again.
+
+**A Claude Code too old for `agents --json` or `attach`** is told apart from "nothing is running".
+Such a copy resumes a session as it always did, and says so on the terminal's first line —
+
+> This Claude Code is too old to say whether a conversation is already running somewhere else (it has
+> no `agents --json` or no `attach`), so this one was resumed without checking. Update Claude Code to
+> have that checked.
+
+— and in the corner (*unchecked*). The same when a copy that has the commands could not be asked.
+
+Measured on the real 2.1.296, with a scratch config folder and a stand-in for the model API:
+
+- `claude agents --json` prints a JSON array, `[]` when nothing runs, in a tenth of a second and
+  without a terminal. Every folder's sessions are in it. An interactive one is `{ pid, cwd, kind:
+  "interactive", startedAt, sessionId, name, status }`; a background one has `kind: "background"`,
+  its short `id` and a `state` as well, and may lack `pid`, `name` and `status` just after it starts.
+  A stopped background session is not listed (`--all` would add it, and is not passed).
+- `claude attach` takes the short `id`. Given the full session id it answers `No job matching '…'`
+  and exits 1; given the id of an interactive session, the same. So an interactive session cannot be
+  attached to, and the handle passed is the one Claude Code itself printed.
+- While attached, one process holds the conversation: the `attach` client is not in the list. Hanging
+  the client up (which is all this module ever does to it) left the session's own process running.
+  Ctrl+Z in an attached session ends the client with exit 0; `←` at an empty prompt shows Claude
+  Code's own agents view, as it does in any terminal.
+- `claude --bg --resume <id>` of a running session starts a copy and says so (`note: session … is
+  open in another Claude Code process, so this started a copy as …`). This module never runs it: it
+  would start something in the background, which nobody asked a terminal on a canvas to do.
+- **Read by this server directly, the program's answers arrive cut short**: `claude --help` came as
+  its first 8190 bytes of 22116 — the program exits without waiting for a socket to drain, and Node
+  hands a child a socket. The "Commands:" section is last in the help, and thirty running sessions
+  are longer than that. So both are read through a real pipe (`answered` in `program.ts`), whole.
 
 Nothing is remembered as a default. One narrower thing is: which session *this page* was showing for a
 place, for as long as its tab lives — so a page that reloads (the plumbing does that by itself when its
@@ -198,7 +302,10 @@ switch kehikko. A line filed under the session's epic is the most that exists.
 - It never passes a flag that widens what Claude may do. A new session is `claude --session-id <uuid>`
   and a resumed one `claude --resume <uuid>`, in the project's folder — followed, for a copy that can
   take it, by `--settings` and the hooks above, which is the whole command. The settings hold hooks and
-  nothing else: nothing about permissions, models or tools.
+  nothing else: nothing about permissions, models or tools. The only other command lines there are:
+  `claude --help`, once per binary; `claude agents --json`, which reads; and `claude attach <handle>`,
+  with the handle Claude Code itself printed, checked to be one word that cannot be a flag.
+- It never stops, deletes, restarts or backgrounds anything: no `stop`, `rm`, `respawn` or `--bg`.
 - It never reads or shows a transcript beyond the first line of the first prompt, used as a label.
 - It never reads the screen to decide anything, and never reads what a hook is handed.
 
@@ -329,7 +436,7 @@ itself honours) — the list of a project's sessions, their first prompt, and wh
 | `POST /api/detach` | take a session off a place. Ticketed |
 | `GET /api/feed` | server-sent events: each running session's state as it changes, and the notices for a framed page to pass on. Ticketed (in the query: an `EventSource` sends no header) |
 | `POST /api/state?event&session` | a session's own program saying what it is doing. Not the page's: it must carry that session's secret, reads no body, and answers 204 or one 403 that does not say why |
-| `POST /mcp` | one tool, `sessions { projectPath, epic? }`: the places of a project and their sessions, `missing: true` on one that is not on this computer, and `state` and `since` on a running one that has said what it is doing (`readOnlyHint: true`). The door asks to be registered as `kehikko-claude` (`mcp.as`) |
+| `POST /mcp` | one tool, `sessions { projectPath, epic?, place? }`: the places of a project and their sessions, `missing: true` on one that is not on this computer, `state` and `since` on a running one that has said what it is doing, and `runningElsewhere` on one Claude Code runs in a process this module did not start. With `place: { epic, parts, kehikko }` it answers in words what opening the module there does — for a place with no session: *this place has no session yet*, and the project's sessions in the order they are offered (`readOnlyHint: true`). The door asks to be registered as `kehikko-claude` (`mcp.as`) |
 
 An agent host that reads `mcp.as` (protocol 1.3.0) names the server `kehikko-claude`, so the tool is
 `mcp__kehikko-claude__sessions`; the id alone would have derived `claude`.
@@ -376,7 +483,8 @@ things. The socket refuses the installer outright while a usable copy is install
 Everything that is specific to Claude Code is `program.ts`, one value of one interface: where the
 binary is, whether a copy is usable, the arguments that start and resume a session, whether a started
 session exists yet and under which id, which sessions the program holds for a folder, how it is
-installed, and how it is made to say what it is doing and what each thing it says means. A module for another agent is that file again plus a manifest.
+installed, how it is made to say what it is doing and what each thing it says means, and what it is
+already running elsewhere and how one of those is opened without starting another. A module for another agent is that file again plus a manifest.
 
 ## Layout
 
@@ -391,6 +499,7 @@ installed, and how it is made to say what it is doing and what each thing it say
 | `doors.ts` | the HTTP doors and the MCP tool |
 | `src/view/places.ts` | what the page does when the canvas names a place. Pure |
 | `src/view/chooser.tsx` | the list |
+| `src/view/elsewhere.tsx` | the question, when a session is open in another process |
 | `src/view/terminal-view.tsx` | xterm, and a viewer's socket |
 | `src/app.tsx` | the state, and what is drawn |
 
@@ -405,8 +514,10 @@ bunx kehikot-check-parts .
 The tests give themselves a machine of their own (`test/setup.ts`): a scratch home, a scratch
 `CLAUDE_CONFIG_DIR`, a scratch registry and a bare PATH, so none of them can read real sessions, find
 a real binary or write a registration. `test/stand-in/claude` is a script that takes the flags,
-echoes what is typed, keeps a record where Claude Code keeps one, and runs the hooks it is given in the
-order the real program was measured to (`/ask`, `/later`, `/work`, `/interrupt`, `/fail`); `test/stand-in/install.sh` is the
+echoes what is typed, keeps a record where Claude Code keeps one, runs the hooks it is given in the
+order the real program was measured to (`/ask`, `/later`, `/work`, `/interrupt`, `/fail`), and says
+what is running as the real one was measured to (`agents --json`, `--bg --resume`, `attach` by the
+short id only; `STANDIN_NOAGENTS=1` is a copy from before those); `test/stand-in/install.sh` is the
 installer's stand-in, named to a running server with `KEHIKOT_CLAUDE_INSTALL_LINE`. The pty itself is
 not under `bun test` — `node-pty` does not run under bun — and is verified in a browser.
 
