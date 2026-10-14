@@ -3,7 +3,7 @@ import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpath
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { WELL_KNOWN } from 'kehikot-module-protocol'
+import { WELL_KNOWN, toolEffect } from 'kehikot-module-protocol'
 
 import { MANIFEST, TICKET, answer, listing, lookedIn, ordered, stream, type Listing } from '../doors.ts'
 import { Runs, TELL_ENV, headless, theRuns, type Notice, type Pty, type Run, type Stated } from '../live.ts'
@@ -190,6 +190,18 @@ describe('the MCP door', () => {
     const tools = (await rpc('tools/list')).result?.tools ?? []
     expect(tools.map((one) => one.name)).toEqual(['sessions'])
     expect(tools[0]?.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false })
+  })
+
+  test('it takes the project as \`project\`, advertises no other name, and still reads \`projectPath\`', async () => {
+    const tools = ((await rpc('tools/list')).result?.tools ?? []) as unknown as { annotations?: { readOnlyHint?: boolean }; inputSchema: { properties: Record<string, unknown>; required: string[] } }[]
+    expect(toolEffect(tools[0]!)).toBe('reads')
+    expect(Object.keys(tools[0]!.inputSchema.properties)).toEqual(['project', 'epic', 'place'])
+    expect(tools[0]!.inputSchema.required).toEqual(['project'])
+    const now = await rpc('tools/call', { name: 'sessions', arguments: { project, epic: 'thesis' } })
+    const before = await rpc('tools/call', { name: 'sessions', arguments: { projectPath: project, epic: 'thesis' } })
+    expect([now.result?.isError, before.result?.isError]).toEqual([undefined, undefined])
+    expect(before.result?.content?.[0]?.text).toBe(now.result?.content?.[0]?.text)
+    expect(now.result?.content?.[0]?.text).toContain(B)
   })
 
   test('lists the places of a project and their sessions', async () => {

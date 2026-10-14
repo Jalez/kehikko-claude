@@ -1,3 +1,4 @@
+import { doorContext } from 'kehikot-module-protocol'
 import { establishBuild, refuseTicket, sameTicket, type Reply, type Stream } from 'kehikot-module-protocol/serve'
 
 import { TICKET, elsewhereOf, theRuns, type Elsewhere, type Run, type Runs } from './live.ts'
@@ -290,7 +291,7 @@ function tools() {
         + 'kind `background` is attached to when it is opened here (no second process), anything else is open in a '
         + 'terminal or an editor and its person is asked before a copy is started. '
         + `Read from ${WHERE}. Give the absolute project directory as `
-        + 'projectPath, and an epic slug to see only that epic’s places. Give `place` — the epic, the picked parts and '
+        + 'project, and an epic slug to see only that epic’s places. Give `place` — the epic, the picked parts and '
         + 'the kehikko — to be told in words what opening the module there will do: a place with a session opens it; a '
         + 'place with none starts a new one at once only when the project has no other session, and otherwise asks its '
         + 'person which to carry on with, and the answer lists those sessions in the order they are offered. Reads '
@@ -298,7 +299,7 @@ function tools() {
       inputSchema: {
         type: 'object',
         properties: {
-          projectPath: { type: 'string', description: 'The absolute directory of the project.' },
+          project: { type: 'string', description: 'The absolute directory of the project.' },
           epic: { type: 'string', description: 'An epic’s slug, to list only its places.' },
           place: {
             type: 'object',
@@ -310,7 +311,7 @@ function tools() {
             },
           },
         },
-        required: ['projectPath'],
+        required: ['project'],
       },
       annotations: { title: 'Sessions by place', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
@@ -336,11 +337,13 @@ function placeAsked(raw: unknown): Place | string {
 
 async function call(name: string, args: Record<string, unknown>): Promise<string> {
   if (name !== 'sessions') throw new Error(`no tool "${name.slice(0, 60)}" here`)
-  const root = projectRoot(typeof args.projectPath === 'string' ? args.projectPath : null)
+  /* `project` and `epic`, or `projectPath`, the name this door used before the protocol agreed one. */
+  const named = doorContext(args)
+  const root = projectRoot(named.project)
   if (!root.ok) throw new Error(root.error)
   const read = readPlaces(root.value)
   if (!read.ok) throw new Error(read.error)
-  const epic = typeof args.epic === 'string' && args.epic ? args.epic : null
+  const epic = named.epic
   const recorded = await PROGRAM.sessions(root.value)
   const held = new Map(recorded.map((one) => [one.id, one]))
   const runs = theRuns()

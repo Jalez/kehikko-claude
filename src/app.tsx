@@ -72,10 +72,27 @@ export interface Hosted {
   header(items: HeaderItemInput[]): void
   /** Where the page puts what takes a press. */
   presses: MutableRefObject<Press | null>
+  /**
+   * Whether a host has ever pressed one of the header items: such a host draws the header, and
+   * the corner control — which is only for a page whose host draws none — is gone for good.
+   */
+  drawn?: boolean
+}
+
+const DRAWN_KEY = 'kehikot.claude.header-drawn'
+
+/** Whether a host has ever pressed a header item on this page's origin. */
+function headerDrawn(): boolean {
+  try {
+    return window.localStorage.getItem(DRAWN_KEY) === 'yes'
+  } catch {
+    return false
+  }
 }
 
 export function App() {
   const presses = useRef<Press | null>(null)
+  const [drawn, setDrawn] = useState(headerDrawn)
   const host = useHost(ID, {
     /* Answered at once and always no: a terminal holds a session, not a
        document with anchors, and silence would make every reference pointing
@@ -83,7 +100,16 @@ export function App() {
     onGoto: (_goto, answer) => {
       answer(false, 'A terminal holds a session, not a document: there is nothing here to walk to.')
     },
-    onPress: (press) => (presses.current ? presses.current(press) : 'There is no session here to go to yet.'),
+    onPress: (press) => {
+      /* Only a host that draws the header sends a press, so from the first one on the corner control is not needed. */
+      try {
+        window.localStorage.setItem(DRAWN_KEY, 'yes')
+      } catch {
+        /* Gone for this page's life all the same. */
+      }
+      setDrawn(true)
+      return presses.current ? presses.current(press) : 'There is no session here to go to yet.'
+    },
   })
   /* The parts as one steady value: the same array until the list changes by
      value, so the place below moves when a part is picked and not every time
@@ -102,8 +128,8 @@ export function App() {
   const cover = coverFor({ where, projectPath, server })
   const { request, header } = host
   const hosted = useMemo<Hosted | null>(
-    () => (where === 'hosted' ? { emit: (extension, payload) => request('events.emit', { extension, payload }), header, presses } : null),
-    [where, request, header],
+    () => (where === 'hosted' ? { emit: (extension, payload) => request('events.emit', { extension, payload }), header, presses, drawn } : null),
+    [where, request, header, drawn],
   )
   return <Sessions theme={host.theme} at={at} cover={cover} hosted={hosted} canvasEpic={epic} />
 }
@@ -173,8 +199,9 @@ export function App() {
  *
  * The same sessions are declared as a Go item for the container's header, so
  * a host that draws headers offers them in its own menu. The corner control
- * stays: a page cannot tell whether its host draws headers, and without it a
- * host that does not would leave no way to the list.
+ * stays until a host has pressed one of those items — a page cannot tell
+ * whether its host draws headers, and without it a host that does not would
+ * leave no way to the list — and is then gone for good (`headerDrawn`).
  */
 export function Sessions({
   theme,
@@ -603,7 +630,7 @@ export function Sessions({
 
       {/* The one control, in the terminal's own corner: which session this is,
           and the way to the others. Over the terminal, so it costs no row. */}
-      {terminal && !ended && (
+      {terminal && !ended && !hosted?.drawn && (
         <button
           type="button"
           data-sessions

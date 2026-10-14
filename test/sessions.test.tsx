@@ -773,6 +773,17 @@ describe('the sessions, declared for the container’s header', () => {
     expect(headerItemsSchema.safeParse(last(s)).success).toBe(true)
   })
 
+  test('the corner control is there until a host has pressed a header item, and gone for good after', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'one' })] })
+    const { container, rerender } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} canvasEpic="thesis" />)
+    await flush()
+    expect(container.querySelector('[data-sessions]')).not.toBeNull()
+    s.hosted.drawn = true
+    rerender(<Sessions theme="dark" at={at()} api={s.api} hosted={{ ...s.hosted }} canvasEpic="thesis" />)
+    await flush()
+    expect(container.querySelector('[data-sessions]')).toBeNull()
+  })
+
   test('a press opens that session, a new one, or the list — and refuses what is not this place’s', async () => {
     const s = told({ [KEY()]: [row('a', { label: 'one' }), row('b', { label: 'two' })] })
     const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
