@@ -88,6 +88,44 @@ describe('the report a session’s program makes', () => {
     expect(sent).not.toContain('other')
   })
 
+  test('on Stop it counts the background tasks the program lists, and sends the number and nothing else', async () => {
+    const stop = (tasks: unknown[], extra: Record<string, unknown> = {}) =>
+      JSON.stringify({
+        session_id: 'other',
+        hook_event_name: 'Stop',
+        stop_hook_active: false,
+        last_assistant_message: 'a server is up: \"background_tasks\":[{\"status\":\"running\"}] and that is my own sentence',
+        background_tasks: tasks,
+        session_crons: [],
+        ...extra,
+      })
+    const task = (command: string) => ({ id: 'b1', type: 'bash', status: 'running', description: 'dev server', command })
+    heard.length = 0
+    await ran('/bin/sh', [TELL, 'Stop'], env(), stop([]))
+    await ran('/bin/sh', [TELL, 'Stop'], env(), stop([task('npm run dev'), task('echo \"status\":\"running\"')]))
+    await ran('/bin/sh', [TELL, 'Stop'], env(), stop([task('x')], { session_crons: [{ id: 'c', schedule: '* * * * *', recurring: true, prompt: 'p' }] }))
+    expect(heard.map((one) => one.url)).toEqual([
+      `/api/state?event=Stop&session=${SESSION}&background=0`,
+      `/api/state?event=Stop&session=${SESSION}&background=2`,
+      `/api/state?event=Stop&session=${SESSION}&background=1`,
+    ])
+    const sent = JSON.stringify(heard)
+    expect(sent).not.toContain('npm run dev')
+    expect(sent).not.toContain('my own sentence')
+  })
+
+  test('another event, or a payload with no such list, sends no count', async () => {
+    heard.length = 0
+    await ran('/bin/sh', [TELL, 'UserPromptSubmit'], env(), JSON.stringify({ background_tasks: [{ status: 'running' }] }))
+    await ran('/bin/sh', [TELL, 'Stop'], env(), 'not json at all')
+    await ran('/bin/sh', [TELL, 'Stop'], env(), '')
+    expect(heard.map((one) => one.url)).toEqual([
+      `/api/state?event=UserPromptSubmit&session=${SESSION}`,
+      `/api/state?event=Stop&session=${SESSION}`,
+      `/api/state?event=Stop&session=${SESSION}`,
+    ])
+  })
+
   test('with nobody listening it is silence and exit 0, at once', async () => {
     const closed = createServer()
     await new Promise<void>((done) => closed.listen(0, '127.0.0.1', done))

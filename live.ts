@@ -477,6 +477,12 @@ export interface Run {
   /** How many notices it may still raise, and when that was last true (see `NOTICES_AT_ONCE`). */
   notices: { left: number; at: number }
   /**
+   * How many background tasks the program said were still running when its turn last ended: the
+   * number from its `Stop` hook and nothing else of it. Above zero, a finished turn is not a finished
+   * session, and it is not put away (see `rest`). Zero when it said none, or said nothing.
+   */
+  background: number
+  /**
    * The background session this run is a VIEW of: the pty holds `claude
    * attach`, and the session's own process is another one, started elsewhere.
    * Null for a session this module started itself.
@@ -790,6 +796,7 @@ export class Runs {
       stateSince: this.now(),
       secret,
       notices: { left: NOTICES_AT_ONCE, at: this.now() },
+      background: 0,
       joined,
       copyOf,
       unchecked,
@@ -968,10 +975,13 @@ export class Runs {
    * the caller answers every such thing the same way, so that what is running
    * cannot be learned by asking.
    */
-  heard(session: string, secret: string | null, event: string): boolean {
+  heard(session: string, secret: string | null, event: string, background: number | null = null): boolean {
     const run = this.runs.get(session)
     if (!run || run.what !== 'session' || run.ended || !run.secret || !sameTicket(secret, run.secret)) return false
     const state = this.program.signal(event)
+    /* The count of background tasks still running, which only a turn's end carries (`Stop`): a whole
+       number the hook script counted, bounded here again. Any other report leaves it as it was. */
+    if (event === 'Stop' && state) run.background = background !== null && Number.isSafeInteger(background) && background > 0 ? Math.min(background, 999) : 0
     if (state) this.become(run, state)
     return true
   }
@@ -1092,6 +1102,10 @@ export class Runs {
         this.become(run, null)
       }
       if (run.looking.size > 0 || run.state === 'working' || run.state === 'needs-you') continue
+      /* A turn that ended with background work still running (a server, a watcher, a build) is not a
+         session that is done: putting it away would kill that work. It goes on being kept until the
+         program says otherwise — its next turn ends with the count — or a person ends it. */
+      if (run.background > 0) continue
       const finished = run.state === 'finished'
       const quietFor = this.now() - (finished ? Math.max(run.stateSince, run.attendedAt) : run.stirredAt)
       if (quietFor < this.quiet) continue
@@ -1207,6 +1221,7 @@ export class Runs {
       stateSince: this.now(),
       secret: null,
       notices: { left: NOTICES_AT_ONCE, at: this.now() },
+      background: 0,
       joined: null,
       copyOf: null,
       unchecked: null,
