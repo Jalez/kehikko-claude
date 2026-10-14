@@ -165,8 +165,18 @@ describe('a notice, as the line a panel draws', () => {
   const notice = { state: 'finished' as const, label: 'tighten the methods section', epic: 'thesis', parts: ['Methods', 'Results'], kehikko: 'writing' }
 
   test('says which of the two it is, which session, and where — in a person’s words', () => {
-    expect(noticeLine(notice, null)).toEqual({ epic: 'thesis', level: 'done', message: 'Finished: “tighten the methods section” — thesis · Methods + Results · writing' })
-    expect(noticeLine({ ...notice, state: 'needs-you' }, null)).toEqual({ epic: 'thesis', level: 'attention', message: 'Waiting for you: “tighten the methods section” — thesis · Methods + Results · writing' })
+    expect(noticeLine(notice, null)).toEqual({ epic: 'thesis', level: 'done', message: 'Finished: “tighten the methods section” — thesis · Methods + Results · writing', place: { epic: 'thesis' } })
+    expect(noticeLine({ ...notice, state: 'needs-you' }, null)).toEqual({ epic: 'thesis', level: 'attention', message: 'Waiting for you: “tighten the methods section” — thesis · Methods + Results · writing', place: { epic: 'thesis' } })
+  })
+
+  test('says where a press goes: the epic, the parts’ ids and the kehikko’s key (protocol 1.4.0)', () => {
+    const placed = { ...notice, partIds: ['methods', 'results'], kehikkoKey: 'writing-ab' }
+    expect(noticeLine(placed, null)?.place).toEqual({ epic: 'thesis', parts: ['methods', 'results'], kehikko: 'writing-ab' })
+    /* No key: the place names none. More parts than a place may hold: the epic alone, not a cut-down selection. */
+    expect(noticeLine({ ...placed, kehikkoKey: null }, null)?.place).toEqual({ epic: 'thesis', parts: ['methods', 'results'] })
+    expect(noticeLine({ ...placed, partIds: Array.from({ length: 17 }, (_, i) => `p${i}`) }, null)?.place).toEqual({ epic: 'thesis', kehikko: 'writing-ab' })
+    /* A session with no epic of its own has no place to point at, only the canvas's epic to be filed under. */
+    expect(noticeLine({ ...placed, epic: null }, 'another')?.place).toBeUndefined()
   })
 
   test('names only what there is: no parts picked, no kehikko, no prompt yet', () => {

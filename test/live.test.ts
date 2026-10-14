@@ -994,6 +994,42 @@ describe('what the program says', () => {
     expect(run.state).toBe('finished')
   })
 
+  test('a turn that ended with background work still running is not put away, however long; one that ended with none is', async () => {
+    const { run, viewer, w, secret } = await told()
+    w.runs.look(run, viewer, false)
+    w.runs.heard(B, secret, 'UserPromptSubmit')
+    w.runs.heard(B, secret, 'Stop', 2)
+    expect(run.state).toBe('finished')
+    expect(run.background).toBe(2)
+    w.later(60 * 60_000)
+    expect(w.runs.rest()).toEqual([])
+    w.later(24 * 60 * 60_000)
+    expect(w.runs.rest()).toEqual([])
+    /* A later turn that ends with none says so, and the clock runs as it always did. */
+    w.runs.heard(B, secret, 'UserPromptSubmit')
+    w.runs.heard(B, secret, 'Stop', 0)
+    expect(run.background).toBe(0)
+    w.later(31 * 60_000)
+    expect(w.runs.rest()).toEqual([run])
+  })
+
+  test('a count is a number from this program’s own hook and nothing else: out of range or absent is none', async () => {
+    const { run, w, secret } = await told()
+    w.runs.heard(B, secret, 'Stop', 5)
+    expect(run.background).toBe(5)
+    w.runs.heard(B, secret, 'Stop', 100_000)
+    expect(run.background).toBe(999)
+    w.runs.heard(B, secret, 'Stop', -3)
+    expect(run.background).toBe(0)
+    w.runs.heard(B, secret, 'Stop', 4)
+    w.runs.heard(B, secret, 'Stop')
+    expect(run.background).toBe(0)
+    /* Another event does not carry one, and leaves what was known alone. */
+    w.runs.heard(B, secret, 'Stop', 3)
+    w.runs.heard(B, secret, 'PostToolUse', 9)
+    expect(run.background).toBe(3)
+  })
+
   test('working, and nothing printed for two minutes: the turn ended without a word, and nothing is known again', async () => {
     const { run, hear, w } = await told()
     w.ptys[0]!.says('thinking\r\n')
@@ -1041,7 +1077,7 @@ describe('telling a person who is not looking', () => {
     w.later(60_000)
     hear('Stop')
     expect(feed.got).toEqual([
-      { seq: 1, session: B, state: 'finished', label: 'tighten the methods section', projectPath: dir, epic: 'thesis', parts: ['Methods', 'Results'], kehikko: 'writing', at: run.stateSince },
+      { seq: 1, session: B, state: 'finished', label: 'tighten the methods section', projectPath: dir, epic: 'thesis', parts: ['Methods', 'Results'], kehikko: 'writing', partIds: ['methods', 'results'], kehikkoKey: '4072c9e5', at: run.stateSince },
     ])
     /* Reported again, as a program that retries a hook would: not a change, and not said again. */
     hear('Stop')

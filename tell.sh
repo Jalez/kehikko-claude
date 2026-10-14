@@ -11,9 +11,13 @@
 #
 #   - It says the EVENT'S NAME, which is this script's own argument, and the
 #     SESSION, which this module put in the environment when it started the
-#     pty. Nothing the program supplies is carried, read or looked at: a hook
-#     is handed the prompt, the tool's input and the last answer on its
-#     standard input, and this never reads it.
+#     pty. Of what the program supplies on standard input — the prompt, the
+#     tool's input, the last answer — nothing is carried, and nothing is read
+#     but one thing at one moment: on `Stop`, how many background tasks the
+#     program says are still running. That is counted here, from the
+#     `background_tasks` list of the payload (the tasks that are running or
+#     pending: no other kind is listed), and only the NUMBER, up to 99, leaves
+#     this script. No word of the payload is sent, stored or shown.
 #   - Nothing is interpolated into a command. The three values come from this
 #     module's own environment, each is checked for its exact spelling before
 #     it is used, and the secret never appears on a command line: it goes to
@@ -46,8 +50,35 @@ case $session in '' | *[!0-9a-f-]*) exit 0 ;; esac
 curl=/usr/bin/curl
 [ -x "$curl" ] || exit 0
 
+# On Stop only: how many background tasks are still running, as a number. The payload is one line of
+# JSON; its `background_tasks` array is followed by `session_crons`, and every task in it carries
+# exactly one "status" of its own (strings inside it are escaped, so a quoted `"status":"` is only ever
+# a real key). Anything unclear is no count, which is what a turn's end meant before this was asked.
+background=
+if [ "$event" = Stop ] && [ ! -t 0 ]; then
+  grep=/usr/bin/grep
+  wc=/usr/bin/wc
+  if [ -x "$grep" ] && [ -x "$wc" ]; then
+    body=$(/usr/bin/head -c 262144 2>/dev/null | /usr/bin/tr -d '\n\r')
+    case $body in
+      *'"background_tasks":'*)
+        rest=${body##*'"background_tasks":'}
+        tasks=${rest%%,\"session_crons\"*}
+        n=$(printf '%s' "$tasks" | "$grep" -o '"status": *"' | "$wc" -l)
+        n=$((n + 0)) 2>/dev/null || n=
+        if [ -n "$n" ]; then
+          [ "$n" -gt 99 ] && n=99
+          background=$n
+        fi
+        ;;
+    esac
+  fi
+fi
+extra=
+[ -n "$background" ] && extra="&background=$background"
+
 printf 'header = "x-module-ticket: %s"\n' "$secret" |
   "$curl" -q --config - --silent --max-time 2 --connect-timeout 1 --noproxy '*' --output /dev/null \
-    --request POST "http://127.0.0.1:$port/api/state?event=$event&session=$session" >/dev/null 2>&1
+    --request POST "http://127.0.0.1:$port/api/state?event=$event&session=$session$extra" >/dev/null 2>&1
 
 exit 0

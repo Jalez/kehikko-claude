@@ -90,6 +90,16 @@ function headerDrawn(): boolean {
   }
 }
 
+/**
+ * Whether the host draws this module's header, so that the module's own corner control is not needed
+ * (protocol 1.4.0, docs/header.md). The greeting's `header` when the host said: `true` draws none,
+ * `false` draws it, whatever an earlier press proved on this origin. From a host that did not say
+ * (`null`), a press having arrived is the proof, as before.
+ */
+export function hostDrawsHeader(said: boolean | null, pressed: boolean): boolean {
+  return said === null ? pressed : said
+}
+
 export function App() {
   const presses = useRef<Press | null>(null)
   const [drawn, setDrawn] = useState(headerDrawn)
@@ -126,10 +136,13 @@ export function App() {
   )
   const server = useServerStanding()
   const cover = coverFor({ where, projectPath, server })
-  const { request, header } = host
+  const { request, header, drawsHeader } = host
+  /* The greeting's word when there is one (protocol 1.4.0): true draws no control of our own, false does.
+     From a host that did not say, the first press proves it draws the header, as before. */
+  const hostDraws = hostDrawsHeader(drawsHeader, drawn)
   const hosted = useMemo<Hosted | null>(
-    () => (where === 'hosted' ? { emit: (extension, payload) => request('events.emit', { extension, payload }), header, presses, drawn } : null),
-    [where, request, header, drawn],
+    () => (where === 'hosted' ? { emit: (extension, payload) => request('events.emit', { extension, payload }), header, presses, drawn: hostDraws } : null),
+    [where, request, header, hostDraws],
   )
   return <Sessions theme={host.theme} at={at} cover={cover} hosted={hosted} canvasEpic={epic} />
 }
@@ -468,6 +481,11 @@ export function Sessions({
    * it says nothing about agents, so none can open a session through it.
    */
   const offered = at && here && here.program.found && !here.program.lacks && !installing ? here.sessions.filter((one) => !one.missing).slice(0, 60) : null
+  const here_label = (() => {
+    if (!view || !label) return 'Sessions'
+    const text = `Sessions · ${mark ? `${mark.glyph} ` : ''}${label}${how ? ` · ${how.word}` : ''}`
+    return text.length > 56 ? `${text.slice(0, 55).trimEnd()}…` : text
+  })()
   const items = useMemo<HeaderItemInput[]>(() => {
     if (!offered) return []
     const worded = (row: (typeof offered)[number]) => {
@@ -478,12 +496,13 @@ export function Sessions({
       {
         kind: 'go',
         id: 'sessions',
-        label: 'Sessions',
+        /* The corner control's job when the host draws the header and ours is gone: which session is on screen. */
+        label: here_label,
         options: [...offered.map((row) => ({ id: row.id, label: worded(row) })), { id: 'new', label: 'New session' }, { id: 'list', label: 'All sessions…' }],
       },
     ]
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [JSON.stringify(offered?.map((row) => [row.id, row.label, row.state ?? ''])), labels])
+  }, [JSON.stringify(offered?.map((row) => [row.id, row.label, row.state ?? ''])), labels, here_label])
   useEffect(() => {
     hosted?.header(items)
   }, [hosted, items])
@@ -595,7 +614,8 @@ export function Sessions({
         </div>
       )}
 
-      <div className="min-h-0 flex-1" hidden={!terminal}>
+      <div className="flex min-h-0 flex-1" hidden={!terminal}>
+        <div className="relative h-full min-w-0 flex-1">
         {views.map((one) => {
           const shown = terminal && one.n === view?.n
           return (
@@ -626,33 +646,37 @@ export function Sessions({
             </div>
           )
         })}
-      </div>
-
-      {/* The one control, in the terminal's own corner: which session this is,
-          and the way to the others. Over the terminal, so it costs no row. */}
-      {terminal && !ended && !hosted?.drawn && (
-        <button
-          type="button"
-          data-sessions
-          aria-label={`Sessions — ${label}${mark ? ` (${mark.word})` : ''}${how ? ` (${how.word})` : ''}`}
-          title={`${doing?.state ? `Sessions for this place — this one: ${since(doing.state, doing.since, Date.now())}` : 'Sessions for this place'}${how ? `. ${how.means}` : ''}`}
-          data-state={doing?.state ?? undefined}
-          data-how={how?.word}
-          className="bg-background/70 text-muted-foreground hover:text-foreground hover:bg-background absolute top-1 right-4 z-10 max-w-[60%] truncate rounded border px-1.5 py-0.5 font-mono text-[10px] opacity-60 backdrop-blur-sm hover:opacity-100 focus-visible:opacity-100"
-          onClick={() => {
-            setAsking(true)
-            setAgain((n) => n + 1)
-          }}
-        >
-          {mark ? (
-            <span className={`${mark.colour} mr-1`} aria-hidden>
-              {mark.glyph}
+        </div>
+        {/* The one control, in a gutter of its own beside the terminal: it takes columns and no row, and
+            covers none of what the terminal prints. Which session this is is its title; the state is its
+            glyph. Drawn only when the host does not draw the header (`drawsHeader`). */}
+        {terminal && !ended && !hosted?.drawn && (
+          <button
+            type="button"
+            data-sessions
+            aria-label={`Sessions — ${label}${mark ? ` (${mark.word})` : ''}${how ? ` (${how.word})` : ''}`}
+            title={`${doing?.state ? `Sessions for this place — this one: ${since(doing.state, doing.since, Date.now())}` : 'Sessions for this place'}${how ? `. ${how.means}` : ''}`}
+            data-state={doing?.state ?? undefined}
+            data-how={how?.word}
+            className="text-muted-foreground hover:text-foreground hover:bg-accent flex w-5 shrink-0 flex-col items-center gap-1 border-l pt-1 font-mono text-[10px] opacity-70 hover:opacity-100 focus-visible:opacity-100"
+            onClick={() => {
+              setAsking(true)
+              setAgain((n) => n + 1)
+            }}
+          >
+            {mark ? (
+              <span className={mark.colour} aria-hidden>
+                {mark.glyph}
+              </span>
+            ) : null}
+            <span className="max-h-[70%] min-h-0 truncate [writing-mode:vertical-rl]">
+              {label}
+              {how ? ` · ${how.word}` : ''}
+              {' ▾'}
             </span>
-          ) : null}
-          {label}
-          {how ? ` · ${how.word}` : ''} ▾
-        </button>
-      )}
+          </button>
+        )}
+      </div>
 
       {cover && (view || installing) && <Cover strip state={cover} name={NAME} onRetry={knock} />}
 

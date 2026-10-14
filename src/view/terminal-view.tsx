@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { letGo } from './let-go.ts'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
@@ -263,15 +264,26 @@ export function TerminalView({
     resized.observe(node)
 
     /* Already laid out when this mounted: it has its size now and should not
-       wait for an observation that may not come. */
-    if (usable()) connect()
+       wait for an observation that may not come.
+
+       One turn later, and not on this line: under StrictMode React runs this effect, its cleanup and
+       the effect again before anything else gets a turn. Connecting here opened a socket for the
+       first of those and closed it still connecting, which the browser logged as an error on every
+       load ("WebSocket is closed before the connection is established"). The cleanup cancels this,
+       so the view that stays is the only one that opens a socket (as in kehikot.terminal). Nothing
+       typed is lost to the wait: `waiting` holds it, and a keystroke connects by itself. */
+    const soon = setTimeout(() => {
+      if (usable()) connect()
+    }, 0)
 
     return () => {
       left = true
+      clearTimeout(soon)
       resized.disconnect()
       typing.dispose()
-      /* The viewer leaves. The session, on the server, is not touched. */
-      socket?.close()
+      /* The viewer leaves. The session, on the server, is not touched. A socket still connecting is
+         let go of rather than closed (`let-go.ts`): closing it is what the browser logs as a failure. */
+      if (socket) letGo(socket)
       line.current = null
       terminal.dispose()
       term.current = null

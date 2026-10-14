@@ -225,9 +225,9 @@ export function placeWords(at: Pick<Notice, 'epic' | 'parts' | 'kehikko'>): stri
  * and nothing about who is speaking: the panel says that itself.
  */
 export function noticeLine(
-  notice: Pick<Notice, 'state' | 'label' | 'epic' | 'parts' | 'kehikko'>,
+  notice: Pick<Notice, 'state' | 'label' | 'epic' | 'parts' | 'kehikko' | 'partIds' | 'kehikkoKey'>,
   canvasEpic: string | null,
-): { epic: string; message: string; level: 'attention' | 'done' } | null {
+): { epic: string; message: string; level: 'attention' | 'done'; place?: { epic: string; parts?: string[]; kehikko?: string } } | null {
   const epic = notice.epic ?? canvasEpic
   if (!epic) return null
   const what = notice.state === 'finished' ? 'Finished' : 'Waiting for you'
@@ -237,6 +237,18 @@ export function noticeLine(
     epic,
     message: `${what}: ${which}${where ? ` — ${where}` : ''}`,
     level: notice.state === 'finished' ? 'done' : 'attention',
+    /* Where a press on this line goes (protocol 1.4.0): the session's own epic, the parts' ids and the
+       kehikko's key. Only for a session that has an epic of its own; more parts than a place may hold
+       are left out, so that a press goes to the epic rather than to a cut-down selection. */
+    ...(notice.epic
+      ? {
+          place: {
+            epic: notice.epic,
+            ...(notice.partIds?.length && notice.partIds.length <= 16 ? { parts: notice.partIds } : {}),
+            ...(notice.kehikkoKey ? { kehikko: notice.kehikkoKey } : {}),
+          },
+        }
+      : {}),
   }
 }
 

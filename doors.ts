@@ -484,7 +484,9 @@ export async function answer(
      asked for, because it does not have one: see "One door is not the page's". */
   if (path === '/api/state') {
     if (method !== 'POST') return bad('this door takes POST', 405)
-    const took = theRuns().heard(query.get('session') ?? '', ticket, query.get('event') ?? '')
+    /* `background` is a count, digits only and at most three: anything else is no count. */
+    const counted = query.get('background') ?? ''
+    const took = theRuns().heard(query.get('session') ?? '', ticket, query.get('event') ?? '', /^\d{1,3}$/.test(counted) ? Number(counted) : null)
     return took ? { status: 204, body: null } : bad('that is not a running session’s own report', 403)
   }
 
