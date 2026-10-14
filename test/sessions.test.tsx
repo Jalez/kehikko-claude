@@ -8,7 +8,7 @@ import type { Listing, Row } from '../doors.ts'
 import type { Notice, Stated } from '../live.ts'
 import { NOTICES } from '../manifest.ts'
 import type { Api } from '../src/api.ts'
-import type { Hosted } from '../src/app.tsx'
+import { hostDrawsHeader, type Hosted } from '../src/app.tsx'
 import { standing } from '../src/view/places.ts'
 import type { Said, Standing, Target } from '../src/view/terminal-view.tsx'
 
@@ -375,13 +375,14 @@ describe('moving between places', () => {
 })
 
 describe('the one control, and what it leads to', () => {
-  test('sits over the terminal with the session’s label, and costs no row', async () => {
+  test('sits in a gutter beside the terminal with the session’s label: no row, and over none of what it prints', async () => {
     const s = server({ [KEY()]: [row('a', { label: 'tighten the methods section and everything after it' })] })
     const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
     await flush()
     const control = container.querySelector('[data-sessions]') as HTMLElement
     expect(control.textContent).toBe('tighten the methods section… ▾')
-    expect(control.className).toContain('absolute')
+    expect(control.className).not.toContain('absolute')
+    expect(control.className).toContain('w-5')
     /* Nothing along the bottom while a session is running. */
     expect(container.querySelector('[data-ended]')).toBeNull()
     expect(container.querySelector('[role="status"]')).toBeNull()
@@ -625,8 +626,8 @@ describe('what the session on screen is doing', () => {
     expect(control().getAttribute('data-state')).toBe('needs-you')
     expect(control().getAttribute('title')).toBe('Sessions for this place — this one: needs you')
     expect(control().getAttribute('aria-label')).toBe('Sessions — tighten the methods (needs you)')
-    /* Still over the terminal, and nothing was added beside it. */
-    expect(control().className).toContain('absolute')
+    /* In a gutter of its own, and nothing was added beside it. */
+    expect(control().className).not.toContain('absolute')
     expect(height(container)).toBe(rows)
 
     act(() => view('whole@3:a').say({ session: 'a', state: 'working', since: Date.now() }))
@@ -663,7 +664,7 @@ describe('a notice for a person who is not looking', () => {
     expect(s.feeds.map((one) => one.notices)).toEqual([true])
     act(() => s.feeds[0]!.heard.notice(NOTICE))
     await flush()
-    expect(s.emitted).toEqual([{ extension: NOTICES, payload: { epic: 'thesis', level: 'done', message: 'Finished: “draft the results” — thesis · Results · writing', refs: [] } }])
+    expect(s.emitted).toEqual([{ extension: NOTICES, payload: { epic: 'thesis', level: 'done', message: 'Finished: “draft the results” — thesis · Results · writing', refs: [], place: { epic: 'thesis' } } }])
     act(() => s.feeds[0]!.heard.notice({ ...NOTICE, seq: 2, state: 'needs-you' }))
     expect(s.emitted[1]?.payload).toMatchObject({ level: 'attention', message: 'Waiting for you: “draft the results” — thesis · Results · writing' })
     expect(s.emitted.length).toBe(2)
@@ -1037,5 +1038,27 @@ describe('a session that is already running somewhere else', () => {
     act(() => view('whole@3:a').say({ opened: 'resumed', session: 'a', label: 'only here', exists: true }))
     expect(container.querySelector('[data-sessions]')?.textContent).toBe('only here ▾')
     expect(container.querySelector('[data-sessions]')?.hasAttribute('data-how')).toBe(false)
+  })
+})
+
+describe('whether the corner control is drawn, by what the host said (protocol 1.4.0)', () => {
+  test('true: none; false: drawn, even after an earlier press; null: as before, the press decides', () => {
+    expect(hostDrawsHeader(true, false)).toBe(true)
+    expect(hostDrawsHeader(false, true)).toBe(false)
+    expect(hostDrawsHeader(null, false)).toBe(false)
+    expect(hostDrawsHeader(null, true)).toBe(true)
+  })
+
+  test('with the host drawing the header, the Go item says which session is on screen, and no row is added', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'tighten the methods' })] })
+    s.hosted.drawn = true
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} canvasEpic="thesis" />)
+    await flush()
+    act(() => view('whole@3:a').say({ session: 'a', state: 'needs-you', since: Date.now() }))
+    await flush()
+    expect(container.querySelector('[data-sessions]')).toBeNull()
+    const items = s.headers.at(-1) as { label: string }[]
+    expect(items[0]!.label).toBe('Sessions · ◆ tighten the methods')
+    expect(headerItemsSchema.safeParse(items).success).toBe(true)
   })
 })

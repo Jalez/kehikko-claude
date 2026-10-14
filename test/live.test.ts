@@ -1041,7 +1041,7 @@ describe('telling a person who is not looking', () => {
     w.later(60_000)
     hear('Stop')
     expect(feed.got).toEqual([
-      { seq: 1, session: B, state: 'finished', label: 'tighten the methods section', projectPath: dir, epic: 'thesis', parts: ['Methods', 'Results'], kehikko: 'writing', at: run.stateSince },
+      { seq: 1, session: B, state: 'finished', label: 'tighten the methods section', projectPath: dir, epic: 'thesis', parts: ['Methods', 'Results'], kehikko: 'writing', partIds: ['methods', 'results'], kehikkoKey: '4072c9e5', at: run.stateSince },
     ])
     /* Reported again, as a program that retries a hook would: not a change, and not said again. */
     hear('Stop')

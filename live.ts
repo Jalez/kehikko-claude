@@ -554,6 +554,10 @@ export interface Notice {
   /** The picked parts by what a person calls them, falling back to their ids. */
   parts: string[]
   kehikko: string
+  /** The picked parts' ids, as the place holds them (a press goes by id, never by name). */
+  partIds?: string[]
+  /** The kehikko's key, when the place is held by one. */
+  kehikkoKey?: string | null
   at: number
 }
 
@@ -1004,6 +1008,8 @@ export class Runs {
       epic: at?.epic ?? null,
       parts: (at?.parts ?? []).map((id, index) => at?.partNames?.[index] || id),
       kehikko: at?.kehikkoName ?? '',
+      partIds: [...(at?.parts ?? [])],
+      kehikkoKey: at?.kehikko && 'key' in at.kehikko ? at.kehikko.key : null,
       at: this.now(),
     })
   }
