@@ -672,6 +672,44 @@ describe('a notice for a person who is not looking', () => {
     expect(s.emitted.length).toBe(2)
   })
 
+  test('a host that holds the activity list makes the notice itself: no events.emit, the list is sent', async () => {
+    const s = told()
+    s.hosted.answers = ['parts.set', 'events.emit', 'activity.set']
+    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} canvasEpic="thesis" />)
+    await flush()
+    const one = { id: 'far', state: 'done' as const, label: 'draft the results', since: 1, detail: 'turn ended' }
+    act(() => s.feeds[0]!.heard.notice(NOTICE))
+    act(() => s.feeds[0]!.heard.activity!([one]))
+    await flush()
+    expect(s.emitted).toEqual([])
+    expect(s.activities).toEqual([[one]])
+  })
+
+  test('a host without activity.set is sent the notice as before, and no activity', async () => {
+    const s = told()
+    s.hosted.answers = ['parts.set', 'events.emit']
+    s.hosted.activity = undefined
+    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} canvasEpic="thesis" />)
+    await flush()
+    act(() => s.feeds[0]!.heard.notice(NOTICE))
+    act(() => s.feeds[0]!.heard.activity!([]))
+    await flush()
+    expect(s.emitted.length).toBe(1)
+    expect(s.activities).toEqual([])
+  })
+
+  test('a host that did not say what it answers (null) is sent the notice, and the list is attempted', async () => {
+    const s = told()
+    s.hosted.answers = null
+    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} canvasEpic="thesis" />)
+    await flush()
+    act(() => s.feeds[0]!.heard.notice(NOTICE))
+    act(() => s.feeds[0]!.heard.activity!([]))
+    await flush()
+    expect(s.emitted.length).toBe(1)
+    expect(s.activities).toEqual([[]])
+  })
+
   test('nothing is drawn for it here: no banner, no row', async () => {
     const s = told({ [KEY()]: [row('a', { label: 'one' })] })
     const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} canvasEpic="thesis" />)
