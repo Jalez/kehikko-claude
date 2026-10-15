@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react'
-import type { HeaderItemInput } from 'kehikot-module-protocol'
+import type { ActivityItem, HeaderItemInput } from 'kehikot-module-protocol'
 import { held, probeServer, type PressAnswer } from 'kehikot-module-protocol/client'
 import { Cover, coverFor, useFocus, useHost, useServerStanding, type CoverState } from 'kehikot-module-protocol/client/react'
 
@@ -68,6 +68,12 @@ type Press = (press: { item: string; value?: string | boolean }) => PressAnswer
 export interface Hosted {
   /** Send one extension payload through the host (`events.emit`). */
   emit(extension: string, payload: Record<string, unknown>): Promise<unknown>
+  /**
+   * Say what the sessions are doing, whole (`activity.set`, protocol 1.5.0). The client sends it
+   * to a host that answers the method, drops a list identical to the last, and sends nothing to
+   * one that does not. Absent from a host stand-in that predates it.
+   */
+  activity?: (items: ActivityItem[]) => void
   /** Declare the header items, whole. */
   header(items: HeaderItemInput[]): void
   /** Where the page puts what takes a press. */
@@ -136,13 +142,13 @@ export function App() {
   )
   const server = useServerStanding()
   const cover = coverFor({ where, projectPath, server })
-  const { request, header, drawsHeader } = host
+  const { request, header, drawsHeader, activity } = host
   /* The greeting's word when there is one (protocol 1.4.0): true draws no control of our own, false does.
      From a host that did not say, the first press proves it draws the header, as before. */
   const hostDraws = hostDrawsHeader(drawsHeader, drawn)
   const hosted = useMemo<Hosted | null>(
-    () => (where === 'hosted' ? { emit: (extension, payload) => request('events.emit', { extension, payload }), header, presses, drawn: hostDraws } : null),
-    [where, request, header, hostDraws],
+    () => (where === 'hosted' ? { emit: (extension, payload) => request('events.emit', { extension, payload }), activity, header, presses, drawn: hostDraws } : null),
+    [where, request, header, activity, hostDraws],
   )
   return <Sessions theme={host.theme} at={at} cover={cover} hosted={hosted} canvasEpic={epic} />
 }
@@ -448,6 +454,9 @@ export function Sessions({
     if (!api.feed) return
     return api.feed(framed, {
       state: (stated) => setStates((all) => ({ ...all, [stated.session]: { state: stated.state, since: stated.since } })),
+      /* The server writes the whole list and says it again on every change and on arrival; this only
+         passes it on. The client drops an identical one and sends nothing to a host without the method. */
+      activity: (items) => told.current.hosted?.activity?.(items),
       notice: (notice) => {
         const line = noticeLine(notice, told.current.canvasEpic)
         if (!line) return console.info('A session changed while no epic was open, and a notice is filed under one. Nothing was sent.')

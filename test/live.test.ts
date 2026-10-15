@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { CLOSED, Runs, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
+import { CLOSED, Runs, activityRows, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
 import { placeKey } from '../place.ts'
 import { PROGRAM, type Active, type Program, type Recorded } from '../program.ts'
 import { readPlaces, sessionsAt, type NamedPlace } from '../record.ts'
@@ -1602,5 +1602,103 @@ describe('a session that is already running somewhere else', () => {
     expect(w.runs.others({ known: true, active: [mine] }, A)).toEqual({ background: null, open: null })
     expect(w.runs.others({ known: true, active: [mine, interactive()] }, A).open?.pid).toBe(5151)
     expect(w.runs.others({ known: false, why: 'too-old' }, A)).toEqual({ background: null, open: null })
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * The activity list (protocol 1.5.0, `activity.set`): written here, said whole
+ * ------------------------------------------------------------------ */
+
+describe('the activity list a page passes to the host', () => {
+  const OTHER: NamedPlace = { epic: 'notes', parts: [], kehikko: { key: 'aaaa1111' }, kehikkoName: 'reading' }
+  function feedWith(w: ReturnType<typeof world>) {
+    const lists: ReturnType<Runs['activity']>[] = []
+    const one: Follower = { notices: true, state: () => {}, notice: () => {}, activity: (rows) => lists.push(rows) }
+    w.runs.subscribe(one)
+    return lists
+  }
+
+  test('is the whole list of the sessions whose state is known, with place, since and words', async () => {
+    const dir = project()
+    const w = world(TOLD)
+    const lists_ = feedWith(w)
+    const run = (await w.runs.open(ask(dir, null, NAMED), new Watcher())) as Run
+    await settle()
+    /* Nothing said, so nothing listed — and nothing sent: the list did not change. */
+    expect(lists_).toEqual([[]])
+    w.runs.heard(B, secretOf(w.ptys[0]!), 'UserPromptSubmit')
+    expect(lists_.at(-1)).toEqual([
+      { id: B, state: 'working', label: 'Claude session', place: { epic: 'thesis', parts: ['methods', 'results'], kehikko: '4072c9e5' }, since: run.stateSince, detail: 'working' },
+    ])
+    w.runs.heard(B, secretOf(w.ptys[0]!), 'PermissionRequest')
+    expect(lists_.at(-1)![0]).toMatchObject({ state: 'attention', detail: expect.stringContaining('waiting for you') })
+    w.runs.heard(B, secretOf(w.ptys[0]!), 'Stop')
+    expect(lists_.at(-1)![0]).toMatchObject({ state: 'done', detail: 'turn ended' })
+  })
+
+  test('replaces, never merges: two sessions in two places, most urgent first, and one that ends drops out', async () => {
+    const dir = project()
+    const w = world(TOLD)
+    const lists_ = feedWith(w)
+    const first = (await w.runs.open(ask(dir, null, NAMED), new Watcher())) as Run
+    const second = (await w.runs.open(ask(dir, null, OTHER), new Watcher())) as Run
+    await settle()
+    const [one, two] = [first.id, second.id]
+    w.runs.heard(one, secretOf(w.ptys[0]!), 'Stop')
+    w.later(5)
+    w.runs.heard(two, secretOf(w.ptys[1]!), 'UserPromptSubmit')
+    expect(lists_.at(-1)!.map((row) => [row.id, row.state, row.place])).toEqual([
+      [two, 'working', { epic: 'notes', kehikko: 'aaaa1111' }],
+      [one, 'done', { epic: 'thesis', parts: ['methods', 'results'], kehikko: '4072c9e5' }],
+    ])
+    w.runs.heard(one, secretOf(w.ptys[0]!), 'PermissionRequest')
+    expect(lists_.at(-1)!.map((row) => row.state)).toEqual(['attention', 'working'])
+    /* The first ends: the new whole list lacks it. */
+    w.ptys[0]!.ends(0)
+    await settle()
+    expect(lists_.at(-1)!.map((row) => row.id)).toEqual([two])
+    w.ptys[1]!.ends(0)
+    await settle()
+    expect(lists_.at(-1)).toEqual([])
+  })
+
+  test('a late page is handed the list at once, so a reload loses nothing', async () => {
+    const dir = project()
+    const w = world(TOLD)
+    await w.runs.open(ask(dir, null, NAMED), new Watcher())
+    await settle()
+    w.runs.heard(B, secretOf(w.ptys[0]!), 'UserPromptSubmit')
+    const late = feedWith(w)
+    expect(late.length).toBe(1)
+    expect(late[0]!.map((row) => row.id)).toEqual([B])
+  })
+
+  test('a label is clipped to 120, with the label the program recorded; the same list is not said twice', async () => {
+    const dir = project()
+    const w = world(TOLD)
+    const lists_ = feedWith(w)
+    const run = (await w.runs.open(ask(dir, null, NAMED), new Watcher())) as Run
+    await settle()
+    w.records(dir, B, `${'tighten the methods '.repeat(20)}\n end`)
+    await w.runs.settle(run)
+    w.runs.heard(B, secretOf(w.ptys[0]!), 'UserPromptSubmit')
+    const row = lists_.at(-1)![0]!
+    expect(row.label.length).toBeLessThanOrEqual(120)
+    expect(row.label.endsWith('…')).toBe(true)
+    const before = lists_.length
+    w.runs.heard(B, secretOf(w.ptys[0]!), 'PostToolUse')
+    expect(lists_.length).toBe(before)
+  })
+
+  test('more than 16 picked parts leave the parts out; more than 64 sessions are cut, finished last', () => {
+    const many = (n: number): Run =>
+      ({ what: 'session', ended: false, state: 'finished', id: `s${n}`, settled: `s${n}`, label: '', at: { epic: 'e', parts: Array.from({ length: n }, (_, i) => `p${i}`), kehikko: { id: 3 } }, stateSince: n, background: 0 }) as unknown as Run
+    expect(activityRows([many(16)])[0]!.place).toEqual({ epic: 'e', parts: Array.from({ length: 16 }, (_, i) => `p${i}`) })
+    expect(activityRows([many(17)])[0]!.place).toEqual({ epic: 'e' })
+    const sixty = Array.from({ length: 70 }, (_, i) => ({ ...many(1), id: `x${i}`, settled: `x${i}`, stateSince: i, state: i === 0 ? 'needs-you' : 'finished' }) as unknown as Run)
+    const rows = activityRows(sixty)
+    expect(rows.length).toBe(64)
+    expect(rows[0]).toMatchObject({ id: 'x0', state: 'attention' })
+    expect(rows[1]!.id).toBe('x69')
   })
 })

@@ -1,7 +1,7 @@
 import { answered, ask, follow, ticket } from 'kehikot-module-protocol/client'
 
 import type { Listing } from '../doors.ts'
-import type { Notice, Stated } from '../live.ts'
+import type { ActivityRow, Notice, Stated } from '../live.ts'
 
 /**
  * This module's own `/api`, as the page calls it. `ask` carries the ticket —
@@ -23,10 +23,11 @@ export interface Api {
   /**
    * Follow what changes while the page is open: every running session's
    * state, and — when `notices` says a host is there to pass them to — the
-   * notices raised for a person who is not looking. Returns the function that
+   * notices raised for a person who is not looking, and the whole activity
+   * list (on arrival and on every change). Returns the function that
    * stops following.
    */
-  feed?(notices: boolean, heard: { state(stated: Stated): void; notice(notice: Notice): void }): () => void
+  feed?(notices: boolean, heard: { state(stated: Stated): void; notice(notice: Notice): void; activity?(items: ActivityRow[]): void }): () => void
 }
 
 export const api: Api = {
@@ -43,11 +44,15 @@ export const api: Api = {
     answered(await ask('./api/detach', { body: { projectPath, key, session } }))
   },
   feed(notices, heard) {
-    return follow<Stated | Notice>(
+    return follow<Stated | Notice | { items: ActivityRow[] }>(
       './api/feed',
-      (event, name) => (name === 'notice' ? heard.notice(event as Notice) : heard.state(event as Stated)),
+      (event, name) => name === 'notice'
+          ? heard.notice(event as Notice)
+          : name === 'activity'
+            ? heard.activity?.((event as { items: ActivityRow[] }).items)
+            : heard.state(event as Stated),
       /* An EventSource sends no header, so the ticket rides the query (see `stream` in doors.ts). */
-      { query: { ticket: ticket() ?? '', notices: notices ? '1' : '0' }, events: ['notice'] },
+      { query: { ticket: ticket() ?? '', notices: notices ? '1' : '0' }, events: ['notice', 'activity'] },
     )
   },
 }
