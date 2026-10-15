@@ -322,7 +322,8 @@ describe('a session’s own report, and where its state is read', () => {
 
   test('the feed is ticketed like the read beside it, and says each change and each notice', async () => {
     const events: [unknown, string | undefined][] = []
-    const emit = (event: unknown, name?: string) => void events.push([event, name])
+    const emit = (event: unknown, name?: string) => void (name === 'activity' ? activity.push(event) : events.push([event, name]))
+    const activity: unknown[] = []
     expect(stream('GET', '/api/place', none, emit, TICKET)).toBeNull()
     expect(stream('GET', '/api/feed', none, emit, null)).toMatchObject({ reply: { status: 403 } })
     expect(stream('GET', '/api/feed', new URLSearchParams({ ticket: secret }), emit, null)).toMatchObject({ reply: { status: 403 } })
@@ -338,9 +339,13 @@ describe('a session’s own report, and where its state is read', () => {
     expect(events.map(([event, name]) => [name, (event as Stated).state])).toEqual([[undefined, 'finished'], [undefined, 'working'], [undefined, 'needs-you'], ['notice', 'needs-you']])
     const notice = events.at(-1)![0] as Notice
     expect(notice).toMatchObject({ session: D, label: 'the one that is running', epic: 'thesis', parts: ['methods'], kehikko: 'writing' })
+    /* The whole list, on arrival and on each change, as its own event. */
+    expect(activity.length).toBe(3)
+    expect(activity.at(-1)).toMatchObject({ items: [{ id: D, state: 'attention', label: 'the one that is running', place: { epic: 'thesis', parts: ['methods'] } }] })
     opened.close()
     await state(D, 'PostToolUse', secret)
     expect(events.length).toBe(4)
+    expect(activity.length).toBe(3)
   })
 })
 

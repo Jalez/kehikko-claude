@@ -47,6 +47,9 @@ export const PREFERRED_PORT = 8010
  *   outside the focus — the session on screen is the whole answer.
  * - **`scope: 'epic'`.** Told which epic is open and told again on every
  *   switch, which is the other half of a place.
+ * - **`uses: ['activity:report']`** (protocol 1.5.0): the whole list of its sessions' states, said
+ *   again on every change, for the host to mark epics, parts and kehikot. A host without the
+ *   method is told nothing (the client checks the greeting), and a 1.4.0 host accepts the word.
  * - **`uses: ['events:emit']`, `emits: [NOTICES]`.** The one thing it asks a
  *   host: to carry a line saying that a session a person is not looking at
  *   has finished, or has stopped to wait for them. Reading the context is not
@@ -100,7 +103,7 @@ export const MANIFEST: Manifest = manifestSchema.parse({
   reacts: ['parts'],
   declares: {
     protocol: `>=${PROTOCOL} <${PROTOCOL + 1}`,
-    uses: ['events:emit'],
+    uses: ['events:emit', 'activity:report'],
     storage: true,
     prompt: false,
   },

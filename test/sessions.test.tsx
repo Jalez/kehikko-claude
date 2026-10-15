@@ -5,7 +5,7 @@ import { resetServerStanding } from 'kehikot-module-protocol/client'
 import { useEffect, useRef } from 'react'
 
 import type { Listing, Row } from '../doors.ts'
-import type { Notice, Stated } from '../live.ts'
+import type { ActivityRow, Notice, Stated } from '../live.ts'
 import { NOTICES } from '../manifest.ts'
 import type { Api } from '../src/api.ts'
 import { hostDrawsHeader, type Hosted } from '../src/app.tsx'
@@ -591,7 +591,7 @@ describe('when the program is not installed', () => {
 /** A server whose feed the test drives, and a host that writes down what it is asked. */
 function told(start: Record<string, Row[]> = {}) {
   const s = server(start)
-  const feeds: { notices: boolean; heard: { state(stated: Stated): void; notice(notice: Notice): void }; stopped: boolean }[] = []
+  const feeds: { notices: boolean; heard: { state(stated: Stated): void; notice(notice: Notice): void; activity?(items: ActivityRow[]): void }; stopped: boolean }[] = []
   s.api.feed = (notices, heard) => {
     const one = { notices, heard, stopped: false }
     feeds.push(one)
@@ -601,12 +601,14 @@ function told(start: Record<string, Row[]> = {}) {
   }
   const emitted: { extension: string; payload: Record<string, unknown> }[] = []
   const headers: unknown[][] = []
+  const activities: unknown[][] = []
   const hosted: Hosted = {
     emit: async (extension, payload) => void emitted.push({ extension, payload }),
+    activity: (items) => void activities.push(items),
     header: (items) => void headers.push(items),
     presses: { current: null },
   }
-  return { ...s, feeds, emitted, headers, hosted }
+  return { ...s, feeds, emitted, headers, activities, hosted }
 }
 const NOTICE: Notice = { seq: 1, session: 'far', state: 'finished', label: 'draft the results', projectPath: P, epic: 'thesis', parts: ['Results'], kehikko: 'writing', at: 1 }
 const height = (container: HTMLElement) => [...(container.firstElementChild as HTMLElement).children].filter((one) => !(one as HTMLElement).className.includes('absolute')).length
@@ -678,6 +680,26 @@ describe('a notice for a person who is not looking', () => {
     act(() => s.feeds[0]!.heard.notice(NOTICE))
     await flush()
     expect(container.innerHTML).toBe(before)
+  })
+
+  test('the whole list the server writes goes to the host as it is, and again when it changes', async () => {
+    const s = told()
+    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    const one = { id: 'a', state: 'attention' as const, label: 'draft', since: 1, detail: 'waiting for you' }
+    act(() => s.feeds[0]!.heard.activity!([one]))
+    act(() => s.feeds[0]!.heard.activity!([]))
+    expect(s.activities).toEqual([[one], []])
+    /* No notice is made of it: the one-time lines are the notices' own. */
+    expect(s.emitted).toEqual([])
+  })
+
+  test('a page nothing is framing hands the list to nobody', async () => {
+    const s = told()
+    render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    expect(() => act(() => s.feeds[0]!.heard.activity!([]))).not.toThrow()
+    expect(s.activities).toEqual([])
   })
 
   test('a page nothing is framing follows the states and asks for no notices', async () => {

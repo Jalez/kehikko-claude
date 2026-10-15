@@ -574,12 +574,76 @@ export interface Stated {
   since: number
 }
 
+/**
+ * One session as the host's activity list says it (protocol 1.5.0, `activity.set`): the
+ * server knows every running session's state, label and place, so it is the one that
+ * writes the list, and a page only passes it on. The shape is the protocol's `ActivityItem`.
+ */
+export interface ActivityRow {
+  id: string
+  state: 'working' | 'attention' | 'done'
+  label: string
+  place?: { epic?: string; parts?: string[]; kehikko?: string }
+  since: number
+  detail: string
+}
+
+/** The protocol's limits (`LIMITS.ACTIVITY_*`, `PLACE_PARTS`), spelled here because the server does not import the client. */
+const ACTIVITY_ITEMS = 64
+const ACTIVITY_LABEL = 120
+const ACTIVITY_DETAIL = 200
+const PLACE_PARTS = 16
+
+const ACTIVITY_STATE = { working: 'working', 'needs-you': 'attention', finished: 'done' } as const
+const ACTIVITY_ORDER = { attention: 0, working: 1, done: 2 } as const
+
+const clip = (text: string, most: number): string => (text.length <= most ? text : `${text.slice(0, most - 1).trimEnd()}…`)
+
+/**
+ * The COMPLETE list of the sessions whose state is known, most urgent first: needs you,
+ * working, then finished by recency. A session with no state said is not in it. More than
+ * 64 are cut from the end (the finished, oldest first). The label is clipped here, since
+ * the protocol refuses a long one; a place with more than 16 parts leaves them out and
+ * keeps the epic and the kehikko.
+ */
+export function activityRows(runs: Iterable<Run>): ActivityRow[] {
+  const rows: ActivityRow[] = []
+  for (const run of runs) {
+    if (run.what !== 'session' || run.ended || !run.state) continue
+    const state = ACTIVITY_STATE[run.state]
+    const at = run.at
+    const parts = at?.parts ?? []
+    const place: NonNullable<ActivityRow['place']> = {}
+    if (at?.epic) place.epic = at.epic
+    if (parts.length > 0 && parts.length <= PLACE_PARTS) place.parts = [...parts]
+    if (at?.kehikko && 'key' in at.kehikko) place.kehikko = at.kehikko.key
+    const detail =
+      run.state === 'needs-you'
+        ? 'waiting for you: a permission or an answer'
+        : run.state === 'finished'
+          ? run.background > 0 ? `turn ended; ${run.background} background task${run.background === 1 ? '' : 's'} still running` : 'turn ended'
+          : 'working'
+    rows.push({
+      id: run.settled ?? run.id,
+      state,
+      label: clip(run.label.replace(/\s+/g, ' ').trim() || 'Claude session', ACTIVITY_LABEL),
+      ...(Object.keys(place).length > 0 ? { place } : {}),
+      since: run.stateSince,
+      detail: clip(detail, ACTIVITY_DETAIL),
+    })
+  }
+  rows.sort((a, b) => ACTIVITY_ORDER[a.state] - ACTIVITY_ORDER[b.state] || b.since - a.since || a.id.localeCompare(b.id))
+  return rows.slice(0, ACTIVITY_ITEMS)
+}
+
 /** Something following along: every change of state, and — when it asked for them — notices. */
 export interface Follower {
   /** Whether this one can pass a notice on to a host. */
   notices: boolean
   state(stated: Stated): void
   notice(notice: Notice): void
+  /** The whole activity list, when it changes and once on arrival. */
+  activity?(rows: ActivityRow[]): void
 }
 
 export interface RunsOptions {
@@ -622,6 +686,8 @@ export class Runs {
   /** Notices no page was there to take, oldest first. */
   private readonly held: Notice[] = []
   private noticed = 0
+  /** The last activity list handed out, as text, so that only a change is said. */
+  private activityIs = '[]'
   /** Where reports are posted. Set by whoever knows the port this server bound. */
   port: () => number | null
 
@@ -829,6 +895,7 @@ export class Runs {
    */
   private remember(run: Run, place: NamedPlace): void {
     run.at = place
+    this.changed()
     if (!run.settled) return
     const written = attach(run.projectPath, place, run.settled, { label: run.label, lastActive: this.now() })
     if (!written.ok) this.log(`claude: ${written.error}`)
@@ -883,6 +950,7 @@ export class Runs {
     if (label && label !== run.label) {
       run.label = label
       for (const viewer of run.viewers) viewer.say({ label, session: run.settled })
+      this.changed()
     }
   }
 
@@ -1029,6 +1097,21 @@ export class Runs {
     const stated: Stated = { session: run.settled ?? run.id, state: run.state, since: run.stateSince }
     for (const viewer of run.viewers) viewer.say({ ...stated })
     for (const follower of this.followers) follower.state(stated)
+    this.changed()
+  }
+
+  /** The activity list, whole, to every follower — but only when it differs from the last one. */
+  private changed(): void {
+    const rows = activityRows(this.runs.values())
+    const text = JSON.stringify(rows)
+    if (text === this.activityIs) return
+    this.activityIs = text
+    for (const follower of this.followers) follower.activity?.(rows)
+  }
+
+  /** The activity list as it stands (for a test, and for a page that has just arrived). */
+  activity(): ActivityRow[] {
+    return activityRows(this.runs.values())
   }
 
   /**
@@ -1052,6 +1135,7 @@ export class Runs {
    */
   subscribe(follower: Follower): () => void {
     this.followers.add(follower)
+    follower.activity?.(this.activity())
     for (const run of this.sessions()) {
       if (run.state) follower.state({ session: run.settled ?? run.id, state: run.state, since: run.stateSince })
     }

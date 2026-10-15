@@ -37,8 +37,8 @@ describe('the manifest', () => {
     expect(partsDeclaration(MANIFEST)).toEqual([])
   })
 
-  test('asks the host for one thing — to carry a notice — and takes no prompt', () => {
-    expect(MANIFEST.declares.uses).toEqual(['events:emit'])
+  test('asks the host to carry a notice and to mark what its sessions are doing, and takes no prompt', () => {
+    expect(MANIFEST.declares.uses).toEqual(['events:emit', 'activity:report'])
     expect(MANIFEST.declares.prompt).toBe(false)
     /* In the protocol's own format, by its name: no module is named, and whatever shows these hears. */
     expect(MANIFEST.extensions.emits).toEqual([NOTICES])

@@ -195,13 +195,16 @@ export function ago(at: number | null, now: number): string {
  * height at all. The word is the `title`, and is written out wherever there
  * is room for a word.
  *
+ * Colours follow the host's own dots (protocol 1.5.0, docs/activity.md): needs you is yellow,
+ * finished is green, working is grey.
+ *
  * Nothing known is no mark: a session that has not said what it is doing is
  * not drawn as idle.
  */
 export const MARKS: Record<State, { glyph: string; word: string; colour: string }> = {
-  working: { glyph: '●', word: 'working', colour: 'text-running' },
+  working: { glyph: '●', word: 'working', colour: 'text-muted-foreground' },
   'needs-you': { glyph: '◆', word: 'needs you', colour: 'text-needs-you' },
-  finished: { glyph: '○', word: 'finished', colour: 'text-muted-foreground' },
+  finished: { glyph: '○', word: 'finished', colour: 'text-done' },
 }
 
 /** The mark's `title`: the word, and since when. */

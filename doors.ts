@@ -136,6 +136,9 @@ export interface Listing {
   running: { id: string; label: string; projectPath: string; place: string | null; here: boolean; startedAt: number; state?: State; since?: number }[]
 }
 
+/** A state in words an agent reads without the key to `needs-you`. */
+const DOING = { working: 'working on a turn', 'needs-you': 'waiting for its person (a permission or an answer)', finished: 'its turn is over; at its prompt' } as const
+
 /** A running session's state, as the fields a row carries: nothing when nothing is known. */
 const stated = (run: Run | undefined): { state?: State; since?: number } => (run?.state ? { state: run.state, since: run.stateSince } : {})
 
@@ -359,7 +362,7 @@ async function call(name: string, args: Record<string, unknown>): Promise<string
       firstPrompt: held.get(id)?.label || kept?.label || '',
       lastActive: at ? new Date(at).toISOString() : (kept?.lastActive ?? null),
       running: Boolean(run),
-      ...(run?.state ? { state: run.state, since: new Date(run.stateSince).toISOString() } : {}),
+      ...(run?.state ? { state: run.state, doing: DOING[run.state], since: new Date(run.stateSince).toISOString() } : {}),
       ...(elsewhere ? { runningElsewhere: { kind: elsewhere.called || elsewhere.kind, since: elsewhere.since ? new Date(elsewhere.since).toISOString() : null, pid: elsewhere.pid, cwd: elsewhere.cwd } } : {}),
       ...(held.has(id) || run ? {} : { missing: true }),
     }
@@ -539,7 +542,9 @@ export async function answer(
  *
  * Every change of a running session's state (an unnamed event), and — for a
  * page that says a host is framing it — the notices raised for a person who
- * is not looking (`notice`), which only a framed page can pass on. The page
+ * is not looking (`notice`), which only a framed page can pass on, and the whole
+ * activity list (`activity`: on arrival and on every change) that the page hands to
+ * the host as `activity.set`. The page
  * opens it instead of asking on a clock.
  *
  * Ticketed like the read it sits beside, since a notice carries a session's
@@ -555,6 +560,7 @@ export const stream: Stream = (method, path, query, emit, ticket) => {
     notices: query.get('notices') === '1',
     state: (stated) => emit(stated),
     notice: (notice) => emit(notice, 'notice'),
+    activity: (items) => emit({ items }, 'activity'),
   })
   return { close }
 }
