@@ -74,6 +74,12 @@ export interface Hosted {
    * one that does not. Absent from a host stand-in that predates it.
    */
   activity?: (items: ActivityItem[]) => void
+  /**
+   * The methods the host said it answers for this module (`hello.answers`), or null from a host
+   * that did not say. A host that answers `activity.set` holds the activity list, and derives
+   * the one-time notice from its transitions itself: this module then sends no `events.emit`.
+   */
+  answers?: readonly string[] | null
   /** Declare the header items, whole. */
   header(items: HeaderItemInput[]): void
   /** Where the page puts what takes a press. */
@@ -104,6 +110,11 @@ function headerDrawn(): boolean {
  */
 export function hostDrawsHeader(said: boolean | null, pressed: boolean): boolean {
   return said === null ? pressed : said
+}
+
+/** Whether the host's greeting says it takes `activity.set`, and so makes notices from it. */
+export function holdsActivity(answers: readonly string[] | null | undefined): boolean {
+  return Array.isArray(answers) && answers.includes('activity.set')
 }
 
 export function App() {
@@ -142,13 +153,13 @@ export function App() {
   )
   const server = useServerStanding()
   const cover = coverFor({ where, projectPath, server })
-  const { request, header, drawsHeader, activity } = host
+  const { request, header, drawsHeader, activity, answers } = host
   /* The greeting's word when there is one (protocol 1.4.0): true draws no control of our own, false does.
      From a host that did not say, the first press proves it draws the header, as before. */
   const hostDraws = hostDrawsHeader(drawsHeader, drawn)
   const hosted = useMemo<Hosted | null>(
-    () => (where === 'hosted' ? { emit: (extension, payload) => request('events.emit', { extension, payload }), activity, header, presses, drawn: hostDraws } : null),
-    [where, request, header, activity, hostDraws],
+    () => (where === 'hosted' ? { emit: (extension, payload) => request('events.emit', { extension, payload }), activity, answers, header, presses, drawn: hostDraws } : null),
+    [where, request, header, activity, answers, hostDraws],
   )
   return <Sessions theme={host.theme} at={at} cover={cover} hosted={hosted} canvasEpic={epic} />
 }
@@ -458,6 +469,10 @@ export function Sessions({
          passes it on. The client drops an identical one and sends nothing to a host without the method. */
       activity: (items) => told.current.hosted?.activity?.(items),
       notice: (notice) => {
+        /* One report: a host that holds the activity list makes the notice from it. Sending this
+           one too would give the person every notice twice. Only a host that did not say it
+           answers `activity.set` (before 1.5.0, or silent) is sent the notice. */
+        if (holdsActivity(told.current.hosted?.answers)) return
         const line = noticeLine(notice, told.current.canvasEpic)
         if (!line) return console.info('A session changed while no epic was open, and a notice is filed under one. Nothing was sent.')
         void told.current.hosted
