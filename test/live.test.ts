@@ -1628,7 +1628,7 @@ describe('the activity list a page passes to the host', () => {
     expect(lists_).toEqual([[]])
     w.runs.heard(B, secretOf(w.ptys[0]!), 'UserPromptSubmit')
     expect(lists_.at(-1)).toEqual([
-      { id: B, state: 'working', label: 'Claude session', place: { epic: 'thesis', parts: ['methods', 'results'], kehikko: '4072c9e5' }, since: run.stateSince, detail: 'working' },
+      { id: B, state: 'working', label: 'Claude session', place: { epic: 'thesis', parts: ['methods', 'results'], kehikko: '4072c9e5' }, since: run.stateSince, detail: 'working', project: dir },
     ])
     w.runs.heard(B, secretOf(w.ptys[0]!), 'PermissionRequest')
     expect(lists_.at(-1)![0]).toMatchObject({ state: 'attention', detail: expect.stringContaining('waiting for you') })

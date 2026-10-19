@@ -677,7 +677,7 @@ describe('a notice for a person who is not looking', () => {
     s.hosted.answers = ['parts.set', 'events.emit', 'activity.set']
     render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} canvasEpic="thesis" />)
     await flush()
-    const one = { id: 'far', state: 'done' as const, label: 'draft the results', since: 1, detail: 'turn ended' }
+    const one = { id: 'far', state: 'done' as const, label: 'draft the results', since: 1, detail: 'turn ended', project: '/work/p' }
     act(() => s.feeds[0]!.heard.notice(NOTICE))
     act(() => s.feeds[0]!.heard.activity!([one]))
     await flush()
@@ -724,7 +724,7 @@ describe('a notice for a person who is not looking', () => {
     const s = told()
     render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
     await flush()
-    const one = { id: 'a', state: 'attention' as const, label: 'draft', since: 1, detail: 'waiting for you' }
+    const one = { id: 'a', state: 'attention' as const, label: 'draft', since: 1, detail: 'waiting for you', project: '/work/p' }
     act(() => s.feeds[0]!.heard.activity!([one]))
     act(() => s.feeds[0]!.heard.activity!([]))
     expect(s.activities).toEqual([[one], []])

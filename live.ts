@@ -601,6 +601,13 @@ export interface ActivityRow {
   place?: { epic?: string; parts?: string[]; kehikko?: string }
   since: number
   detail: string
+  /**
+   * The folder of the project the session runs in (protocol 1.8.0). A session keeps running
+   * when the person switches project, and the page framed now is the one that reports it; a
+   * host that files by project puts it under its own, and the protocol's client sends a host
+   * that does not only the open project's rows, without it.
+   */
+  project: string
 }
 
 /** The protocol's limits (`LIMITS.ACTIVITY_*`, `PLACE_PARTS`), spelled here because the server does not import the client. */
@@ -625,9 +632,8 @@ export function activityRows(runs: Iterable<Run>, project: string | null = null)
   const rows: ActivityRow[] = []
   for (const run of runs) {
     if (run.what !== 'session' || run.ended || !run.state) continue
-    /* A host files what a page reports under the project that page is framed in, so a page
-       reports its own project's sessions and no other's: another project's would be filed
-       under the wrong one, and go stale in its own. */
+    /* One project's only, for a follower that asked for one; a page asks for every project's
+       and each row says its own (`project`). */
     if (project !== null && run.projectPath !== project) continue
     const state = ACTIVITY_STATE[run.state]
     const at = run.at
@@ -649,6 +655,7 @@ export function activityRows(runs: Iterable<Run>, project: string | null = null)
       ...(Object.keys(place).length > 0 ? { place } : {}),
       since: run.stateSince,
       detail: clip(detail, ACTIVITY_DETAIL),
+      project: run.projectPath,
     })
   }
   rows.sort((a, b) => ACTIVITY_ORDER[a.state] - ACTIVITY_ORDER[b.state] || b.since - a.since || a.id.localeCompare(b.id))

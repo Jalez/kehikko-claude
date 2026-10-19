@@ -480,8 +480,8 @@ export function Sessions({
           /* The host's word, and worth reading: it is where it says nothing on the canvas shows these. */
           .catch((error: unknown) => console.info('The host did not carry a notice.', error))
       },
-    }, project)
-  }, [api, framed, project])
+    })
+  }, [api, framed])
 
   const step = here && !view ? decide(here, null) : null
   const standingNow = view ? standings[view.n] : undefined
