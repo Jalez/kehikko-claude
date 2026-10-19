@@ -226,8 +226,13 @@ export interface Program {
    * `id` or null.
    */
   settled(projectPath: string, id: string, since: number): Promise<string | null>
-  /** Every session the program holds for this folder, most recently active first. */
-  sessions(projectPath: string): Promise<Recorded[]>
+  /**
+   * Every session the program holds for this folder, most recently active
+   * first — and, of `also`, the ones it holds anywhere else (a project whose
+   * folder was renamed has its earlier sessions under the old name), with
+   * the sessions they were carried on in.
+   */
+  sessions(projectPath: string, also?: readonly string[]): Promise<Recorded[]>
   install(env?: NodeJS.ProcessEnv): Install
   /** The environment a session is started in. */
   environment(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv
@@ -588,7 +593,26 @@ async function described(file: string, size: number, mtimeMs: number): Promise<{
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const SESSION_FILE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/
 
-async function sessions(projectPath: string): Promise<Recorded[]> {
+/** One session's record, described, or null when it went away between being found and being read. */
+async function recorded(id: string, file: string): Promise<Recorded | null> {
+  try {
+    const { mtimeMs, size } = await stat(file)
+    const { first, tail } = await described(file, size, mtimeMs)
+    return {
+      id,
+      label: tail.name || tail.title || first,
+      firstPrompt: first,
+      lastPrompt: tail.lastPrompt,
+      prs: tail.prs,
+      next: tail.next.filter((one) => one !== id),
+      lastActive: mtimeMs,
+    }
+  } catch {
+    return null
+  }
+}
+
+async function sessions(projectPath: string, also: readonly string[] = []): Promise<Recorded[]> {
   const found = new Map<string, Recorded>()
   for (const dir of recordDirs(projectPath)) {
     let names: string[] = []
@@ -601,26 +625,107 @@ async function sessions(projectPath: string): Promise<Recorded[]> {
       names.map(async (name) => {
         const id = SESSION_FILE.exec(name)?.[1]
         if (!id || found.has(id)) return
-        const file = join(dir, name)
-        try {
-          const { mtimeMs, size } = await stat(file)
-          const { first, tail } = await described(file, size, mtimeMs)
-          found.set(id, {
-            id,
-            label: tail.name || tail.title || first,
-            firstPrompt: first,
-            lastPrompt: tail.lastPrompt,
-            prs: tail.prs,
-            next: tail.next.filter((one) => one !== id),
-            lastActive: mtimeMs,
-          })
-        } catch {
-          /* It went away between the listing and the read. */
-        }
+        const said = await recorded(id, join(dir, name))
+        if (said) found.set(id, said)
       }),
     )
   }
+  /* The ids the project's own record names that are not in its folder: a
+     project whose folder was renamed or moved has its sessions under the
+     folder Claude Code named after the old path. Found by id alone, with
+     what they were carried on in (`next`), and nothing else of that folder. */
+  const queue = also.filter((id) => SESSION_ID.test(id) && !found.has(id))
+  const asked = new Set<string>(queue)
+  while (queue.length && asked.size <= ELSEWHERE_MOST) {
+    const id = queue.shift()!
+    const file = await recordFile(projectPath, id)
+    if (!file) continue
+    const said = await recorded(id, file)
+    if (!said) continue
+    found.set(id, said)
+    for (const next of said.next ?? []) {
+      if (found.has(next) || asked.has(next)) continue
+      asked.add(next)
+      queue.push(next)
+    }
+  }
   return [...found.values()].sort((a, b) => b.lastActive - a.lastActive)
+}
+
+/** How many ids one listing looks for outside the project's own folder. */
+const ELSEWHERE_MOST = 256
+
+/**
+ * Where Claude Code keeps the record of session `id` for this project:
+ * in the project's own folder (`recordDirs`), and failing that in whichever
+ * other folder under `<config>/projects/` holds `<id>.jsonl`.
+ *
+ * ## A project whose folder was renamed
+ *
+ * Claude Code names a project's folder after the project's path, so renaming
+ * the project leaves every earlier session under the old name, and the
+ * project's own folder (the new name) has none of them. The session ids are
+ * still the project's — its `.kehikot/claude/places.json` came along with it —
+ * so a session is looked for by its id, in every project folder, by FILE
+ * NAME only: one listing of `<config>/projects/` and one `stat` per folder,
+ * and no transcript is opened to look. A session id is a random UUID, so the
+ * file it names is that session's wherever it is.
+ *
+ * `claude --resume <id>` finds such a record from the new folder too
+ * (checked against Claude Code 2.1.303 with a scratch `CLAUDE_CONFIG_DIR`):
+ * it loads the conversation and goes on writing it in the old folder, which
+ * is why the lookup keeps finding it there.
+ *
+ * Kept: where an id was found (until that file is gone), and for a short
+ * while that it was not found anywhere, so a list with a dozen missing ids
+ * does not sweep the folder a dozen times a second.
+ */
+export async function recordFile(projectPath: string, id: string, env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
+  if (!SESSION_ID.test(id)) return null
+  for (const dir of recordDirs(projectPath, env)) {
+    const file = join(dir, `${id}.jsonl`)
+    if (await isFile(file)) return file
+  }
+  return elsewhere(id, env)
+}
+
+/** How long "no record of that id anywhere" is believed before the folders are looked through again. */
+const NOWHERE_MS = 10_000
+const whereFound = new Map<string, string>()
+const nowhere = new Map<string, number>()
+
+async function isFile(file: string): Promise<boolean> {
+  try {
+    return (await stat(file)).isFile()
+  } catch {
+    return false
+  }
+}
+
+async function elsewhere(id: string, env: NodeJS.ProcessEnv): Promise<string | null> {
+  const root = join(configDir(env), 'projects')
+  const key = `${root}\0${id}`
+  const known = whereFound.get(key)
+  if (known && (await isFile(known))) return known
+  whereFound.delete(key)
+  const missed = nowhere.get(key)
+  if (missed !== undefined && Date.now() - missed < NOWHERE_MS) return null
+  let folders: string[] = []
+  try {
+    folders = await readdir(root)
+  } catch {
+    folders = []
+  }
+  for (const folder of folders) {
+    const file = join(root, folder, `${id}.jsonl`)
+    if (await isFile(file)) {
+      whereFound.set(key, file)
+      nowhere.delete(key)
+      return file
+    }
+  }
+  nowhere.set(key, Date.now())
+  return null
 }
 
 /**
@@ -660,14 +765,7 @@ export function sessionName(words: readonly (string | null | undefined)[]): stri
 }
 
 async function settled(projectPath: string, id: string): Promise<string | null> {
-  for (const dir of recordDirs(projectPath)) {
-    try {
-      if ((await stat(join(dir, `${id}.jsonl`))).isFile()) return id
-    } catch {
-      /* Not in this spelling of the folder. */
-    }
-  }
-  return null
+  return (await recordFile(projectPath, id)) ? id : null
 }
 
 /**

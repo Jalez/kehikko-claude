@@ -96,6 +96,18 @@ describe('what a place holds', () => {
     expect(said.running).toEqual([])
   })
 
+  test('a session filed under the project folder’s old name (a renamed project) is listed, not missing', async () => {
+    const renamed = 'c0000002-0000-4000-8000-00000000c001'
+    const [old] = recordDirs(`${project}-before-the-rename`)
+    mkdirSync(old!, { recursive: true })
+    writeFileSync(join(old!, `${renamed}.jsonl`), `${JSON.stringify({ type: 'user', message: { content: 'asked before the rename' } })}\n`)
+    attach(project, METHODS, renamed, { label: 'kept in the record', lastActive: Date.parse('2026-10-01T00:00:00Z') })
+    const said = (await listing(project, placeKey(METHODS), runs)) as Listing
+    const row = said.sessions.find((one) => one.id === renamed)
+    expect(row?.label).toBe('asked before the rename')
+    expect(row && 'missing' in row).toBe(false)
+  })
+
   test('a session Claude Code has no record of on this computer is listed from what was kept beside it, and marked as not here', async () => {
     /* The record came with the project; the session ran on another computer, or its transcript was cleaned away. */
     const gone = '44444444-4444-4444-8444-444444444444'

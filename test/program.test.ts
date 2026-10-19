@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 
 import { spawnSync } from 'node:child_process'
 
-import { PROGRAM, configDir, firstPrompt, headOf, home, readActive, recordDirs, sessionName, tailOf, type Recorded } from '../program.ts'
+import { PROGRAM, configDir, firstPrompt, headOf, home, readActive, recordDirs, recordFile, sessionName, tailOf, type Recorded } from '../program.ts'
 import { CONFIG, HOME } from './setup.ts'
 
 /**
@@ -166,13 +166,79 @@ describe('reading a project’s sessions', () => {
   })
 
   test('a session exists once the program has a record for it, and not before', async () => {
+    /* Ids of their own: a record is found by its id in any project's folder (a renamed project). */
+    const S = 'b0000001-0000-4000-8000-00000000b001'
+    const T = 'b0000001-0000-4000-8000-00000000b002'
     const project = scratch('project')
-    expect(await PROGRAM.settled(project, A, 0)).toBeNull()
+    expect(await PROGRAM.settled(project, S, 0)).toBeNull()
     const [dir] = recordDirs(project)
     mkdirSync(dir!, { recursive: true })
-    writeFileSync(join(dir!, `${A}.jsonl`), `${row('hello')}\n`)
-    expect(await PROGRAM.settled(project, A, 0)).toBe(A)
-    expect(await PROGRAM.settled(project, B, 0)).toBeNull()
+    writeFileSync(join(dir!, `${S}.jsonl`), `${row('hello')}\n`)
+    expect(await PROGRAM.settled(project, S, 0)).toBe(S)
+    expect(await PROGRAM.settled(project, T, 0)).toBeNull()
+  })
+})
+
+describe('a project whose folder was renamed', () => {
+  const C = 'c0000001-0000-4000-8000-00000000c001'
+  const D = 'c0000001-0000-4000-8000-00000000c002'
+  const E = 'c0000001-0000-4000-8000-00000000c003'
+  /** The project as it was, with Claude Code's records under the old name, and as it is now. */
+  const moved = () => {
+    const parent = scratch('moved')
+    const was = join(parent, 'thesis-old')
+    const now = join(parent, 'thesis')
+    const [old] = recordDirs(was)
+    mkdirSync(old!, { recursive: true })
+    return { was, now, old: old! }
+  }
+
+  test('a session is found by its id under the folder’s old name, and settles', async () => {
+    const { now, old } = moved()
+    writeFileSync(join(old, `${C}.jsonl`), `${row('from before the rename')}\n`)
+    expect(await recordFile(now, C)).toBe(join(old, `${C}.jsonl`))
+    expect(await PROGRAM.settled(now, C, 0)).toBe(C)
+  })
+
+  test('its own folder is looked in first', async () => {
+    const { now, old } = moved()
+    const [mine] = recordDirs(now)
+    mkdirSync(mine!, { recursive: true })
+    writeFileSync(join(old, `${D}.jsonl`), `${row('old copy')}\n`)
+    writeFileSync(join(mine!, `${D}.jsonl`), `${row('here')}\n`)
+    expect(await recordFile(now, D)).toBe(join(mine!, `${D}.jsonl`))
+  })
+
+  test('listed when the record names it, with what it was carried on in, and nothing else of the old folder', async () => {
+    const { now, old } = moved()
+    const id = 'c0000001-0000-4000-8000-00000000c004'
+    const next = 'c0000001-0000-4000-8000-00000000c005'
+    const other = 'c0000001-0000-4000-8000-00000000c006'
+    writeFileSync(join(old, `${id}.jsonl`), `${row('named in the record')}\n${JSON.stringify({ type: 'continued-in', continuedInSessionId: next })}\n`)
+    writeFileSync(join(old, `${next}.jsonl`), `${row('carried on')}\n`)
+    writeFileSync(join(old, `${other}.jsonl`), `${row('not named')}\n`)
+    expect(await PROGRAM.sessions(now)).toEqual([])
+    const held = await PROGRAM.sessions(now, [id])
+    expect(held.map((one) => one.id).sort()).toEqual([id, next].sort())
+    expect(held.find((one) => one.id === id)?.label).toBe('named in the record')
+    expect(held.some((one) => one.id === other)).toBe(false)
+  })
+
+  test('an id there is no record of anywhere is not found, and a bad id is not looked for', async () => {
+    const { now } = moved()
+    expect(await recordFile(now, E)).toBeNull()
+    expect(await PROGRAM.settled(now, E, 0)).toBeNull()
+    expect(await recordFile(now, '../../etc/passwd')).toBeNull()
+    expect(await PROGRAM.sessions(now, [E, 'nonsense'])).toEqual([])
+  })
+
+  test('where it was found is forgotten when the file goes', async () => {
+    const { now, old } = moved()
+    const id = 'c0000001-0000-4000-8000-00000000c007'
+    writeFileSync(join(old, `${id}.jsonl`), `${row('soon gone')}\n`)
+    expect(await recordFile(now, id)).toBe(join(old, `${id}.jsonl`))
+    rmSync(join(old, `${id}.jsonl`))
+    expect(await recordFile(now, id)).toBeNull()
   })
 })
 

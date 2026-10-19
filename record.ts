@@ -68,7 +68,7 @@ import { isKehikkoKey, placeKey, readPlaceKey, sortedParts, type Place } from '.
  * and numbers it afresh on another machine: the `id` in `context.kehikko` is
  * a row in that host's database. Protocol 1.1.0 carries the kehikko's `key`
  * beside it — the one the host keeps in the project's own
- * `.kehikot/kehikko/kehikot.json` — and that is what a place is filed under
+ * `.kehikot/host/kehikot.json` (`.kehikot/kehikko/` before protocol 2.2.0) — and that is what a place is filed under
  * (`kehikko=key:4072c9e5`). A host that sends no key leaves the id, and a
  * place filed under it (`kehikko=3`) is as fragile as it always was.
  *
@@ -93,7 +93,7 @@ import { isKehikkoKey, placeKey, readPlaceKey, sortedParts, type Place } from '.
  * Because it means so little elsewhere, and holds the first line of what
  * somebody asked, the file is NOT shared by default: the first write puts a
  * `.gitignore` beside it naming it, the way the host does for its tracker
- * reading in `.kehikot/kehikko/`. Written only when there is none, so a
+ * reading in its own folder (`.kehikot/host/`, `.kehikot/kehikko/` before protocol 2.2.0). Written only when there is none, so a
  * person who empties it to share the file is not overruled.
  *
  * ## One writer at a time, with nothing awaited in the middle
@@ -178,6 +178,15 @@ export function readPlaces(projectPath: string | null | undefined): Result<Place
 /** The sessions recorded for one place, in the order they were added. */
 export function sessionsAt(places: Places, key: string): string[] {
   return Object.hasOwn(places.places, key) ? [...(places.places[key]?.sessions ?? [])] : []
+}
+
+/**
+ * Every session id the record names, at any place or in its list of sessions.
+ * What is looked for outside the project's own folder when the project was
+ * renamed (`sessions` in program.ts).
+ */
+export function recordedIds(places: Places): string[] {
+  return [...new Set([...Object.keys(places.sessions), ...Object.values(places.places).flatMap((place) => place?.sessions ?? [])])]
 }
 
 /**

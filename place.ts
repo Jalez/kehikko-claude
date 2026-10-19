@@ -22,7 +22,7 @@
  *
  * `context.kehikko` carries two things that look like identities and only one
  * is. Its `key` (protocol 1.1.0, `KEHIKKO_KEY`) is written in the project's
- * own `.kehikot/kehikko/kehikot.json` and is the same after a rename, after
+ * own `.kehikot/host/kehikot.json` (`.kehikot/kehikko/` before protocol 2.2.0) and is the same after a rename, after
  * the project is removed from the host and added again, and on another
  * machine. Its `id` is a row number in one host's database: one kehikko was
  * 2, then 9, then 28, without anybody touching it.
