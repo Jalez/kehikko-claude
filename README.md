@@ -42,9 +42,22 @@ Opening the module on a place:
 - **exactly one** — it is opened at once: resumed, or — when Claude Code is already running it somewhere
   else — attached to or asked about (see [A session that is already
   running](#a-session-that-is-already-running-somewhere-else));
-- **more than one** — a short list, in the terminal's own space, before anything is opened: each
-  session's first prompt, when it was last active and whether it is running, plus *New session* and
-  *Attach an existing session*. Arrows (or `j`/`k`) and Enter, a digit, or the pointer.
+- **more than one** — the one that was last open there (`current`), at once. Only when none of them
+  is, a short list in the terminal's own space, before anything is opened: each session's name, the
+  last thing said in it, its pull requests, when it was last active and whether it is running, plus
+  *New session* and *Attach an existing session*. Arrows (or `j`/`k`) and Enter, a digit, or the
+  pointer.
+
+**What is open at a place is what opens there next.** Every open makes that session the place's
+`current` one, and so does the terminal moving on by itself: Claude Code carrying the conversation on
+under a new id, or a person running `/resume` or `/clear` in it. The module asks Claude Code which
+conversation its own process is showing (`claude agents --json`, by pid, every ten seconds while the
+program prints) and records that one. There is nothing to press to remember a conversation.
+
+**A session is named after its place** — `hippos-portal · kiosk-info-reel · Reel · main`: the
+project's folder, the epic, the picked parts by their headings, the kehikko — with `--name`, so that
+Claude Code's own lists (its agents view, `/resume`, Remote Control) say where it belongs. A
+background session that is attached to keeps the name it has: its process is not this module's.
 
 Only sessions that are on this computer count towards that (see [What is shared between
 computers](#what-is-shared-between-computers-and-what-is-not)).
@@ -76,6 +89,19 @@ with no session asks first, when Claude Code holds other sessions for the projec
   banner to anything.
 
 When the project has no other session there is nothing to choose from, and a new one starts as before.
+
+### A conversation carried on under another id
+
+Claude Code resumes a conversation under a **new** session id and writes `continued-in` into the old
+record (measured on 2.1.303). Each resume of the old id does it again, so a place that kept the id it
+first recorded reopened an older and older point of the conversation, and — when the conversation had
+since gone on in a background session — started a second copy beside it, with Remote Control fought
+over by both ("another Claude Code on this machine already has Remote Control for this conversation").
+
+So an id is followed before it is opened or listed: through every `continued-in`, to the session a
+process is holding now, or else the one that last grew. The record is rewritten to that id wherever
+the old one was (`follow` in `record.ts`), and what has been carried on is not offered beside where
+it went. The "already running?" question below is then asked about the conversation as it is now.
 
 ### A session that is already running somewhere else
 
@@ -301,12 +327,16 @@ switch kehikko. A line filed under the session's epic is the most that exists.
 - It never sends a prompt. The person types.
 - It never passes a flag that widens what Claude may do. A new session is `claude --session-id <uuid>`
   and a resumed one `claude --resume <uuid>`, in the project's folder — followed, for a copy that can
-  take it, by `--settings` and the hooks above, which is the whole command. The settings hold hooks and
+  take them, by `--name <the place>` and by `--settings` and the hooks above, which is the whole
+  command. The settings hold hooks and
   nothing else: nothing about permissions, models or tools. The only other command lines there are:
   `claude --help`, once per binary; `claude agents --json`, which reads; and `claude attach <handle>`,
   with the handle Claude Code itself printed, checked to be one word that cannot be a flag.
 - It never stops, deletes, restarts or backgrounds anything: no `stop`, `rm`, `respawn` or `--bg`.
-- It never reads or shows a transcript beyond the first line of the first prompt, used as a label.
+- It never reads or shows a transcript beyond what labels a session: the first line of the first
+  prompt, and the rows Claude Code appends to describe it — its name and title, the last prompt as
+  Claude Code noted it, the pull requests it linked, and where it was continued (`tailOf` in
+  `program.ts`).
 - It never reads the screen to decide anything, and never reads what a hook is handed.
 
 ## Where its data lives
@@ -321,7 +351,8 @@ switch kehikko. A line filed under the session's epic is the most that exists.
       "epic": "thesis",
       "parts": ["methods", "results"],
       "kehikko": { "key": "4072c9e5", "id": 3, "name": "writing" },
-      "sessions": ["6f0c2a1e-…"]
+      "sessions": ["6f0c2a1e-…"],
+      "current": "6f0c2a1e-…"
     }
   },
   "sessions": {

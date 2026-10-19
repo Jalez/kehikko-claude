@@ -1,14 +1,14 @@
 import { randomBytes } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import type { Duplex } from 'node:stream'
 
 import { mintTicket, sameTicket } from 'kehikot-module-protocol/serve'
 
 import { typedByPerson } from './input.ts'
 import { isKehikkoKey, placeKey, sortedParts, type Kehikko } from './place.ts'
-import { PROGRAM, home, type Active, type Program, type Running, type State } from './program.ts'
-import { attach, note, projectRoot, type NamedPlace } from './record.ts'
+import { PROGRAM, headOf, home, sessionName, type Active, type Program, type Running, type State } from './program.ts'
+import { attach, follow, note, projectRoot, type NamedPlace } from './record.ts'
 
 /**
  * The sessions that are running, and the socket a page watches one through.
@@ -262,6 +262,19 @@ export const quoted = (text: string): string => `'${text.replace(/'/g, `'\\''`)}
 export const tellLine = (event: string, script: string = TELL): string => `/bin/sh ${quoted(script)} ${event}`
 /** A session that still has no first prompt after this many looks is not asked again until it ends. */
 const LABEL_TRIES = 8
+/** How often a running session's process is asked which conversation it is showing (see `track`). */
+const TRACK_EVERY = 10_000
+
+/**
+ * What a session is called in Claude Code's own lists, from where it belongs:
+ * the project's folder, the epic, the picked parts by their headings, the
+ * kehikko — `hippos-portal · kiosk-info-reel · Reel · main`.
+ */
+export function placeName(projectPath: string, place: NamedPlace | null): string {
+  if (!place) return sessionName([basename(projectPath)])
+  const parts = place.parts.map((id, at) => place.partNames?.[at] || id)
+  return sessionName([basename(projectPath), place.epic, parts.join(' + '), place.kehikkoName])
+}
 
 /**
  * Why a socket was closed, as a number the page can act on. The sentence
@@ -494,6 +507,8 @@ export interface Run {
   unchecked: 'too-old' | 'failed' | null
   /** Put away by `rest`, so that its viewers are told that and not that it ended. */
   rested: boolean
+  /** When the program was last asked which conversation this run's process is showing (see `track`). */
+  trackedAt: number
   /** The clock on an untouched, unrecorded run nobody is watching (see `UNTOUCHED_GRACE`). */
   idle: ReturnType<typeof setTimeout> | null
   startedAt: number
@@ -606,10 +621,14 @@ const clip = (text: string, most: number): string => (text.length <= most ? text
  * the protocol refuses a long one; a place with more than 16 parts leaves them out and
  * keeps the epic and the kehikko.
  */
-export function activityRows(runs: Iterable<Run>): ActivityRow[] {
+export function activityRows(runs: Iterable<Run>, project: string | null = null): ActivityRow[] {
   const rows: ActivityRow[] = []
   for (const run of runs) {
     if (run.what !== 'session' || run.ended || !run.state) continue
+    /* A host files what a page reports under the project that page is framed in, so a page
+       reports its own project's sessions and no other's: another project's would be filed
+       under the wrong one, and go stale in its own. */
+    if (project !== null && run.projectPath !== project) continue
     const state = ACTIVITY_STATE[run.state]
     const at = run.at
     const parts = at?.parts ?? []
@@ -640,6 +659,8 @@ export function activityRows(runs: Iterable<Run>): ActivityRow[] {
 export interface Follower {
   /** Whether this one can pass a notice on to a host. */
   notices: boolean
+  /** The project (resolved) whose sessions its activity list is about; null for every project's. */
+  project?: string | null
   state(stated: Stated): void
   notice(notice: Notice): void
   /** The whole activity list, when it changes and once on arrival. */
@@ -686,8 +707,8 @@ export class Runs {
   /** Notices no page was there to take, oldest first. */
   private readonly held: Notice[] = []
   private noticed = 0
-  /** The last activity list handed out, as text, so that only a change is said. */
-  private activityIs = '[]'
+  /** The last activity list handed to each follower, as text, so that only a change is said. */
+  private readonly activityIs = new Map<Follower, string>()
   /** Where reports are posted. Set by whoever knows the port this server bound. */
   port: () => number | null
 
@@ -784,11 +805,73 @@ export class Runs {
     return { background: there.find((one) => one.kind === 'background' && one.handle) ?? null, open: there.find((one) => !(one.kind === 'background' && one.handle)) ?? null }
   }
 
+  /**
+   * Where the conversation recorded as `id` is now: `id` itself, or the
+   * session Claude Code carried it on in (see `headOf`) — preferring one a
+   * process is holding right now.
+   */
+  async head(projectPath: string, id: string, running?: Running): Promise<string> {
+    const held = new Map((await this.program.sessions(projectPath)).map((one) => [one.id, one]))
+    const live = new Set<string>(running?.known ? running.active.map((one) => one.session) : [])
+    for (const run of this.runs.values()) if (run.settled) live.add(run.settled)
+    return headOf(id, held, live)
+  }
+
+  /**
+   * Which conversation this run's process is showing now, and if it is no
+   * longer the one recorded, make it the one recorded — as this place's
+   * current session — and tell the viewers.
+   *
+   * It moves without this module doing anything: Claude Code resumes a
+   * conversation under a new id, and a person may `/resume` another one or
+   * `/clear` inside the terminal. Asked of the program itself
+   * (`agents --json`, which lists each process with the session it holds, by
+   * pid); a copy that cannot be asked is followed by its record instead —
+   * the conversation carried on from the recorded one that nobody else holds.
+   *
+   * Never for a view of a background session: that process is not this
+   * module's, and it is `attach`ed to by its handle.
+   */
+  async track(run: Run): Promise<void> {
+    if (run.what !== 'session' || run.ended || run.joined || !run.settled) return
+    run.trackedAt = this.now()
+    const running = await this.running()
+    let now: string | null = null
+    if (running.known) {
+      const mine = running.active.find((one) => one.pid !== null && one.pid === run.pty.pid)
+      if (mine && this.program.isId(mine.session)) now = mine.session
+    }
+    if (!now) {
+      const head = await this.head(run.projectPath, run.settled, running)
+      const { background, open } = this.others(running, head)
+      if (head !== run.settled && !background && !open) now = head
+    }
+    if (!now || now === run.settled || run.ended) return
+    if (!(await this.program.settled(run.projectPath, now, 0))) return
+    const was = run.settled
+    const continued = (await this.head(run.projectPath, was, running)) === now
+    run.settled = now
+    this.log(`claude: the process behind ${run.id} is now on ${now} (${continued ? 'carried on from' : 'switched from'} ${was}) — recorded as its place's session`)
+    const known = (await this.program.sessions(run.projectPath)).find((one) => one.id === now)
+    if (known?.label) run.label = known.label
+    /* Carried on: the old id is the same conversation a step behind, and is replaced wherever it is. */
+    if (continued) {
+      const moved = follow(run.projectPath, was, now, { label: known?.label, lastActive: known?.lastActive })
+      if (!moved.ok) this.log(`claude: ${moved.error}`)
+    }
+    if (run.at) {
+      const written = attach(run.projectPath, run.at, now, { label: known?.label, lastActive: known?.lastActive })
+      if (!written.ok) this.log(`claude: ${written.error}`)
+    }
+    for (const viewer of run.viewers) viewer.say({ exists: true, session: now, ...(run.label ? { label: run.label } : {}) })
+    this.changed()
+  }
+
   private async start(projectPath: string, id: string, asked: Extract<Opening, { what: 'session' }>): Promise<Run | Refusal> {
     const found = this.program.find()
     if (!found.file) return { code: CLOSED.missing, why: `${this.program.name} is not installed.` }
 
-    const settled = await this.program.settled(projectPath, id, 0)
+    let settled = await this.program.settled(projectPath, id, 0)
     if (asked.session && !settled) {
       return { code: CLOSED.refused, why: `${this.program.name} has no session by that id for this project on this computer.` }
     }
@@ -803,6 +886,16 @@ export class Runs {
     if (settled) {
       const running = await this.running(found.file)
       if (!running.known) unchecked = running.why
+      /* The conversation may have been carried on under another id since this one was recorded
+         (Claude Code resumes under a new id). Opening the old id would start yet another copy of
+         an old point in it, beside the process that has the conversation now. */
+      const head = await this.head(projectPath, settled, running)
+      if (head !== settled) {
+        this.log(`claude: ${settled} was carried on as ${head} — opening that, and the record follows it`)
+        const moved = follow(projectPath, settled, head)
+        if (!moved.ok) this.log(`claude: ${moved.error}`)
+        settled = head
+      }
       const { background, open } = this.others(running, settled)
       if (background) joined = background
       else if (open && asked.copy) copyOf = open
@@ -819,9 +912,10 @@ export class Runs {
     const port = this.port()
     const tells = !joined && port !== null && (await this.program.supports(found.file)).tells
     const secret = tells ? randomBytes(24).toString('hex') : null
+    const name = (await this.program.supports(found.file)).names ? placeName(projectPath, asked.place) : ''
     const args = joined
       ? this.program.attach(joined.handle!)
-      : [...(settled ? this.program.resume(settled) : this.program.fresh(id)), ...(tells ? this.program.reports(tellLine) : [])]
+      : [...(settled ? this.program.resume(settled, name || undefined) : this.program.fresh(id, name || undefined)), ...(tells ? this.program.reports(tellLine) : [])]
     let pty: Pty
     let screen: Screen
     try {
@@ -835,7 +929,7 @@ export class Runs {
           TERM,
           /* The secret travels here and nowhere else: not in `args`, which any
              process on the machine can list, and not in a file. */
-          ...(secret ? { [TELL_ENV.port]: String(port), [TELL_ENV.secret]: secret, [TELL_ENV.session]: settled ?? id } : {}),
+          ...(secret ? { [TELL_ENV.port]: String(port), [TELL_ENV.secret]: secret, [TELL_ENV.session]: id } : {}),
         },
       })
     } catch (error) {
@@ -867,6 +961,7 @@ export class Runs {
       copyOf,
       unchecked,
       rested: false,
+      trackedAt: this.now(),
       idle: null,
       startedAt: this.now(),
       pty,
@@ -914,6 +1009,9 @@ export class Runs {
       if (run.what === 'session' && (!run.settled || (!run.label && run.asked < LABEL_TRIES)) && this.now() - asked >= SETTLE_EVERY) {
         asked = this.now()
         void this.settle(run)
+      } else if (run.what === 'session' && run.settled && this.now() - run.trackedAt >= TRACK_EVERY) {
+        /* Which conversation is on screen is asked while the program speaks, and not more often than this. */
+        void this.track(run).catch(() => {})
       }
     })
     run.pty.onExit(({ exitCode }) => {
@@ -1102,16 +1200,18 @@ export class Runs {
 
   /** The activity list, whole, to every follower — but only when it differs from the last one. */
   private changed(): void {
-    const rows = activityRows(this.runs.values())
-    const text = JSON.stringify(rows)
-    if (text === this.activityIs) return
-    this.activityIs = text
-    for (const follower of this.followers) follower.activity?.(rows)
+    for (const follower of this.followers) {
+      const rows = this.activity(follower.project ?? null)
+      const text = JSON.stringify(rows)
+      if (text === this.activityIs.get(follower)) continue
+      this.activityIs.set(follower, text)
+      follower.activity?.(rows)
+    }
   }
 
-  /** The activity list as it stands (for a test, and for a page that has just arrived). */
-  activity(): ActivityRow[] {
-    return activityRows(this.runs.values())
+  /** The activity list as it stands — one project's, or every project's (for a test, and for a page that has just arrived). */
+  activity(project: string | null = null): ActivityRow[] {
+    return activityRows(this.runs.values(), project)
   }
 
   /**
@@ -1135,7 +1235,9 @@ export class Runs {
    */
   subscribe(follower: Follower): () => void {
     this.followers.add(follower)
-    follower.activity?.(this.activity())
+    const rows = this.activity(follower.project ?? null)
+    this.activityIs.set(follower, JSON.stringify(rows))
+    follower.activity?.(rows)
     for (const run of this.sessions()) {
       if (run.state) follower.state({ session: run.settled ?? run.id, state: run.state, since: run.stateSince })
     }
@@ -1150,7 +1252,10 @@ export class Runs {
       if (this.heldWait > 0) setTimeout(hand, this.heldWait).unref?.()
       else hand()
     }
-    return () => void this.followers.delete(follower)
+    return () => {
+      this.followers.delete(follower)
+      this.activityIs.delete(follower)
+    }
   }
 
   /**
@@ -1310,6 +1415,7 @@ export class Runs {
       copyOf: null,
       unchecked: null,
       rested: false,
+      trackedAt: this.now(),
       idle: null,
       startedAt: this.now(),
       pty,

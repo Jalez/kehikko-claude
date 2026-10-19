@@ -27,7 +27,7 @@ export interface Api {
    * list (on arrival and on every change). Returns the function that
    * stops following.
    */
-  feed?(notices: boolean, heard: { state(stated: Stated): void; notice(notice: Notice): void; activity?(items: ActivityRow[]): void }): () => void
+  feed?(notices: boolean, heard: { state(stated: Stated): void; notice(notice: Notice): void; activity?(items: ActivityRow[]): void }, project?: string | null): () => void
 }
 
 export const api: Api = {
@@ -43,7 +43,7 @@ export const api: Api = {
   async detach(projectPath, key, session) {
     answered(await ask('./api/detach', { body: { projectPath, key, session } }))
   },
-  feed(notices, heard) {
+  feed(notices, heard, project) {
     return follow<Stated | Notice | { items: ActivityRow[] }>(
       './api/feed',
       (event, name) => name === 'notice'
@@ -52,7 +52,8 @@ export const api: Api = {
             ? heard.activity?.((event as { items: ActivityRow[] }).items)
             : heard.state(event as Stated),
       /* An EventSource sends no header, so the ticket rides the query (see `stream` in doors.ts). */
-      { query: { ticket: ticket() ?? '', notices: notices ? '1' : '0' }, events: ['notice', 'activity'] },
+      /* The activity list is of the project the page is framed in only: a host files it under that one. */
+      { query: { ticket: ticket() ?? '', notices: notices ? '1' : '0', ...(project ? { project } : {}) }, events: ['notice', 'activity'] },
     )
   },
 }

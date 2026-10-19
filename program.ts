@@ -57,8 +57,8 @@ import { delimiter, join } from 'node:path'
  * ## Every command line this module ever runs, and it is the whole list
  *
  *     claude --help                                   once per binary: which flags and commands it has
- *     claude --session-id <uuid> [--settings <json>]  a new session
- *     claude --resume <uuid> [--settings <json>]      a session nothing else is running
+ *     claude --session-id <uuid> [--name <place>] [--settings <json>]  a new session
+ *     claude --resume <uuid> [--name <place>] [--settings <json>]      a session nothing else is running
  *     claude agents --json                            before every resume and every list: what is running. Reads; starts nothing
  *     claude attach <handle>                          a view of a session the program runs in the background
  *
@@ -97,6 +97,8 @@ export interface Able {
    * as it always was, and the person is told that it was not checked.
    */
   lists: boolean
+  /** Whether this copy takes a display name for a session (`--name`). */
+  names?: boolean
 }
 
 /**
@@ -159,8 +161,24 @@ export const STATES: readonly State[] = ['working', 'needs-you', 'finished']
 /** One session as the program's own records describe it. */
 export interface Recorded {
   id: string
-  /** The first thing the person said, one line, cut short. `''` when nothing readable was found. */
+  /**
+   * What the session is called: the name it was given (`--name`, `/rename`),
+   * else the title Claude Code wrote for it, else the first thing the person
+   * said. One line, cut short; `''` when nothing readable was found.
+   */
   label: string
+  /** The first thing the person said, one line, cut short. */
+  firstPrompt?: string
+  /** The last thing the person said, as Claude Code itself noted it. */
+  lastPrompt?: string
+  /** The pull requests the session opened or pushed to, newest last. */
+  prs?: { number: number; url: string }[]
+  /**
+   * The sessions this conversation was carried on in, oldest first. Claude
+   * Code resumes a conversation under a NEW id and writes `continued-in`
+   * into the old record; the old id is then a step behind the conversation.
+   */
+  next?: string[]
   /** When the record last grew, in milliseconds. */
   lastActive: number
 }
@@ -187,10 +205,10 @@ export interface Program {
   newId(): string
   /** Whether a string is spelled like one of this program's session ids. What arrives over the wire is checked with it. */
   isId(id: string): boolean
-  /** The arguments that start a new session known by `id`. */
-  fresh(id: string): string[]
-  /** The arguments that reopen the session `id`. */
-  resume(id: string): string[]
+  /** The arguments that start a new session known by `id`, called `name` where the copy can take one. */
+  fresh(id: string, name?: string): string[]
+  /** The arguments that reopen the session `id`, called `name` where the copy can take one. */
+  resume(id: string, name?: string): string[]
   /**
    * The id a started session is recorded under, or null while the program has
    * recorded nothing for it. `id` is what `fresh` was given and `since` when
@@ -323,6 +341,15 @@ const TELLS = '--settings'
  */
 const LISTS = [/^\s*agents\b/m, /^\s*attach\b/m]
 
+/**
+ * The flag a session is named with, so that Claude Code's own lists (its
+ * agents view, `/resume`, Remote Control) call it after its place. From the
+ * help of 2.1.303:
+ *
+ *     -n, --name <name>   Set a display name for this session
+ */
+const NAMES = '--name <'
+
 const able = new Map<string, Able>()
 
 /**
@@ -374,10 +401,10 @@ async function supports(file: string): Promise<Able> {
   /* Nothing was learned, so nothing extra is passed either: a flag this copy
      turned out not to have would stop it from starting at all. */
   const said: Able = !stdout
-    ? { ok: true, missing: null, tells: false, lists: false }
+    ? { ok: true, missing: null, tells: false, lists: false, names: false }
     : (() => {
         const missing = NEEDS.find((flag) => !stdout.includes(flag)) ?? null
-        return { ok: missing === null, missing, tells: stdout.includes(TELLS), lists: LISTS.every((command) => command.test(stdout)) }
+        return { ok: missing === null, missing, tells: stdout.includes(TELLS), lists: LISTS.every((command) => command.test(stdout)), names: stdout.includes(NAMES) }
       })()
   able.set(stamp, said)
   return said
@@ -448,29 +475,103 @@ export function firstPrompt(head: string): string {
   return ''
 }
 
-/** A first prompt never changes once written, so it is read once per record. */
-const labels = new Map<string, string>()
+/** How much of the end of a record is read for what Claude Code keeps appending: titles, the last prompt, PRs, continuations. */
+const TAIL_BYTES = 1024 * 1024
+/** How much of a title or a last prompt is kept. */
+const TITLE_CHARS = 120
 
-async function labelOf(file: string): Promise<string> {
-  const known = labels.get(file)
-  if (known) return known
+/** One line, cut short. */
+const line = (text: unknown, most: number): string => {
+  const first = typeof text === 'string' ? (text.split('\n').map((one) => one.trim()).find(Boolean) ?? '') : ''
+  return first.length > most ? `${first.slice(0, most - 1).trimEnd()}…` : first
+}
+
+export interface Tail {
+  /** The name given with `--name` or `/rename`, the latest. */
+  name: string
+  /** The title Claude Code wrote, the latest. */
+  title: string
+  lastPrompt: string
+  prs: { number: number; url: string }[]
+  next: string[]
+}
+
+/**
+ * What Claude Code appends to a record as the conversation goes on, read out
+ * of the end of one. Each of these rows is written again and again, so the
+ * last of each kind is the one that holds. Only these kinds are parsed, and
+ * nothing of the conversation itself is read:
+ *
+ *     { "type": "agent-name",   "agentName": "…" }
+ *     { "type": "custom-title", "customTitle": "…" }
+ *     { "type": "ai-title",     "aiTitle": "…" }
+ *     { "type": "last-prompt",  "lastPrompt": "…" }
+ *     { "type": "pr-link",      "prNumber": "3411", "prUrl": "https://github.com/…/pull/3411" }
+ *     { "type": "continued-in", "continuedInSessionId": "<uuid>" }
+ *
+ * Measured on 2.1.303: a resumed conversation is carried on under a new id,
+ * and the old record gets `continued-in` naming it — once per resume, so a
+ * conversation resumed three times from its old id has three.
+ */
+export function tailOf(text: string): Tail {
+  const out: Tail = { name: '', title: '', lastPrompt: '', prs: [], next: [] }
+  let custom = ''
+  for (const raw of text.split('\n')) {
+    if (!raw.includes('"type":"') || !/"type":"(agent-name|custom-title|ai-title|last-prompt|pr-link|continued-in)"/.test(raw)) continue
+    let row: Record<string, unknown>
+    try {
+      row = JSON.parse(raw.trim())
+    } catch {
+      /* The slice began mid-line. */
+      continue
+    }
+    if (row.type === 'agent-name' && line(row.agentName, TITLE_CHARS)) out.name = line(row.agentName, TITLE_CHARS)
+    else if (row.type === 'custom-title' && line(row.customTitle, TITLE_CHARS)) custom = line(row.customTitle, TITLE_CHARS)
+    else if (row.type === 'ai-title' && line(row.aiTitle, TITLE_CHARS)) out.title = line(row.aiTitle, TITLE_CHARS)
+    else if (row.type === 'last-prompt' && line(row.lastPrompt, TITLE_CHARS)) out.lastPrompt = line(row.lastPrompt, TITLE_CHARS)
+    else if (row.type === 'pr-link') {
+      const number = Number(row.prNumber)
+      const url = typeof row.prUrl === 'string' && /^https:\/\/[^\s"]+$/.test(row.prUrl) ? row.prUrl.slice(0, 300) : ''
+      if (Number.isSafeInteger(number) && number > 0 && url) out.prs = [...out.prs.filter((one) => one.url !== url), { number, url }]
+    } else if (row.type === 'continued-in' && typeof row.continuedInSessionId === 'string' && SESSION_ID.test(row.continuedInSessionId)) {
+      out.next = [...out.next.filter((one) => one !== row.continuedInSessionId), row.continuedInSessionId]
+    }
+  }
+  out.name ||= custom
+  out.prs = out.prs.slice(-5)
+  return out
+}
+
+/** What one record says, read once per version of it (its size and when it last changed). */
+const read = new Map<string, { stamp: string; first: string; tail: Tail }>()
+
+async function described(file: string, size: number, mtimeMs: number): Promise<{ first: string; tail: Tail }> {
+  const stamp = `${size}@${mtimeMs}`
+  const known = read.get(file)
+  if (known?.stamp === stamp) return known
   let head = ''
+  let end = ''
   try {
     const handle = await open(file, 'r')
     try {
-      const buffer = Buffer.alloc(HEAD_BYTES)
-      const { bytesRead } = await handle.read(buffer, 0, HEAD_BYTES, 0)
+      const buffer = Buffer.alloc(Math.min(HEAD_BYTES, size))
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
       head = buffer.subarray(0, bytesRead).toString('utf8')
+      const from = Math.max(0, size - TAIL_BYTES)
+      const tail = Buffer.alloc(size - from)
+      const got = await handle.read(tail, 0, tail.length, from)
+      end = tail.subarray(0, got.bytesRead).toString('utf8')
     } finally {
       await handle.close()
     }
   } catch {
-    return ''
+    return { first: '', tail: tailOf('') }
   }
-  const label = firstPrompt(head)
-  /* Only a found label is kept: a session nobody has spoken to yet will have one later. */
-  if (label) labels.set(file, label)
-  return label
+  /* The first prompt never changes once written, so one found is kept across versions. */
+  const first = known?.first || firstPrompt(head)
+  const said = { stamp, first, tail: tailOf(end) }
+  read.set(file, said)
+  return said
 }
 
 /** A session id as Claude Code spells one: a UUID, which is also what `--session-id` insists on. */
@@ -492,8 +593,17 @@ async function sessions(projectPath: string): Promise<Recorded[]> {
         if (!id || found.has(id)) return
         const file = join(dir, name)
         try {
-          const { mtimeMs } = await stat(file)
-          found.set(id, { id, label: await labelOf(file), lastActive: mtimeMs })
+          const { mtimeMs, size } = await stat(file)
+          const { first, tail } = await described(file, size, mtimeMs)
+          found.set(id, {
+            id,
+            label: tail.name || tail.title || first,
+            firstPrompt: first,
+            lastPrompt: tail.lastPrompt,
+            prs: tail.prs,
+            next: tail.next.filter((one) => one !== id),
+            lastActive: mtimeMs,
+          })
         } catch {
           /* It went away between the listing and the read. */
         }
@@ -501,6 +611,42 @@ async function sessions(projectPath: string): Promise<Recorded[]> {
     )
   }
   return [...found.values()].sort((a, b) => b.lastActive - a.lastActive)
+}
+
+/**
+ * Where a conversation is now, from an id it was once under.
+ *
+ * Every session `id` was carried on in, and theirs, is a candidate (`next`,
+ * followed until it ends). Of those, one a process is holding right now
+ * (`live`) is where the conversation is; otherwise the one that last grew.
+ * An id that was never carried on anywhere is its own answer. Only sessions
+ * this computer has a record of are followed to.
+ */
+export function headOf(id: string, held: ReadonlyMap<string, Recorded>, live: ReadonlySet<string> = new Set()): string {
+  const seen = new Set<string>([id])
+  const queue = [id]
+  while (queue.length && seen.size < 256) {
+    for (const next of held.get(queue.shift()!)?.next ?? []) {
+      if (seen.has(next) || !held.has(next)) continue
+      seen.add(next)
+      queue.push(next)
+    }
+  }
+  if (seen.size === 1) return id
+  const all = [...seen].filter((one) => held.has(one))
+  const running = all.filter((one) => live.has(one))
+  const among = running.length ? running : all
+  return among.reduce((best, one) => ((held.get(one)?.lastActive ?? 0) > (held.get(best)?.lastActive ?? 0) ? one : best), among[0] ?? id)
+}
+
+/**
+ * A place's name as Claude Code is given it: one line, no control characters,
+ * never starting with a dash (it is the value after `--name`, and must not
+ * read as a flag), and short.
+ */
+export function sessionName(words: readonly (string | null | undefined)[]): string {
+  const said = words.map((one) => (one ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean).join(' · ')
+  return said.replace(/^-+\s*/, '').slice(0, 120)
 }
 
 async function settled(projectPath: string, id: string): Promise<string | null> {
@@ -702,6 +848,12 @@ async function active(file: string, env: NodeJS.ProcessEnv = process.env): Promi
   return { known: true, active: parsed.map(readActive).filter((one): one is Active => one !== null) }
 }
 
+/** `--name` and the name, or nothing. Only a name `sessionName` would give is passed. */
+const named = (name: string | undefined): string[] => {
+  const clean = name ? sessionName([name]) : ''
+  return clean ? ['--name', clean] : []
+}
+
 export const PROGRAM: Program = {
   name: 'Claude Code',
   binary: BINARY,
@@ -711,8 +863,8 @@ export const PROGRAM: Program = {
   isId: (id) => SESSION_ID.test(id),
   /* A session id and nothing else. No prompt, and no flag about permissions:
      see "What is never here" at the top. `reports` is added by whoever starts it. */
-  fresh: (id) => ['--session-id', id],
-  resume: (id) => ['--resume', id],
+  fresh: (id, name) => ['--session-id', id, ...named(name)],
+  resume: (id, name) => ['--resume', id, ...named(name)],
   settled,
   sessions,
   install,

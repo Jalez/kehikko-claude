@@ -7,7 +7,7 @@ import { moduleFile } from 'kehikot-module-protocol'
 
 import { ID } from '../manifest.ts'
 import { placeKey } from '../place.ts'
-import { IGNORE, attach, detach, note, readPlaces, rekey, sessionsAt, type Places } from '../record.ts'
+import { IGNORE, attach, detach, follow, note, readPlaces, rekey, sessionsAt, type Places } from '../record.ts'
 
 const made: string[] = []
 const project = () => {
@@ -63,6 +63,7 @@ describe('the record of which session belongs where', () => {
           parts: ['methods', 'results'],
           kehikko: { id: 3, name: 'writing' },
           sessions: [A],
+          current: A,
         },
       },
       sessions: {
@@ -208,13 +209,13 @@ describe('a kehikko by its key', () => {
     const dir = project()
     attach(dir, KEYED, A)
     expect(JSON.parse(raw(dir)).places).toEqual({
-      'epic=thesis;parts=methods;kehikko=key:4072c9e5': { epic: 'thesis', parts: ['methods'], kehikko: { key: '4072c9e5', id: 3, name: 'writing' }, sessions: [A] },
+      'epic=thesis;parts=methods;kehikko=key:4072c9e5': { epic: 'thesis', parts: ['methods'], kehikko: { key: '4072c9e5', id: 3, name: 'writing' }, sessions: [A], current: A },
     })
     /* Renumbered and renamed: the same entry, brought up to date. */
     attach(dir, { ...KEYED, kehikkoId: 28, kehikkoName: 'drafting' }, B)
     const read = places(dir)
     expect(Object.keys(read.places)).toEqual([placeKey(KEYED)])
-    expect(read.places[placeKey(KEYED)]).toEqual({ epic: 'thesis', parts: ['methods'], kehikko: { key: '4072c9e5', id: 28, name: 'drafting' }, sessions: [A, B] })
+    expect(read.places[placeKey(KEYED)]).toEqual({ epic: 'thesis', parts: ['methods'], kehikko: { key: '4072c9e5', id: 28, name: 'drafting' }, sessions: [A, B], current: B })
     /* With no number said, the last one seen is kept; with none ever seen there is none. */
     attach(dir, { epic: 'thesis', parts: ['methods'], kehikko: { key: '4072c9e5' } }, B)
     expect(places(dir).places[placeKey(KEYED)]?.kehikko).toEqual({ key: '4072c9e5', id: 28, name: 'drafting' })
@@ -247,7 +248,7 @@ describe('a kehikko by its key', () => {
   test('a host that sends no key still files by the row number, exactly as before', () => {
     const dir = project()
     attach(dir, METHODS, A)
-    expect(JSON.parse(raw(dir)).places).toEqual({ 'epic=thesis;parts=methods;kehikko=3': { epic: 'thesis', parts: ['methods'], kehikko: { id: 3, name: 'writing' }, sessions: [A] } })
+    expect(JSON.parse(raw(dir)).places).toEqual({ 'epic=thesis;parts=methods;kehikko=3': { epic: 'thesis', parts: ['methods'], kehikko: { id: 3, name: 'writing' }, sessions: [A], current: A } })
   })
 
   test('migration: an entry filed under a row number whose kehikko NAME is the open one’s is re-keyed, epic and parts unchanged', () => {
@@ -421,5 +422,34 @@ describe('what is shared with the project’s history', () => {
     const dir = project()
     expect(places(dir).places).toEqual({})
     expect(existsSync(join(dir, '.kehikot'))).toBe(false)
+  })
+})
+
+describe('a conversation carried on under another id', () => {
+  const C = '33333333-3333-4333-8333-333333333333'
+  test('the new id takes the old one’s place everywhere, as current where it was', () => {
+    const dir = project()
+    const ONE = { epic: 'thesis', parts: [], kehikko: { id: 3 }, kehikkoName: 'writing' }
+    const TWO = { epic: 'thesis', parts: ['methods'], kehikko: { id: 3 }, kehikkoName: 'writing' }
+    attach(dir, ONE, A, { label: 'first' })
+    attach(dir, ONE, B)
+    attach(dir, ONE, A)
+    attach(dir, TWO, A)
+    const read = follow(dir, A, C)
+    expect(read.ok).toBe(true)
+    const after = readPlaces(dir)
+    if (!after.ok) throw new Error(after.error)
+    expect(after.value.places[placeKey(ONE)]).toMatchObject({ sessions: [C, B], current: C })
+    expect(after.value.places[placeKey(TWO)]).toMatchObject({ sessions: [C], current: C })
+    expect(after.value.sessions[C]?.label).toBe('first')
+  })
+
+  test('taking the current one off a place leaves it with none', () => {
+    const dir = project()
+    const ONE = { epic: 'thesis', parts: [], kehikko: { id: 3 }, kehikkoName: 'writing' }
+    attach(dir, ONE, A)
+    detach(dir, placeKey(ONE), A)
+    const after = readPlaces(dir)
+    expect(after.ok && after.value.places[placeKey(ONE)]?.current).toBeUndefined()
   })
 })

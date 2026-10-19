@@ -208,8 +208,16 @@ export function Chooser({
         return (
           <div key={row.id} role="option" aria-selected={on} data-row={item.attach ? 'other' : 'session'} data-session={row.id} className={shell} onMouseMove={() => setAt(index)}>
             {number}
-            <button type="button" className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => onOpen(row.id)} title={row.id}>
-              <span className="min-w-0 flex-1 truncate">{named(row)}</span>
+            <button type="button" className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => onOpen(row.id)} title={[row.id, row.firstPrompt && `First: ${row.firstPrompt}`, row.lastPrompt && `Last: ${row.lastPrompt}`].filter(Boolean).join('\n')}>
+              <span className="flex min-w-0 flex-1 items-baseline gap-2">
+                <span className="min-w-0 shrink truncate">{named(row)}</span>
+                {row.lastPrompt ? <span className="text-muted-foreground min-w-0 flex-1 truncate" data-last>{row.lastPrompt}</span> : null}
+              </span>
+              {row.prs?.length ? (
+                <span className="text-muted-foreground shrink-0" data-prs title={row.prs.map((pr) => pr.url).join('\n')}>
+                  {row.prs.slice(-2).map((pr) => `#${pr.number}`).join(' ')}
+                </span>
+              ) : null}
               {row.near?.length ? (
                 <span className="text-muted-foreground shrink-0" data-near title={`Already the session of another place of this epic: ${row.near.join('; ')}`}>
                   this epic

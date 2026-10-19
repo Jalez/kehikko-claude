@@ -168,7 +168,7 @@ describe('what a place holds', () => {
       expect((await answer('POST', '/api/rekey', none, body, TICKET))?.body).toEqual({ ok: true, moved: 1 })
       const read = readPlaces(dir)
       expect(read.ok && Object.keys(read.value.places)).toEqual([keyed])
-      expect(read.ok && read.value.places[keyed]).toEqual({ epic: 'thesis', parts: [], kehikko: { key: '4072c9e5', id: 28, name: 'writing' }, sessions: [A] })
+      expect(read.ok && read.value.places[keyed]).toEqual({ epic: 'thesis', parts: [], kehikko: { key: '4072c9e5', id: 28, name: 'writing' }, sessions: [A], current: A })
       expect(read.ok && Object.hasOwn(read.value.places, old)).toBe(false)
       /* Asked again, there is nothing left to do. */
       expect((await answer('POST', '/api/rekey', none, body, TICKET))?.body).toEqual({ ok: true, moved: 0 })

@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 
 import { spawnSync } from 'node:child_process'
 
-import { PROGRAM, configDir, firstPrompt, home, readActive, recordDirs } from '../program.ts'
+import { PROGRAM, configDir, firstPrompt, headOf, home, readActive, recordDirs, sessionName, tailOf, type Recorded } from '../program.ts'
 import { CONFIG, HOME } from './setup.ts'
 
 /**
@@ -76,13 +76,13 @@ describe('finding the binary', () => {
 
 describe('whether a copy can do what is asked of it', () => {
   test('one with both flags can', async () => {
-    expect(await PROGRAM.supports(STAND_IN)).toEqual({ ok: true, missing: null, tells: true, lists: true })
+    expect(await PROGRAM.supports(STAND_IN)).toEqual({ ok: true, missing: null, tells: true, lists: true, names: false })
   })
 
   test('one whose help has no --session-id is too old, and the flag is named', async () => {
     const bin = scratch('old')
     writeFileSync(join(bin, 'claude'), `#!/bin/sh\nSTANDIN_OLD=1 exec "${STAND_IN}" "$@"\n`, { mode: 0o755 })
-    expect(await PROGRAM.supports(join(bin, 'claude'))).toEqual({ ok: false, missing: '--session-id', tells: false, lists: false })
+    expect(await PROGRAM.supports(join(bin, 'claude'))).toEqual({ ok: false, missing: '--session-id', tells: false, lists: false, names: false })
   })
 
   test('one whose help cannot be read is not called too old: nothing was learned', async () => {
@@ -206,7 +206,7 @@ describe('asking what is running', () => {
 
   test('a copy with `agents` and `attach` in its help can be asked; one without either cannot, and is not called too old to use', async () => {
     expect((await PROGRAM.supports(STAND_IN)).lists).toBe(true)
-    expect(await PROGRAM.supports(wrapped('noagents', 'STANDIN_NOAGENTS=1'))).toEqual({ ok: true, missing: null, tells: true, lists: false })
+    expect(await PROGRAM.supports(wrapped('noagents', 'STANDIN_NOAGENTS=1'))).toEqual({ ok: true, missing: null, tells: true, lists: false, names: false })
   })
 
   test('the option `--agents` in an older help is not the command `agents`', async () => {
@@ -320,5 +320,55 @@ describe('reading what the program prints', () => {
     const said = await PROGRAM.active(join(bin, 'claude'))
     expect(said.known && said.active.length).toBe(201)
     expect(said.known && said.active.at(-1)?.session).toBe(B)
+  })
+})
+
+describe('what Claude Code appends to a record', () => {
+  const X = 'a2ffb976-52bd-4914-b278-9e58b762be9d'
+  const Y = '73785a82-9d3e-4ea9-b726-8f0b2c964a17'
+  const Z = '709bdfd1-e77e-46e3-b317-4fc23ab766b7'
+  /* The shapes as 2.1.303 wrote them, field for field. */
+  const rows = [
+    { type: 'ai-title', aiTitle: 'sign status toggle', sessionId: X },
+    { type: 'ai-title', aiTitle: 'sign status toggle permissions', sessionId: X },
+    { type: 'last-prompt', lastPrompt: 'Couple of questions: User cant switch the sign status\nsecond line', sessionId: X },
+    { type: 'pr-link', sessionId: X, prNumber: '3411', prUrl: 'https://github.com/Jalez/kollekti/pull/3411', prRepository: 'Jalez/kollekti' },
+    { type: 'pr-link', sessionId: X, prNumber: '3411', prUrl: 'https://github.com/Jalez/kollekti/pull/3411', prRepository: 'Jalez/kollekti' },
+    { type: 'continued-in', sessionId: X, continuedInSessionId: Y },
+    { type: 'user', message: { content: 'nothing of this is read' } },
+    { type: 'continued-in', sessionId: X, continuedInSessionId: Z },
+  ]
+
+  test('the latest title, the last prompt, each PR once, and every continuation in order', () => {
+    const tail = tailOf(`ut half a line"}\n${rows.map((one) => JSON.stringify(one)).join('\n')}\n`)
+    expect(tail).toEqual({
+      name: '',
+      title: 'sign status toggle permissions',
+      lastPrompt: 'Couple of questions: User cant switch the sign status',
+      prs: [{ number: 3411, url: 'https://github.com/Jalez/kollekti/pull/3411' }],
+      next: [Y, Z],
+    })
+  })
+
+  test('a name the session was given wins over the title Claude Code wrote', () => {
+    const tail = tailOf([{ type: 'ai-title', aiTitle: 'a title' }, { type: 'agent-name', agentName: 'MAKE MINUTES CUSTOM' }].map((one) => JSON.stringify(one)).join('\n'))
+    expect(tail.name).toBe('MAKE MINUTES CUSTOM')
+  })
+
+  test('a conversation is where a process holds it now, else where it last grew', () => {
+    const at = (id: string, lastActive: number, next: string[] = []): [string, Recorded] => [id, { id, label: '', lastActive, next }]
+    const held = new Map([at(X, 1, [Y, Z]), at(Y, 30), at(Z, 20)])
+    expect(headOf(X, held)).toBe(Y)
+    expect(headOf(X, held, new Set([Z]))).toBe(Z)
+    /* Never to a session this computer has no record of; and an id carried on nowhere is its own. */
+    expect(headOf(X, new Map([at(X, 1, [Y])]))).toBe(X)
+    expect(headOf(Y, held)).toBe(Y)
+    /* Followed through more than one step, and a loop does not hang it. */
+    expect(headOf(X, new Map([at(X, 1, [Y]), at(Y, 2, [Z]), at(Z, 3, [X])]))).toBe(Z)
+  })
+
+  test('a place’s name is one line, never a flag', () => {
+    expect(sessionName(['hippos-portal', 'kiosk-info-reel', '', 'main'])).toBe('hippos-portal · kiosk-info-reel · main')
+    expect(sessionName(['--yolo\n', 'x'])).toBe('yolo · x')
   })
 })

@@ -177,7 +177,7 @@ class Watcher implements Viewer {
 /** Long enough for the emulator's write queue and the promises behind an open to have run. */
 const settle = () => new Promise((done) => setTimeout(done, 25))
 
-function world(options: { found?: string | null; able?: boolean; tells?: boolean; lists?: boolean; asking?: 'fails'; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number } = {}) {
+function world(options: { found?: string | null; able?: boolean; tells?: boolean; lists?: boolean; names?: boolean; asking?: 'fails'; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number } = {}) {
   const logged: string[] = []
   const ptys: FakePty[] = []
   /* What the stand-in program holds a record for, by folder. */
@@ -190,7 +190,7 @@ function world(options: { found?: string | null; able?: boolean; tells?: boolean
   const program: Program = {
     ...PROGRAM,
     find: () => ({ file: found, looked: ['/fake/bin'], usual: [] }),
-    supports: async () => ({ ok: options.able ?? true, missing: options.able === false ? '--session-id' : null, tells: options.tells ?? false, lists: options.lists ?? true }),
+    supports: async () => ({ ok: options.able ?? true, missing: options.able === false ? '--session-id' : null, tells: options.tells ?? false, lists: options.lists ?? true, names: options.names ?? false }),
     /* What the stand-in program says is running, asked every time: a test changes `elsewhere` between two opens. */
     active: async () => {
       asked.count += 1
@@ -230,7 +230,7 @@ function world(options: { found?: string | null; able?: boolean; tells?: boolean
     elsewhere,
     asked,
     /** The program writes its record: from here on the session exists. */
-    records: (projectPath: string, id: string, label = '') => held.set(projectPath, [...(held.get(projectPath) ?? []).filter((one) => one.id !== id), { id, label, lastActive: clock }]),
+    records: (projectPath: string, id: string, label = '', next: string[] = []) => held.set(projectPath, [...(held.get(projectPath) ?? []).filter((one) => one.id !== id), { id, label, lastActive: clock, next }]),
     later: (ms: number) => {
       clock += ms
     },
@@ -340,7 +340,7 @@ describe('opening a session', () => {
     await w.runs.open(ask(dir, A, keyed), new Watcher())
     const read = readPlaces(dir)
     expect(read.ok && read.value.places).toEqual({
-      'epic=thesis;parts=methods;kehikko=key:4072c9e5': { epic: 'thesis', parts: ['methods'], kehikko: { key: '4072c9e5', id: 3, name: 'writing' }, sessions: [A] },
+      'epic=thesis;parts=methods;kehikko=key:4072c9e5': { epic: 'thesis', parts: ['methods'], kehikko: { key: '4072c9e5', id: 3, name: 'writing' }, sessions: [A], current: A },
     })
     /* The host renumbers it: the same place, the same session, and only the note changes. */
     w.ptys[0]!.ends(0)
@@ -1700,5 +1700,80 @@ describe('the activity list a page passes to the host', () => {
     expect(rows.length).toBe(64)
     expect(rows[0]).toMatchObject({ id: 'x0', state: 'attention' })
     expect(rows[1]!.id).toBe('x69')
+  })
+})
+
+describe('a conversation carried on under another id', () => {
+  const C = '33333333-3333-4333-8333-333333333333'
+
+  test('a recorded id Claude Code has carried on is opened where it went, and the record follows it', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A, 'old', [C])
+    w.later(1_000)
+    w.records(dir, C, 'old, carried on')
+    const first = await w.runs.open(ask(dir, A), new Watcher())
+    expect(isRun(first)).toBe(true)
+    await settle()
+    w.ptys[0]!.ends(0)
+    await settle()
+    expect(w.ptys[0]!.args).toEqual(['--resume', C])
+    expect(listed(dir)).toEqual([C])
+    const read = readPlaces(dir)
+    expect(read.ok && read.value.places[placeKey(HERE)]?.current).toBe(C)
+  })
+
+  test('carried on into a background session: attached to, not resumed as a second copy', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A, 'old', [C])
+    w.records(dir, C, 'carried on')
+    w.elsewhere.push({ session: C, kind: 'background', called: 'background', handle: '33333333', pid: 4242, cwd: dir, startedAt: 1, name: 'KIOSK' })
+    const viewer = new Watcher()
+    await w.runs.open(ask(dir, A), viewer)
+    expect(w.ptys[0]!.args).toEqual(['attach', '33333333'])
+  })
+
+  test('the process moving to another conversation makes that one the place’s current session', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A, 'first')
+    const viewer = new Watcher()
+    const run = await w.runs.open(ask(dir, A), viewer)
+    if (!isRun(run)) throw new Error('not opened')
+    run.pty.pid = 777
+    await settle()
+    /* The person ran /resume in the terminal and picked another conversation. */
+    w.records(dir, C, 'another')
+    w.elsewhere.push({ session: C, kind: 'interactive', called: 'interactive', handle: null, pid: 777, cwd: dir, startedAt: 1, name: '' })
+    await w.runs.track(run)
+    expect(run.settled).toBe(C)
+    expect(listed(dir)).toEqual([A, C])
+    const read = readPlaces(dir)
+    expect(read.ok && read.value.places[placeKey(HERE)]?.current).toBe(C)
+    expect(viewer.said.at(-1)).toMatchObject({ exists: true, session: C })
+  })
+
+  test('a copy that takes a name is named after its place', async () => {
+    const dir = project()
+    const w = world({ names: true })
+    await w.runs.open(ask(dir, null, { ...HERE, partNames: ['Methods'] }), new Watcher())
+    await settle()
+    expect(w.ptys[0]!.args).toEqual(['--session-id', B, '--name', `${dir.split('/').at(-1)} · thesis · Methods · writing`])
+  })
+})
+
+describe('the activity list, by project', () => {
+  test('a follower framed in one project is told that project’s sessions only', async () => {
+    const one = project()
+    const two = project()
+    const w = world()
+    const a = await w.runs.open(ask(one, null), new Watcher())
+    const b = await w.runs.open(ask(two, null), new Watcher())
+    if (!isRun(a) || !isRun(b)) throw new Error('not opened')
+    a.state = 'working'
+    b.state = 'needs-you'
+    expect(activityRows([a, b], one).map((row) => row.id)).toEqual([a.id])
+    expect(activityRows([a, b], null).length).toBe(2)
   })
 })
