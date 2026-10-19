@@ -19,6 +19,8 @@ import {
   named,
   noticeLine,
   placeId,
+  projectOf,
+  relinked,
   since,
   standing,
   standingWords,
@@ -39,6 +41,8 @@ const MISSING = 4404
 const RESTED = 4001
 /** The session is open in another process that cannot be attached to. Nothing was started: the person is asked. */
 const ELSEWHERE = 4409
+/** Ended on the person's press to be resumed in the project's new folder: the view opens it again at once. */
+const MOVED = 4002
 
 /** Try again: ask whether this module's own server is there now. The standing it reports is what redraws. */
 const knock = () => void probeServer()
@@ -51,7 +55,8 @@ const knock = () => void probeServer()
  * It is here for the reload nobody chose: the plumbing reloads a page that is
  * older than its server, Vite's client reloads one when its server returns,
  * and a person who answered "which one?" a minute ago should come back to
- * what was on screen. Scoped by project and keyed by place, so a choice made
+ * what was on screen. Scoped by project — its id when the host sends one, so
+ * a renamed folder is the same project — and keyed by place, so a choice made
  * in one place cannot land in another.
  */
 const remembered = held<string>('kehikot.claude.showing', (stored) => (typeof stored === 'string' && stored ? stored : null))
@@ -142,14 +147,14 @@ export function App() {
      value, so the place below moves when a part is picked and not every time
      the host speaks. */
   const { parts } = useFocus(host)
-  const { where, projectPath, epic, kehikko } = host
+  const { where, projectPath, projectId, epic, kehikko } = host
   /* The kehikko by its `key` when the host sends one, and by its `id` when it
      does not (see `standing`). All three are dependencies: the key is what the
      place is, and the id and the name are written beside it. */
   const at = useMemo(
-    () => standing({ where, projectPath, epic, parts, kehikko }),
+    () => standing({ where, projectPath, projectId, epic, parts, kehikko }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [where, projectPath, epic, parts, kehikko?.key, kehikko?.id, kehikko?.name],
+    [where, projectPath, projectId, epic, parts, kehikko?.key, kehikko?.id, kehikko?.name],
   )
   const server = useServerStanding()
   const cover = coverFor({ where, projectPath, server })
@@ -275,6 +280,15 @@ export function Sessions({
   const [blocked, setBlocked] = useState<{ place: string; session: string; there: Elsewhere | null; left: boolean } | null>(null)
   /** What each view turned out to be: a view of a background session, a copy, or one resumed unchecked. */
   const [hows, setHows] = useState<Record<number, { background?: Elsewhere; copyOf?: Elsewhere; unchecked?: 'too-old' | 'failed' }>>({})
+  /**
+   * Views whose session runs in a folder the project has since left (renamed or moved): where the
+   * project is now, as the server said it, by view number. And the ones the person dismissed the
+   * line for, by the folder it was about, so a second rename says so again.
+   */
+  const [moves, setMoves] = useState<Record<number, string | null>>({})
+  const [dismissed, setDismissed] = useState<Record<number, string>>({})
+  /** What the server said when a restart in the new folder was not done. */
+  const [notMoved, setNotMoved] = useState<string | null>(null)
   /** The installer's own view, while it runs and after it fails. */
   const [installing, setInstalling] = useState<{ n: number; failed: string | null } | null>(null)
   const [again, setAgain] = useState(0)
@@ -302,6 +316,7 @@ export function Sessions({
 
   /* The canvas moved, or something changed that the list should reflect. */
   const project = at?.projectPath ?? null
+  const projectId = at?.projectId ?? null
   const key = at?.key ?? null
   useEffect(() => {
     if (!project || !key) return
@@ -328,13 +343,23 @@ export function Sessions({
       ready = asked
     }
     ready
-      .then(() => api.place(project, key))
-      .then((value) => live && setListing({ id: placeId({ projectPath: project, key }), value }))
+      .then(() => api.place(project, key, projectId))
+      .then((value) => live && setListing({ id: placeId({ projectPath: project, projectId, key }), value }))
       .catch((error: unknown) => live && setRefusal(error instanceof Error ? error.message : String(error)))
     return () => {
       live = false
     }
-  }, [project, key, again, api])
+  }, [project, projectId, key, again, api])
+
+  /*
+   * The same project at a new folder: renamed or moved while its sessions ran. Nothing is let go and
+   * nothing is reopened — the views are told the new folder, so that one which connects from now on
+   * says it, and the server follows the run there when the list above is read.
+   */
+  useEffect(() => {
+    setViews((all) => relinked(all, at) ?? all)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project, projectId])
 
   /*
    * Another place. The list that was open over the last one is not about
@@ -346,18 +371,36 @@ export function Sessions({
   useEffect(() => {
     setAsking(false)
     setBlocked(null)
+    setNotMoved(null)
     const gone = views.filter((one) => !one.kept && placeId(one.at) !== id).map((one) => one.n)
     if (!gone.length) return
     setViews((all) => all.filter((one) => !gone.includes(one.n)))
     setShownBy((all) => Object.fromEntries(Object.entries(all).filter(([, shown]) => !gone.includes(shown))))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project, key])
+  }, [id])
 
   const drop = (n: number) => {
     setViews((all) => all.filter((one) => one.n !== n))
     setShownBy((all) => Object.fromEntries(Object.entries(all).filter(([, shown]) => shown !== n)))
     setStandings(({ [n]: _gone, ...rest }) => rest)
     setHows(({ [n]: _was, ...rest }) => rest)
+    setMoves(({ [n]: _moved, ...rest }) => rest)
+  }
+
+  /*
+   * A view whose session the server ended on the person's press, to resume it in the project's new
+   * folder: replaced in place by a fresh view of the same session, which connects with the folder
+   * the project is in now. Not a new choice of session and not a question: the same one, again.
+   */
+  const reopen = (one: View) => {
+    count.current += 1
+    const now = standingOn.current
+    const next: View = { ...one, n: count.current, at: now && placeId(now) === placeId(one.at) ? now : one.at, shownAt: Date.now() }
+    setViews((all) => all.map((each) => (each.n === one.n ? next : each)))
+    setShownBy((all) => Object.fromEntries(Object.entries(all).map(([place, shown]) => [place, shown === one.n ? next.n : shown])))
+    setStandings(({ [one.n]: _gone, ...rest }) => rest)
+    setHows(({ [one.n]: _was, ...rest }) => rest)
+    setMoves(({ [one.n]: _moved, ...rest }) => rest)
   }
 
   /** Put a session on screen for this place: null is a new one. `copy` is a person's answer to "it is open elsewhere". */
@@ -373,7 +416,7 @@ export function Sessions({
     const gone = surplus(kept, next.n, MOST_VIEWS).map((one) => one.n)
     setViews(kept.filter((one) => !gone.includes(one.n)))
     setShownBy((all) => ({ ...Object.fromEntries(Object.entries(all).filter(([, shown]) => !gone.includes(shown))), [id]: next.n }))
-    if (session) remembered.at(at.projectPath).keep(at.key, session)
+    if (session) remembered.at(projectOf(at)).keep(at.key, session)
   }
 
   /*
@@ -390,7 +433,7 @@ export function Sessions({
     if (!at || !here || view || installing) return
     /* Asked about, and not answered with "open it": nothing opens here by itself. */
     if (blocked && blocked.place === id) return
-    const step = decide(here, remembered.at(at.projectPath).read(at.key))
+    const step = decide(here, remembered.at(projectOf(at)).read(at.key))
     if (step.do !== 'open') return
     if (step.session) return opened.current(step.session)
     /* A new session waits a moment for the canvas to stop moving. */
@@ -406,6 +449,10 @@ export function Sessions({
   }, [view?.n])
 
   const stood = (one: View, next: Standing) => {
+    if (next.at === 'closed' && next.code === MOVED) {
+      reopen(one)
+      return
+    }
     if (next.at === 'closed' && next.code === RESTED) {
       /* The server put a waiting process away behind this view. Nothing is
          drawn about it: the view is let go, and the place opens its session
@@ -438,12 +485,13 @@ export function Sessions({
       if (session) setBlocked({ place: placeId(one.at), session, there: heard.elsewhere, left: false })
       return
     }
+    if (heard.moved !== undefined) setMoves((all) => ({ ...all, [one.n]: heard.moved ?? null }))
     if (heard.opened) setHows((all) => ({ ...all, [one.n]: { background: heard.background, copyOf: heard.copyOf, unchecked: heard.unchecked } }))
     if (heard.typed || heard.exists) setViews((all) => all.map((each) => (each.n === one.n && !each.kept ? { ...each, kept: true } : each)))
     const session = heard.session
     if (session) {
       setViews((all) => all.map((each) => (each.n === one.n && each.session !== session ? { ...each, session } : each)))
-      remembered.at(one.at.projectPath).keep(one.at.key, session)
+      remembered.at(projectOf(one.at)).keep(one.at.key, session)
       if (heard.label) setLabels((all) => ({ ...all, [session]: heard.label! }))
       if (heard.state !== undefined) setStates((all) => ({ ...all, [session]: { state: heard.state ?? null, since: heard.since ?? Date.now() } }))
       /* A session that has come to exist since the list was read — a new one somebody has now spoken
@@ -498,6 +546,15 @@ export function Sessions({
   const how = view ? standingWords(hows[view.n], here?.program.name ?? 'Claude Code', Date.now()) : null
   const doing = (view?.session && Object.hasOwn(states, view.session) ? states[view.session] : undefined) ?? null
   const mark = doing?.state ? MARKS[doing.state] : null
+  /* The session on screen runs in a folder its project has left: the line saying so, until dismissed. */
+  const movedTo = view && at && moves[view.n] && dismissed[view.n] !== moves[view.n] ? at.projectPath : null
+  const working = doing?.state === 'working'
+  const restartHere = () => {
+    const session = view?.session
+    if (!session || !api.restart || working) return
+    setNotMoved(null)
+    void api.restart(session).catch((error: unknown) => setNotMoved(error instanceof Error ? error.message : String(error)))
+  }
 
   /*
    * The same way to the sessions, declared for the container's header: a Go
@@ -591,7 +648,7 @@ export function Sessions({
             onEnd={(session) => void api.end(session).finally(() => setTimeout(() => setAgain((n) => n + 1), 150))}
             onDetach={(session) => {
               if (!at) return
-              if (remembered.at(at.projectPath).read(at.key) === session) remembered.at(at.projectPath).keep(at.key, null)
+              if (remembered.at(projectOf(at)).read(at.key) === session) remembered.at(projectOf(at)).keep(at.key, null)
               void api.detach(at.projectPath, at.key, session).finally(() => setAgain((n) => n + 1))
             }}
           />
@@ -651,6 +708,7 @@ export function Sessions({
                 target={{
                   what: 'session',
                   projectPath: one.at.projectPath,
+                  ...(one.at.projectId ? { projectId: one.at.projectId } : {}),
                   place: {
                     epic: one.at.epic,
                     parts: one.at.parts,
@@ -703,6 +761,40 @@ export function Sessions({
       </div>
 
       {cover && (view || installing) && <Cover strip state={cover} name={NAME} onRetry={knock} />}
+
+      {/* The project's folder was renamed while this session ran. It goes on working there, under the
+          old name; restarting it in the new folder is the person's to press, never done by itself. */}
+      {terminal && view && movedTo && !ended && !cover && (
+        <div className="flex items-center justify-between gap-2 border-t px-2 py-1" role="status" data-moved={movedTo}>
+          <span className="text-muted-foreground min-w-0 text-[11px]">
+            This folder was renamed to {movedTo}. Claude still uses the old path; restart in the new folder when it's idle.
+            {notMoved ? ` ${notMoved}` : ''}
+          </span>
+          <span className="flex shrink-0 gap-1">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-6 px-2 text-xs"
+              disabled={working || !view.session || !api.restart}
+              title={working ? 'It is working. Restart it when it is idle.' : 'Ends this session and resumes it in the new folder'}
+              onClick={restartHere}
+            >
+              Restart in the new folder
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-6 px-2 text-xs"
+              onClick={() => {
+                const was = moves[view.n]
+                if (was) setDismissed((all) => ({ ...all, [view.n]: was }))
+              }}
+            >
+              Dismiss
+            </Button>
+          </span>
+        </div>
+      )}
 
       {terminal && ended && !cover && view && (
         <div className="flex items-center justify-between gap-2 border-t px-2 py-1" data-ended>
