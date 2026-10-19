@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import { CLOSED, Runs, activityRows, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
 import { placeKey } from '../place.ts'
-import { PROGRAM, type Active, type Program, type Recorded } from '../program.ts'
+import { PROGRAM, readActive, type Active, type Program, type Recorded } from '../program.ts'
 import { readPlaces, sessionsAt, type NamedPlace } from '../record.ts'
 
 /**
@@ -177,7 +177,7 @@ class Watcher implements Viewer {
 /** Long enough for the emulator's write queue and the promises behind an open to have run. */
 const settle = () => new Promise((done) => setTimeout(done, 25))
 
-function world(options: { found?: string | null; able?: boolean; tells?: boolean; lists?: boolean; names?: boolean; asking?: 'fails'; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number } = {}) {
+function world(options: { found?: string | null; able?: boolean; tells?: boolean; lists?: boolean; names?: boolean; asking?: 'fails'; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number; watchEvery?: number | null } = {}) {
   const logged: string[] = []
   const ptys: FakePty[] = []
   /* What the stand-in program holds a record for, by folder. */
@@ -186,6 +186,8 @@ function world(options: { found?: string | null; able?: boolean; tells?: boolean
   /** What is running in processes this module did not start, as the program would list it. */
   const elsewhere: Active[] = []
   const asked = { count: 0 }
+  /** Set to make the asking fail from here on, as a copy that errors would. */
+  const failing = { now: false }
   let found: string | null = options.found === undefined ? '/fake/bin/claude' : options.found
   const program: Program = {
     ...PROGRAM,
@@ -194,7 +196,7 @@ function world(options: { found?: string | null; able?: boolean; tells?: boolean
     /* What the stand-in program says is running, asked every time: a test changes `elsewhere` between two opens. */
     active: async () => {
       asked.count += 1
-      return options.asking === 'fails' ? { known: false, why: 'failed' } : { known: true, active: [...elsewhere] }
+      return options.asking === 'fails' || failing.now ? { known: false, why: 'failed' } : { known: true, active: [...elsewhere] }
     },
     newId: (() => {
       const ids = [B, '33333333-3333-4333-8333-333333333333', '44444444-4444-4444-8444-444444444444', '55555555-5555-4555-8555-555555555555']
@@ -214,6 +216,8 @@ function world(options: { found?: string | null; able?: boolean; tells?: boolean
     port: () => options.port ?? null,
     /* No clock of its own: a test moves the time and calls `rest`. */
     every: null,
+    /* Nor for asking about background sessions, unless a test wants the clock: it calls `watch` itself. */
+    watchEvery: options.watchEvery ?? null,
     log: (line) => logged.push(line),
     now: () => clock,
     screen: headless,
@@ -229,6 +233,7 @@ function world(options: { found?: string | null; able?: boolean; tells?: boolean
     logged,
     elsewhere,
     asked,
+    failing,
     /** The program writes its record: from here on the session exists. */
     records: (projectPath: string, id: string, label = '', next: string[] = []) => held.set(projectPath, [...(held.get(projectPath) ?? []).filter((one) => one.id !== id), { id, label, lastActive: clock, next }]),
     later: (ms: number) => {
@@ -1775,5 +1780,141 @@ describe('the activity list, by project', () => {
     b.state = 'needs-you'
     expect(activityRows([a, b], one).map((row) => row.id)).toEqual([a.id])
     expect(activityRows([a, b], null).length).toBe(2)
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * A background session this module has a view of: its state is asked, not told
+ * ------------------------------------------------------------------ */
+
+describe('the state of a background session a place is attached to', () => {
+  /** An entry as `claude agents --json` prints it, read the way the program's answer is. */
+  const listedAs = (state: unknown, session = A): Active => readActive({ pid: 4242, id: session.slice(0, 8), cwd: '/somewhere/project', kind: 'background', startedAt: 900_000, sessionId: session, name: 'stand-in', status: 'idle', state })!
+  const attached = async (state: unknown, options: Parameters<typeof world>[0] = {}) => {
+    const dir = project()
+    const w = world({ tells: true, port: 9590, ...options })
+    w.records(dir, A, 'started as a background job')
+    w.elsewhere.push(listedAs(state))
+    const viewer = new Watcher()
+    const run = (await w.runs.open(ask(dir, A), viewer)) as Run
+    if (!isRun(run)) throw new Error('not opened')
+    await settle()
+    return { dir, w, viewer, run }
+  }
+  const now = (w: ReturnType<typeof world>, state: unknown) => {
+    w.elsewhere.length = 0
+    w.elsewhere.push(listedAs(state))
+  }
+
+  test('working, then done: a working row, then a finished one — and a notice, since nobody was looking', async () => {
+    const { w, viewer, run } = await attached('working')
+    /* No hooks of this module's in a view, and still a state: the program said it. */
+    expect(run.secret).toBeNull()
+    expect(w.runs.activity().map((row) => [row.id, row.state])).toEqual([[A, 'working']])
+    const feed = follower()
+    w.runs.subscribe(feed.one)
+    w.runs.look(run, viewer, false)
+
+    w.later(10_000)
+    now(w, 'done')
+    await w.runs.watch()
+    expect(w.runs.activity()).toMatchObject([{ id: A, state: 'done', detail: 'turn ended', since: run.stateSince }])
+    expect(run.state).toBe('finished')
+    expect(viewer.said.at(-1)).toMatchObject({ session: A, state: 'finished' })
+    expect(feed.states.at(-1)).toMatchObject({ session: A, state: 'finished' })
+    expect(feed.got.map((one) => one.state)).toEqual(['finished'])
+
+    /* Asked again with nothing changed: nothing said again. */
+    await w.runs.watch()
+    expect(feed.got.length).toBe(1)
+  })
+
+  test('blocked is needs-you: an attention row', async () => {
+    const { w, run } = await attached('working')
+    now(w, 'blocked')
+    await w.runs.watch()
+    expect(run.state).toBe('needs-you')
+    expect(w.runs.activity()).toMatchObject([{ id: A, state: 'attention' }])
+    /* And it is what a newly opened view is told, too. */
+    const { w: w2 } = await attached('blocked')
+    expect(w2.runs.activity()).toMatchObject([{ id: A, state: 'attention' }])
+  })
+
+  test('a word the program has not been known to say is no state at all: no row', async () => {
+    const { w, run } = await attached('pondering')
+    expect(run.state).toBeNull()
+    expect(w.runs.activity()).toEqual([])
+    now(w, 'working')
+    await w.runs.watch()
+    expect(w.runs.activity()).toMatchObject([{ state: 'working' }])
+    now(w, 'pondering')
+    await w.runs.watch()
+    expect(run.state).toBeNull()
+    expect(w.runs.activity()).toEqual([])
+  })
+
+  test('a session the program no longer lists has no state that still holds', async () => {
+    const { w, run } = await attached('working')
+    w.elsewhere.length = 0
+    await w.runs.watch()
+    expect(run.state).toBeNull()
+    expect(w.runs.activity()).toEqual([])
+  })
+
+  test('a view of a background session that is working is not called unknown for printing nothing: the program says what it is doing', async () => {
+    const { w, run } = await attached('working', { stale: 60_000 })
+    w.later(5 * 60_000)
+    w.runs.rest()
+    expect(run.state).toBe('working')
+  })
+
+  test('a failed asking changes nothing and is logged once, and that it works again is logged once', async () => {
+    const { w, run } = await attached('working')
+    w.failing.now = true
+    await w.runs.watch()
+    await w.runs.watch()
+    await w.runs.watch()
+    expect(run.state).toBe('working')
+    expect(w.logged.filter((line) => line.includes('could not ask what the background sessions are doing')).length).toBe(1)
+    w.failing.now = false
+    now(w, 'done')
+    await w.runs.watch()
+    await w.runs.watch()
+    expect(run.state).toBe('finished')
+    expect(w.logged.filter((line) => line.includes('works again')).length).toBe(1)
+  })
+
+  test('never two askings at once', async () => {
+    const { w } = await attached('working')
+    const before = w.asked.count
+    await Promise.all([w.runs.watch(), w.runs.watch(), w.runs.watch()])
+    expect(w.asked.count - before).toBe(1)
+  })
+
+  test('asked on a clock while a view is open, and the clock stops with the last view', async () => {
+    const { w, run } = await attached('working', { watchEvery: 5 })
+    expect(w.runs.watching).toBe(true)
+    const before = w.asked.count
+    await new Promise((done) => setTimeout(done, 60))
+    expect(w.asked.count).toBeGreaterThan(before)
+
+    now(w, 'blocked')
+    await new Promise((done) => setTimeout(done, 40))
+    expect(run.state).toBe('needs-you')
+
+    /* The view closes; the session runs on in the background, and is no longer this module's to ask about. */
+    w.ptys[0]!.ends(0)
+    await new Promise((done) => setTimeout(done, 40))
+    expect(w.runs.watching).toBe(false)
+    const after = w.asked.count
+    await new Promise((done) => setTimeout(done, 40))
+    expect(w.asked.count).toBe(after)
+  })
+
+  test('a session this module started and that reports is not asked about on a clock', async () => {
+    const dir = project()
+    const w = world({ tells: true, port: 9590, watchEvery: 5 })
+    await w.runs.open(ask(dir, null), new Watcher())
+    expect(w.runs.watching).toBe(false)
   })
 })

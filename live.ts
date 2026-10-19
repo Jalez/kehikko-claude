@@ -233,6 +233,16 @@ const REST_EVERY = 60_000
  */
 const STALE_WORK = 2 * 60_000
 /**
+ * How often the program is asked what the background sessions this module
+ * has a view of are doing, while it has any (see `watch`). A view of a
+ * background session is `claude attach`: its process was started elsewhere
+ * and runs no hooks of this module's, so nothing is told — it is asked.
+ * Measured at a tenth of a second per asking.
+ */
+const WATCH_EVERY = 7_000
+/** The longest wait between two askings after the asking has failed: it doubles up to this. */
+const WATCH_MOST = 60_000
+/**
  * How many notices one session may raise in a row, and how long until it may
  * raise one more. A session that finishes and, on the prompt queued behind
  * it, stops to ask three seconds later has two things to say and says both;
@@ -690,6 +700,8 @@ export interface RunsOptions {
   port?: () => number | null
   /** How often the quiet ones are looked for; null for never, when a test calls `rest` itself. */
   every?: number | null
+  /** How often background sessions with a view here are asked about (see `watch`); null for never, when a test calls `watch` itself. */
+  watchEvery?: number | null
   now?: () => number
   log?: (line: string) => void
 }
@@ -718,6 +730,13 @@ export class Runs {
   private readonly activityIs = new Map<Follower, string>()
   /** Where reports are posted. Set by whoever knows the port this server bound. */
   port: () => number | null
+  private readonly watchEvery: number | null
+  /** The next asking about background sessions, while one is due (see `watch`). */
+  private watchTimer: ReturnType<typeof setTimeout> | null = null
+  /** An asking in flight: never two at once. */
+  private watchBusy = false
+  /** How many askings in a row have failed: the wait doubles with each, and only the first is logged. */
+  private watchFailed = 0
 
   constructor(private readonly options: RunsOptions) {
     this.program = options.program ?? PROGRAM
@@ -730,6 +749,61 @@ export class Runs {
     this.log = options.log ?? (() => {})
     const every = options.every === undefined ? Math.min(REST_EVERY, this.quiet) : options.every
     if (every !== null) setInterval(() => this.rest(), every).unref?.()
+    this.watchEvery = options.watchEvery === undefined ? WATCH_EVERY : options.watchEvery
+  }
+
+  /** Whether an asking about background sessions is due or under way. */
+  get watching(): boolean {
+    return this.watchTimer !== null || this.watchBusy
+  }
+
+  /** The runs that are views of a background session, still open. */
+  private views(): Run[] {
+    return [...this.runs.values()].filter((run) => run.what === 'session' && !run.ended && run.joined !== null)
+  }
+
+  /** Have the next asking due, if there is a view to ask about and none is due or under way. */
+  private keepWatching(): void {
+    if (this.watchEvery === null || this.watchTimer || this.watchBusy || this.views().length === 0) return
+    const wait = this.watchFailed === 0 ? this.watchEvery : Math.min(WATCH_MOST, this.watchEvery * 2 ** Math.min(this.watchFailed, 10))
+    this.watchTimer = setTimeout(() => {
+      this.watchTimer = null
+      void this.watch().finally(() => this.keepWatching())
+    }, wait)
+    this.watchTimer.unref?.()
+  }
+
+  /**
+   * Ask the program what each background session this module has a view of is
+   * doing (`agents --json`, its `state`), and make that the run's state — so
+   * that it is said, listed and noticed exactly as a session that reports is.
+   *
+   * A view runs `claude attach`, which runs no hooks of this module's: the
+   * process that holds the session was started elsewhere. So its state is
+   * asked, on a clock, for as long as there is a view open, and the clock
+   * stops with the last one. One asking at a time. A failed asking changes
+   * nothing, waits longer before the next, and is logged once until one works.
+   * A session the program no longer lists has no state that still holds.
+   */
+  async watch(): Promise<void> {
+    if (this.watchBusy || this.views().length === 0) return
+    this.watchBusy = true
+    try {
+      const running = await this.running()
+      if (!running.known) {
+        if (this.watchFailed === 0) this.log(`claude: could not ask what the background sessions are doing (${running.why === 'too-old' ? 'this copy has no `agents --json`' : 'the asking failed'}) — asking less often until it works`)
+        this.watchFailed += 1
+        return
+      }
+      if (this.watchFailed > 0) this.log('claude: asking what the background sessions are doing works again')
+      this.watchFailed = 0
+      for (const run of this.views()) {
+        const listed = running.active.find((one) => one.kind === 'background' && one.session === run.joined!.session)
+        this.become(run, listed?.state ?? null)
+      }
+    } finally {
+      this.watchBusy = false
+    }
   }
 
   /** The run a session id names — by the id it was opened under or the one it settled as. */
@@ -915,7 +989,8 @@ export class Runs {
     /* Asked to report only when this copy can take the asking and there is
        somewhere to report to. Otherwise the command is the two words it
        always was, and the session has no state. A view of a background
-       session is never asked: its process was started elsewhere. */
+       session is never asked to report: its process was started elsewhere,
+       and what it is doing is asked of the program instead (`watch`). */
     const port = this.port()
     const tells = !joined && port !== null && (await this.program.supports(found.file)).tells
     const secret = tells ? randomBytes(24).toString('hex') : null
@@ -978,6 +1053,9 @@ export class Runs {
       ended: false,
     }
     this.runs.set(id, run)
+    /* What the program said the background session is doing when it was asked, a moment ago; asked again on a clock from here (`watch`). */
+    if (joined?.state) run.state = joined.state
+    this.keepWatching()
     this.log(`claude: ${found.file} ${args.slice(0, 2).join(' ')}${tells ? ', asked to report' : ''} in ${projectPath} (pid ${pty.pid})`)
     if (joined) this.log(`claude: ${settled} is running in the background (pid ${joined.pid ?? '?'}) — attached to it, and no second process was started`)
     if (copyOf) this.log(`claude: ${settled} is open in another process (pid ${copyOf.pid ?? '?'}) and a person chose to open a copy here`)
@@ -1293,7 +1371,8 @@ export class Runs {
     const put: Run[] = []
     for (const run of this.runs.values()) {
       if (run.what !== 'session' || run.ended || run.rested) continue
-      if (run.state === 'working' && this.now() - run.printedAt >= this.stale) {
+      /* Not a view of a background session: the program is asked what that one is doing (`watch`). */
+      if (run.state === 'working' && !run.joined && this.now() - run.printedAt >= this.stale) {
         this.log(`claude: ${run.settled ?? run.id} was working and has printed nothing for ${Math.round((this.now() - run.printedAt) / 60_000)} min — its state is no longer known`)
         this.become(run, null)
       }
