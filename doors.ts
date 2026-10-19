@@ -1,7 +1,7 @@
-import { doorContext } from 'kehikot-module-protocol'
+import { PROJECT_ID, doorContext } from 'kehikot-module-protocol'
 import { establishBuild, refuseTicket, sameTicket, type Reply, type Stream } from 'kehikot-module-protocol/serve'
 
-import { TICKET, elsewhereOf, theRuns, type Elsewhere, type Run, type Runs } from './live.ts'
+import { TICKET, elsewhereOf, sameProject, theRuns, type Elsewhere, type Run, type Runs } from './live.ts'
 import { ID, MANIFEST, VERSION } from './manifest.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, readPlaceKey, type Place } from './place.ts'
 import { PROGRAM, headOf, home, type Program, type Recorded, type Running, type State } from './program.ts'
@@ -205,6 +205,8 @@ export async function listing(
   key: string,
   runs: Runs = theRuns(),
   program: Program = PROGRAM,
+  /** The project's permanent id (`context.projectId`), when the page has one: what a run is matched by. */
+  projectId: string | null = null,
 ): Promise<Listing | { ok: false; error: string }> {
   const root = projectRoot(projectPath)
   if (!root.ok) return root
@@ -215,6 +217,10 @@ export async function listing(
   const found = program.find()
   const able = found.file ? await program.supports(found.file) : { ok: true, missing: null, tells: false, lists: false }
   const live = runs.sessions()
+  /* A session started before this project's folder was renamed is still this project's: it is
+     followed to the new folder (`claim`), never matched by the path string alone. */
+  for (const run of live) runs.claim(run, root.value, projectId)
+  const ours = (run: Run) => sameProject(run, root.value, projectId)
   /* A running session that had not been recorded, or named, the last time the
      program spoke may have been since: somebody is about to read the list. */
   await Promise.all(live.filter((run) => !run.settled || !run.label).map((run) => runs.settle(run).catch(() => {})))
@@ -266,7 +272,7 @@ export async function listing(
   const here = sessionsAt(read.value, key)
   for (const run of live) {
     const id = run.settled ?? run.id
-    if (run.projectPath === root.value && run.key === key && !here.includes(id)) here.push(id)
+    if (ours(run) && run.key === key && !here.includes(id)) here.push(id)
   }
 
   const install = program.install()
@@ -293,7 +299,7 @@ export async function listing(
       label: run.label,
       projectPath: run.projectPath,
       place: run.key,
-      here: run.projectPath === root.value && run.key === key,
+      here: ours(run) && run.key === key,
       startedAt: run.startedAt,
       ...stated(run),
     })),
@@ -416,7 +422,7 @@ async function call(name: string, args: Record<string, unknown>): Promise<string
     const all = sessionsAt(read.value, key)
     for (const run of live) {
       const id = run.settled ?? run.id
-      if (run.projectPath === root.value && run.key === key && !all.includes(id)) all.push(id)
+      if (sameProject(run, root.value) && run.key === key && !all.includes(id)) all.push(id)
     }
     const here = all.map(session)
     const openable = here.filter((one) => !('missing' in one))
@@ -533,7 +539,8 @@ export async function answer(
   if (refused) return refused
 
   if (path === '/api/place' && method === 'GET') {
-    const said = await listing(query.get('projectPath') ?? '', query.get('key') ?? '')
+    const id = query.get('projectId') ?? ''
+    const said = await listing(query.get('projectPath') ?? '', query.get('key') ?? '', undefined, undefined, PROJECT_ID.test(id) ? id : null)
     return said.ok ? ok(said) : bad(said.error)
   }
 
@@ -557,6 +564,15 @@ export async function answer(
     const id = typeof body?.session === 'string' ? body.session : ''
     if (!PROGRAM.isId(id)) return bad('that is not a session id')
     return ok({ ok: true, ended: theRuns().end(id) })
+  }
+
+  /* Resume a running session in its project's new folder, because a person pressed that: the
+     folder was renamed while it ran. Refused while it is working (see `restartIn` in live.ts). */
+  if (path === '/api/restart' && method === 'POST') {
+    const id = typeof body?.session === 'string' ? body.session : ''
+    if (!PROGRAM.isId(id)) return bad('that is not a session id')
+    const done = theRuns().restartIn(id)
+    return done === true ? ok({ ok: true }) : bad(done, 409)
   }
 
   /* Take a session off a place. The session is kept, and so is its transcript:

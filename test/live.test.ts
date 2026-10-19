@@ -1,9 +1,10 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { CLOSED, Runs, activityRows, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
+import { listing, type Listing } from '../doors.ts'
+import { CLOSED, Runs, activityRows, sameProject, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
 import { placeKey } from '../place.ts'
 import { PROGRAM, readActive, type Active, type Program, type Recorded } from '../program.ts'
 import { readPlaces, sessionsAt, type NamedPlace } from '../record.ts'
@@ -229,6 +230,7 @@ function world(options: { found?: string | null; able?: boolean; tells?: boolean
   })
   return {
     runs,
+    program,
     ptys,
     logged,
     elsewhere,
@@ -1916,5 +1918,124 @@ describe('the state of a background session a place is attached to', () => {
     const w = world({ tells: true, port: 9590, watchEvery: 5 })
     await w.runs.open(ask(dir, null), new Watcher())
     expect(w.runs.watching).toBe(false)
+  })
+})
+
+describe('a project whose folder is renamed while its session runs', () => {
+  const ID = 'c1a2b3c4-d5e6-4f70-8a9b-0c1d2e3f4a5b'
+  const OTHER = 'f0e1d2c3-b4a5-4968-8776-655443322110'
+  /** A project folder carrying the host's `.kehikot/project.json`, as a host from 2.1.0 on writes it. */
+  const withId = (id: string) => {
+    const dir = project()
+    mkdirSync(join(dir, '.kehikot'), { recursive: true })
+    writeFileSync(join(dir, '.kehikot', 'project.json'), JSON.stringify({ id, createdAt: null }))
+    return dir
+  }
+  const renamed = (dir: string) => {
+    const to = `${dir}-renamed`
+    renameSync(dir, to)
+    made.push(to)
+    return to
+  }
+  const askIn = (projectPath: string, session: string | null, projectId?: string) => ({ ...ask(projectPath, session), ...(projectId ? { projectId } : {}) })
+
+  test('opening the running session at the new folder, with the same id, attaches to it: kept, followed there, and the viewers told', async () => {
+    const dir = withId(ID)
+    const w = world()
+    w.records(dir, A, 'before the rename')
+    const first = new Watcher()
+    const run = await w.runs.open(askIn(dir, A, ID), first)
+    expect(isRun(run)).toBe(true)
+    await settle()
+    const to = renamed(dir)
+
+    const second = new Watcher()
+    const again = await w.runs.open(askIn(to, A, ID), second)
+    /* The same run: nothing new was started and nothing was ended. */
+    expect(again).toBe(run)
+    expect(w.ptys.length).toBe(1)
+    expect(w.ptys[0]!.killed).toBeFalsy()
+    const one = again as Run
+    expect(one.projectPath).toBe(to)
+    expect(one.cwd).toBe(dir)
+    /* The viewer that was there is told the folder moved; the one that arrives is told on opening. */
+    expect(first.said).toContainEqual({ session: A, moved: to, cwd: dir })
+    expect(second.said[0]).toMatchObject({ opened: 'attached', session: A, moved: to, cwd: dir })
+  })
+
+  test('an asker with no id (an agent, an older host) finds it too, by the new folder’s project.json, once the old folder is gone', async () => {
+    const dir = withId(ID)
+    const w = world()
+    w.records(dir, A)
+    const run = await w.runs.open(askIn(dir, A), new Watcher())
+    expect((run as Run).projectId).toBe(ID)
+    const to = renamed(dir)
+    expect(await w.runs.open(askIn(to, A), new Watcher())).toBe(run)
+  })
+
+  test('a different project is still another project: by id, and by a folder that is still there', async () => {
+    const dir = withId(ID)
+    const w = world()
+    w.records(dir, A)
+    await w.runs.open(askIn(dir, A, ID), new Watcher())
+    const other = withId(OTHER)
+    expect(await w.runs.open(askIn(other, A, OTHER), new Watcher())).toMatchObject({ code: CLOSED.refused, why: 'That session is running in another project.' })
+    /* The same id copied into another folder while the first is still there is not a rename. */
+    const copy = withId(ID)
+    expect(await w.runs.open(askIn(copy, A), new Watcher())).toMatchObject({ code: CLOSED.refused })
+    /* Ids decide when both are known, whatever the paths say. */
+    expect(sameProject({ projectPath: dir, projectId: ID }, dir, OTHER)).toBe(false)
+    expect(sameProject({ projectPath: '/gone', projectId: ID }, '/new', ID)).toBe(true)
+    expect(sameProject({ projectPath: '/gone', projectId: ID }, '/new', null, () => ID, () => false)).toBe(true)
+    expect(sameProject({ projectPath: '/still', projectId: ID }, '/new', null, () => ID, () => true)).toBe(false)
+    expect(sameProject({ projectPath: '/gone', projectId: null }, '/new', null, () => ID, () => false)).toBe(false)
+  })
+
+  test('the place’s list at the new folder still has it, running and here', async () => {
+    const dir = withId(ID)
+    const w = world()
+    w.records(dir, A, 'before the rename')
+    const viewer = new Watcher()
+    await w.runs.open(askIn(dir, A, ID), viewer)
+    await settle()
+    const to = renamed(dir)
+    /* The real program finds a session by its id wherever its record is (`recordFile`); the stand-in is told. */
+    w.records(to, A, 'before the rename')
+    const said = (await listing(to, placeKey(HERE), w.runs, w.program, ID)) as Listing
+    expect(said.ok).toBe(true)
+    expect(said.sessions.map((one) => [one.id, one.running])).toEqual([[A, true]])
+    expect(said.running).toEqual([expect.objectContaining({ id: A, projectPath: to, here: true })])
+    /* Reading the list followed the run there, and told its viewer. */
+    expect(viewer.said).toContainEqual({ session: A, moved: to, cwd: dir })
+  })
+
+  test('restarting in the new folder is a person’s press, refused while it works, and resumes the same session there', async () => {
+    const dir = withId(ID)
+    const w = world()
+    w.records(dir, A)
+    const viewer = new Watcher()
+    const run = (await w.runs.open(askIn(dir, A, ID), viewer)) as Run
+    await settle()
+    expect(w.runs.restartIn(A)).toBe('That session already runs in its project’s folder.')
+    const to = renamed(dir)
+    await w.runs.open(askIn(to, A, ID), new Watcher())
+
+    run.state = 'working'
+    expect(w.runs.restartIn(A)).toBe('It is working. Restart it when it is idle.')
+    expect(w.ptys[0]!.killed).toBeFalsy()
+
+    run.state = 'finished'
+    expect(w.runs.restartIn(A)).toBe(true)
+    await settle()
+    expect(viewer.closed).toEqual({ code: CLOSED.moved, reason: 'restarting in the new folder' })
+
+    /* The view opens it again, from the new folder: the same session, resumed, with the new folder as its directory. */
+    w.records(to, A)
+    const back = await w.runs.open(askIn(to, A, ID), new Watcher())
+    expect(isRun(back)).toBe(true)
+    expect(w.ptys.length).toBe(2)
+    expect(w.ptys[1]!.args).toEqual(['--resume', A])
+    expect(w.ptys[1]!.options.cwd).toBe(to)
+    expect((back as Run).cwd).toBe(to)
   })
 })

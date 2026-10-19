@@ -1,5 +1,7 @@
 import type { Listing, Row } from '../../doors.ts'
 import type { Elsewhere, Notice } from '../../live.ts'
+import { projectKey } from 'kehikot-module-protocol'
+
 import { kehikkoOf, placeKey, type Place } from '../../place.ts'
 import type { State } from '../../program.ts'
 
@@ -87,7 +89,14 @@ export function decide(listing: Listing, showing: string | null = null): Step {
 
 /** A place as the page holds it: the project's folder with the key inside it. */
 export interface Standing extends Place {
+  /** Where the project's folder is now. After a rename, the same project (`projectId`) at a new path. */
   projectPath: string
+  /**
+   * The project's permanent id (protocol 2.1.0, `context.projectId`), absent from an older host.
+   * What a place, a view and what is remembered are filed under (`projectOf`), so a folder renamed
+   * while a session runs is the same project and not a switch to another.
+   */
+  projectId?: string
   kehikkoName: string
   /** What a person calls each picked part, by id. For a notice's words; never compared. */
   partNames: Record<string, string>
@@ -113,6 +122,7 @@ export function standing(host: {
   epic: string | null
   parts: readonly { id: string; picked: boolean; heading?: string }[]
   kehikko: { id: number; name: string; key?: string } | null
+  projectId?: string | null
 }): Standing | null {
   if (host.where !== 'hosted' || !host.projectPath) return null
   const place: Place = {
@@ -123,6 +133,7 @@ export function standing(host: {
   return {
     ...place,
     projectPath: host.projectPath,
+    ...(host.projectId ? { projectId: host.projectId } : {}),
     kehikkoName: host.kehikko?.name ?? '',
     partNames: Object.fromEntries(host.parts.filter((part) => part.picked && part.heading).map((part) => [part.id, part.heading!])),
     kehikkoId: host.kehikko?.id ?? null,
@@ -130,8 +141,24 @@ export function standing(host: {
   }
 }
 
-/** One string for a place across projects: what a view is filed under. */
-export const placeId = (at: { projectPath: string; key: string }): string => `${at.projectPath}\n${at.key}`
+/**
+ * What a project is known by on this page: its permanent id when the host sent one, else its folder
+ * (`projectKey` in the protocol). The same across a rename of the folder.
+ */
+export const projectOf = (at: { projectPath: string; projectId?: string | null }): string => projectKey(at)?.key ?? at.projectPath
+
+/** One string for a place across projects: what a view is filed under. The same across a rename of the project's folder. */
+export const placeId = (at: { projectPath: string; projectId?: string | null; key: string }): string => `${projectOf(at)}\n${at.key}`
+
+/**
+ * The views to point at the project's new folder: those of the same project (by id) still holding
+ * the old path. Only the path changes — the view, its socket and its session are kept.
+ */
+export function relinked(views: readonly View[], at: Pick<Standing, 'projectPath' | 'projectId'> | null): View[] | null {
+  if (!at?.projectId) return null
+  if (!views.some((one) => one.at.projectId === at.projectId && one.at.projectPath !== at.projectPath)) return null
+  return views.map((one) => (one.at.projectId === at.projectId && one.at.projectPath !== at.projectPath ? { ...one, at: { ...one.at, projectPath: at.projectPath } } : one))
+}
 
 /** How many terminal views the page keeps mounted. A view let go is only a viewer: its session runs on. */
 export const MOST_VIEWS = 8

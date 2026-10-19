@@ -10,7 +10,7 @@ import type { ActivityRow, Notice, Stated } from '../live.ts'
  */
 export interface Api {
   /** What this place holds: its sessions, the project's others, what is running, and whether the program is there. */
-  place(projectPath: string, key: string): Promise<Listing>
+  place(projectPath: string, key: string, projectId?: string | null): Promise<Listing>
   /**
    * Bring what an older release filed under a kehikko's row number across to
    * its key. Asked once per kehikko, before the first read of a place on it.
@@ -18,6 +18,11 @@ export interface Api {
   rekey(projectPath: string, kehikko: { key: string; name: string; id?: number }): Promise<void>
   /** End a running session, because a person chose that one. */
   end(session: string): Promise<void>
+  /**
+   * Resume a running session in its project's new folder, because a person pressed that after the
+   * folder was renamed: the server ends it and its views open it again. Refused while it is working.
+   */
+  restart?(session: string): Promise<void>
   /** Take a session off a place. The session itself is kept. */
   detach(projectPath: string, key: string, session: string): Promise<void>
   /**
@@ -31,14 +36,17 @@ export interface Api {
 }
 
 export const api: Api = {
-  async place(projectPath, key) {
-    return answered(await ask<Listing>('./api/place', { query: { projectPath, key }, ticket: true }))
+  async place(projectPath, key, projectId) {
+    return answered(await ask<Listing>('./api/place', { query: { projectPath, key, ...(projectId ? { projectId } : {}) }, ticket: true }))
   },
   async rekey(projectPath, kehikko) {
     answered(await ask('./api/rekey', { body: { projectPath, kehikko } }))
   },
   async end(session) {
     answered(await ask('./api/end', { body: { session } }))
+  },
+  async restart(session) {
+    answered(await ask('./api/restart', { body: { session } }))
   },
   async detach(projectPath, key, session) {
     answered(await ask('./api/detach', { body: { projectPath, key, session } }))

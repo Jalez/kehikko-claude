@@ -1,8 +1,10 @@
 import { randomBytes } from 'node:crypto'
+import { existsSync, readFileSync } from 'node:fs'
 import type { IncomingMessage } from 'node:http'
 import { basename, join } from 'node:path'
 import type { Duplex } from 'node:stream'
 
+import { PROJECT_ID, projectFile, readProjectFile } from 'kehikot-module-protocol'
 import { mintTicket, sameTicket } from 'kehikot-module-protocol/serve'
 
 import { typedByPerson } from './input.ts'
@@ -301,6 +303,8 @@ export const CLOSED = {
   silent: 4408,
   /** The session is open in another process that cannot be attached to, and nothing was started. The page asks. */
   elsewhere: 4409,
+  /** Ended on a person's press to be resumed in the project's new folder: the page opens it again at once. */
+  moved: 4002,
   failed: 4500,
 } as const
 
@@ -341,6 +345,11 @@ export type Opening =
   | {
       what: 'session'
       projectPath: string
+      /**
+       * The project's permanent id (protocol 2.1.0, `context.projectId`), when the host sent one.
+       * What tells a project whose folder was renamed from another project (`sameProject`).
+       */
+      projectId?: string | null
       place: NamedPlace
       /** The session to open, or null for a new one. */
       session: string | null
@@ -429,7 +438,8 @@ export function opening(raw: unknown, ticket: string = TICKET): Opening | string
   if (!place) return 'That did not say which place the session is for.'
   const session = held.session ?? null
   if (session !== null && (typeof session !== 'string' || !PROGRAM.isId(session))) return 'That is not a session id.'
-  return { what: 'session', projectPath: held.projectPath, place, session, ...(held.copy === true && session !== null ? { copy: true as const } : {}), cols, rows }
+  const projectId = typeof held.projectId === 'string' && PROJECT_ID.test(held.projectId) ? held.projectId : null
+  return { what: 'session', projectPath: held.projectPath, ...(projectId ? { projectId } : {}), place, session, ...(held.copy === true && session !== null ? { copy: true as const } : {}), cols, rows }
 }
 
 /* ------------------------------------------------------------------------ *
@@ -474,7 +484,22 @@ export interface Run {
   id: string
   /** The id the program recorded it under, once it has recorded anything. */
   settled: string | null
+  /**
+   * Where the project is NOW: what the record is written in, what the lists compare and what a
+   * row says. The folder the program was started in until the project's folder is renamed or moved
+   * while it runs; then the new one (`claim`).
+   */
   projectPath: string
+  /**
+   * The folder the program was started in, and so its working directory and the project root it
+   * keeps for its whole life. Never changes: after a rename the process goes on in the renamed
+   * folder (macOS keeps a running process's directory), but under the old name.
+   */
+  cwd: string
+  /** The project's permanent id: the host's, or read off `.kehikot/project.json` when it started. Null when neither said. */
+  projectId: string | null
+  /** Ended by a person to be started again where the project is now (`restartIn`): its viewers are told so. */
+  restarting: boolean
   /** The place a new session is recorded for once it exists. */
   place: NamedPlace | null
   /** The place it was last opened from, with the names a person knows it by. For a notice. */
@@ -535,6 +560,54 @@ export interface Run {
 }
 
 export type Refusal = { code: number; why: string; elsewhere?: Elsewhere }
+
+/** The id in `<projectPath>/.kehikot/project.json`, read with the protocol's `readProjectFile`, or null. Never throws. */
+export function projectIdAt(projectPath: string): string | null {
+  const file = projectFile(projectPath)
+  if (!file) return null
+  try {
+    return readProjectFile(JSON.parse(readFileSync(file, 'utf8')))?.id ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whether a run belongs to the project at `root` (resolved), asked by `id` when the asker knows it.
+ *
+ * ## A project whose folder is renamed while a session runs
+ *
+ * The host gives every project a permanent id (protocol 2.1.0) and, after a rename, sends the new
+ * folder with the same id. The process keeps running — macOS keeps its working directory through the
+ * rename — so the run is still this project's, at a new path. The path alone cannot say so, and a
+ * path alone can also be wrong the other way: another project put where an old one was. So:
+ *
+ *   - both ids known: the ids decide, and nothing else;
+ *   - the same folder, with an id missing on one side: the same project, as before ids;
+ *   - otherwise only when the run's folder is gone AND the asked folder's `.kehikot/project.json`
+ *     names the run's id — the case of an asker that sent no id (an agent through the MCP door, an
+ *     older host).
+ *
+ * Never by string equality alone when both sides have an id.
+ */
+export function sameProject(
+  run: { projectPath: string; projectId: string | null },
+  root: string,
+  id: string | null = null,
+  idAt: (projectPath: string) => string | null = projectIdAt,
+  there: (path: string) => boolean = existsSync,
+): boolean {
+  if (id && run.projectId) return id === run.projectId
+  if (run.projectPath === root) return true
+  if (!run.projectId) return false
+  if (there(run.projectPath)) return false
+  return idAt(root) === run.projectId
+}
+
+/** The sentence for a session whose project's folder was renamed under it: the run's word to its viewers. */
+export function movedWord(run: Pick<Run, 'cwd' | 'projectPath'>): { moved: string | null; cwd: string } {
+  return { moved: run.cwd && run.cwd !== run.projectPath ? run.projectPath : null, cwd: run.cwd }
+}
 
 /**
  * Where a session is running that this module did not start, as a page is
@@ -644,7 +717,7 @@ export function activityRows(runs: Iterable<Run>, project: string | null = null)
     if (run.what !== 'session' || run.ended || !run.state) continue
     /* One project's only, for a follower that asked for one; a page asks for every project's
        and each row says its own (`project`). */
-    if (project !== null && run.projectPath !== project) continue
+    if (project !== null && !sameProject(run, project)) continue
     const state = ACTIVITY_STATE[run.state]
     const at = run.at
     const parts = at?.parts ?? []
@@ -840,7 +913,7 @@ export class Runs {
 
     const running = asked.session ? this.find(asked.session) : null
     if (running) {
-      if (running.projectPath !== projectPath) return { code: CLOSED.refused, why: 'That session is running in another project.' }
+      if (!this.claim(running, projectPath, asked.projectId ?? null)) return { code: CLOSED.refused, why: 'That session is running in another project.' }
       this.remember(running, asked.place)
       this.attach(running, viewer, asked.cols, asked.rows, 'attached')
       return running
@@ -861,6 +934,41 @@ export class Runs {
     }
     this.attach(run, viewer, asked.cols, asked.rows, inFlight ? 'attached' : run.joined ? 'background' : run.copyOf ? 'copy' : run.settled ? 'resumed' : 'new')
     return run
+  }
+
+  /**
+   * Whether `run` is the project's at `root` (`sameProject`), and if it is and the project's folder
+   * has moved since, follow it there: what is recorded is written in the new folder from now on,
+   * the lists find it there, and its viewers are told that the program is still in the old one.
+   * The process is not touched: it is never ended or restarted here.
+   */
+  claim(run: Run, root: string, id: string | null = null): boolean {
+    if (run.what !== 'session' || !sameProject(run, root, id)) return false
+    if (!run.projectId && id) run.projectId = id
+    if (run.projectPath === root) return true
+    this.log(`claude: the project of ${run.settled ?? run.id} moved from ${run.projectPath} to ${root}; the session runs on, started in ${run.cwd}`)
+    run.projectPath = root
+    for (const viewer of run.viewers) viewer.say({ session: run.settled ?? run.id, ...movedWord(run) })
+    this.changed()
+    return true
+  }
+
+  /**
+   * End a session whose project's folder was renamed under it, so that it is resumed in the new
+   * folder: only on a person's press, and never while it is working. Its viewers are closed with
+   * `CLOSED.moved` and open it again, which resumes the same session with the new folder as its
+   * working directory. A sentence when it is not done.
+   */
+  restartIn(id: string): true | string {
+    const run = this.find(id)
+    if (!run) return 'That session is not running.'
+    if (run.cwd === run.projectPath) return 'That session already runs in its project’s folder.'
+    if (run.joined) return 'That is a view of a session running in the background: it runs where it was started.'
+    if (run.state === 'working') return 'It is working. Restart it when it is idle.'
+    run.restarting = true
+    this.log(`claude: ${run.settled ?? run.id} is ended by a person to be resumed in ${run.projectPath}`)
+    kill(run.pty)
+    return true
   }
 
   /**
@@ -1025,6 +1133,9 @@ export class Runs {
       id,
       settled,
       projectPath,
+      cwd: projectPath,
+      projectId: asked.projectId ?? projectIdAt(projectPath),
+      restarting: false,
       place: asked.place,
       at: asked.place,
       key: placeKey(asked.place),
@@ -1138,8 +1249,8 @@ export class Runs {
   }
 
   private async finish(run: Run, exitCode: number): Promise<void> {
-    let code: number = run.rested ? CLOSED.rested : CLOSED.ended
-    let why = run.rested ? 'put away while it was quiet' : `the session ended (${exitCode})`
+    let code: number = run.restarting ? CLOSED.moved : run.rested ? CLOSED.rested : CLOSED.ended
+    let why = run.restarting ? 'restarting in the new folder' : run.rested ? 'put away while it was quiet' : `the session ended (${exitCode})`
     if (run.what === 'install') {
       const found = this.program.find()
       const done = exitCode === 0 && found.file !== null
@@ -1187,6 +1298,8 @@ export class Runs {
       ...(run.joined ? { background: elsewhereOf(run.joined) } : {}),
       ...(run.copyOf ? { copyOf: elsewhereOf(run.copyOf) } : {}),
       ...(run.unchecked ? { unchecked: run.unchecked } : {}),
+      /* The project's folder was renamed while it ran: the program still has the old one. */
+      ...(run.what === 'session' && movedWord(run).moved ? movedWord(run) : {}),
     })
     /* On screen until the page says otherwise: a view connects when it is shown. */
     run.looking.add(viewer)
@@ -1483,6 +1596,9 @@ export class Runs {
       id: INSTALL,
       settled: null,
       projectPath: '',
+      cwd: '',
+      projectId: null,
+      restarting: false,
       place: null,
       at: null,
       key: null,

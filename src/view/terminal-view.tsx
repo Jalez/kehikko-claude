@@ -77,14 +77,27 @@ export interface Said {
   copyOf?: Elsewhere
   /** The session was resumed without the program having been asked whether it runs elsewhere, and why. */
   unchecked?: 'too-old' | 'failed'
+  /**
+   * The project's folder was renamed while the session ran: where it is now, or null when the
+   * program runs in its project's folder. Said on opening and when the server follows a rename.
+   */
+  moved?: string | null
+  /** The folder the program was started in, and still has as its project root. */
+  cwd?: string
 }
 
-/** What this view asks the server to put it on. Fixed for the life of the view. */
+/**
+ * What this view asks the server to put it on. The session and the place are fixed for the life of
+ * the view; the project's folder is the one it is in when the view connects, which after a rename is
+ * the new one (the same `projectId`).
+ */
 export type Target =
   | { what: 'install' }
   | {
       what: 'session'
       projectPath: string
+      /** The project's permanent id, when the host sent one. */
+      projectId?: string
       place: { epic: string | null; parts: string[]; kehikko: Kehikko | null; kehikkoName: string; kehikkoId?: number; partNames?: Record<string, string> }
       /** Null is a new session. */
       session: string | null
@@ -116,9 +129,12 @@ export function TerminalView({
   /** The server's own word: which session this turned out to be, and what it is called. */
   onSaid?: (said: Said) => void
 }) {
-  /* Read inside the effect below, which runs once. A view is never re-pointed:
-     the parent mounts another for another session. */
+  /* Read inside the effect below, which runs once. A view is never re-pointed
+     at another session: the parent mounts another for that. It is kept current,
+     so that a view which connects after its project's folder was renamed says
+     the folder the project is in now, never the old one. */
   const start = useRef(target)
+  start.current = target
   const holder = useRef<HTMLDivElement>(null)
   const term = useRef<Terminal | null>(null)
   const line = useRef<WebSocket | null>(null)
@@ -184,6 +200,7 @@ export function TerminalView({
               : {
                   ticket: ticket(),
                   projectPath: asked.projectPath,
+                  ...(asked.projectId ? { projectId: asked.projectId } : {}),
                   place: asked.place,
                   session: asked.session,
                   ...(asked.copy ? { copy: true } : {}),

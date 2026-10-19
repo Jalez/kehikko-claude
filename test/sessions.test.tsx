@@ -51,7 +51,7 @@ mock.module('../src/view/terminal-view.tsx', () => ({
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
-    return <div data-terminal={naming(target)} data-shown={shown ? 'yes' : 'no'} data-watched={(watched ?? shown) ? 'yes' : 'no'} />
+    return <div data-terminal={naming(target)} data-shown={shown ? 'yes' : 'no'} data-watched={(watched ?? shown) ? 'yes' : 'no'} data-path={target.what === 'session' ? target.projectPath : ''} />
   },
 }))
 
@@ -1120,5 +1120,82 @@ describe('whether the corner control is drawn, by what the host said (protocol 1
     const items = s.headers.at(-1) as { label: string }[]
     expect(items[0]!.label).toBe('Sessions · ◆ tighten the methods')
     expect(headerItemsSchema.safeParse(items).success).toBe(true)
+  })
+})
+
+describe('a project folder renamed while its session runs', () => {
+  const ID = 'c1a2b3c4-d5e6-4f70-8a9b-0c1d2e3f4a5b'
+  const OTHER = 'f0e1d2c3-b4a5-4968-8776-655443322110'
+  const RENAMED = '/Users/someone/Projects/thesis-renamed'
+  const ELSE = '/Users/someone/Projects/another'
+  const by = (projectPath: string, projectId: string) =>
+    standing({ where: 'hosted', projectPath, projectId, epic: 'thesis', parts: [], kehikko: { id: 3, name: 'k3' } })!
+  const line = (container: HTMLElement) => container.querySelector<HTMLElement>('[data-moved]')
+  const button = (container: HTMLElement, text: string) => [...container.querySelectorAll('button')].find((one) => one.textContent === text) as HTMLButtonElement | undefined
+
+  test('the same id at a new folder keeps the view and its session, points it at the new folder, and says so once', async () => {
+    const s = server({ [KEY()]: [row('a')] })
+    const restarted: string[] = []
+    s.api.restart = async (session) => void restarted.push(session)
+    const { container, rerender } = render(<Sessions theme="dark" at={by(P, ID)} api={s.api} />)
+    await flush()
+    expect(shown(container)).toEqual(['whole@3:a'])
+    act(() => view('whole@3:a').say({ session: 'a', exists: true }))
+
+    rerender(<Sessions theme="dark" at={by(RENAMED, ID)} api={s.api} />)
+    await flush()
+    /* Nothing let go, nothing reopened: the same view, now saying the new folder should it connect. */
+    expect(unmounted).toEqual([])
+    expect(shown(container)).toEqual(['whole@3:a'])
+    expect(container.querySelector('[data-terminal="whole@3:a"]')?.getAttribute('data-path')).toBe(RENAMED)
+    expect(line(container)).toBeNull()
+
+    /* The server followed the run there (reading the list does that) and said the program is still in the old folder. */
+    act(() => view('whole@3:a').say({ session: 'a', moved: RENAMED, cwd: P }))
+    expect(line(container)?.textContent).toContain(`This folder was renamed to ${RENAMED}. Claude still uses the old path; restart in the new folder when it's idle.`)
+
+    /* Working: the restart waits. */
+    act(() => view('whole@3:a').say({ session: 'a', state: 'working', since: 1 }))
+    expect(button(container, 'Restart in the new folder')?.disabled).toBe(true)
+    act(() => view('whole@3:a').say({ session: 'a', state: 'finished', since: 2 }))
+    expect(button(container, 'Restart in the new folder')?.disabled).toBe(false)
+    await act(async () => button(container, 'Restart in the new folder')!.click())
+    expect(restarted).toEqual(['a'])
+
+    /* The server ended it to be resumed there: a fresh view of the same session, at the new folder. */
+    act(() => view('whole@3:a').tell({ at: 'closed', code: 4002, why: 'restarting in the new folder' }))
+    await flush()
+    expect(unmounted.length).toBe(1)
+    expect(shown(container)).toEqual(['whole@3:a'])
+    const fresh = mounted.find((one) => naming(one.target) === 'whole@3:a')!
+    expect(fresh.target).toMatchObject({ what: 'session', projectPath: RENAMED, projectId: ID, session: 'a' })
+    expect(line(container)).toBeNull()
+  })
+
+  test('the line can be dismissed, and nothing else changes', async () => {
+    const s = server({ [KEY()]: [row('a')] })
+    const { container, rerender } = render(<Sessions theme="dark" at={by(P, ID)} api={s.api} />)
+    await flush()
+    rerender(<Sessions theme="dark" at={by(RENAMED, ID)} api={s.api} />)
+    await flush()
+    act(() => view('whole@3:a').say({ session: 'a', moved: RENAMED, cwd: P }))
+    expect(line(container)).not.toBeNull()
+    act(() => button(container, 'Dismiss')!.click())
+    expect(line(container)).toBeNull()
+    expect(unmounted).toEqual([])
+    expect(shown(container)).toEqual(['whole@3:a'])
+  })
+
+  test('a different id is a different project: its own place and session, and no line', async () => {
+    const s = server({ [KEY()]: [row('a')] })
+    const { container, rerender } = render(<Sessions theme="dark" at={by(P, ID)} api={s.api} />)
+    await flush()
+    act(() => view('whole@3:a').say({ session: 'a', exists: true }))
+    s.held[KEY()] = [row('b')]
+    rerender(<Sessions theme="dark" at={by(ELSE, OTHER)} api={s.api} />)
+    await flush()
+    expect(shown(container)).toEqual(['whole@3:b'])
+    expect(container.querySelector('[data-terminal="whole@3:a"]')?.getAttribute('data-path')).toBe(P)
+    expect(line(container)).toBeNull()
   })
 })

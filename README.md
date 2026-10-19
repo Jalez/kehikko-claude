@@ -469,6 +469,19 @@ writing it there (checked against Claude Code 2.1.303 with a scratch `CLAUDE_CON
 sessions the record names are looked for, with those they were carried on in; the old folder's
 other sessions are not taken as this project's.
 
+**A project whose folder is renamed while a session runs keeps that session.** The host gives every
+project a permanent id (protocol 2.1.0, `context.projectId`) and after a rename sends the new folder
+with the same id. A run is this project's when the ids match, or — for an asker that sends no id —
+when its old folder is gone and the new folder's `.kehikot/project.json` names its id; never by the
+path string alone (`sameProject` in live.ts). The process keeps running (macOS keeps its working
+directory through the rename), but Claude Code keeps the old path as its project root. So the run
+is followed to the new folder — what is recorded is written there, the lists find it there — and
+the page says one dismissable line: *This folder was renamed to <new>. Claude still uses the old
+path; restart in the new folder when it's idle.*, with **Restart in the new folder**, which ends
+the run and resumes the same session id with the new folder as its directory. Only on that press,
+and never while it is working. New sessions start in the new folder. Views, places and what the
+page remembers are filed under the project's id when there is one, so a rename is not a switch.
+
 Read, never written: Claude Code's own records for the folder,
 `~/.claude/projects/<folder>/<session id>.jsonl` (or under `CLAUDE_CONFIG_DIR`, which Claude Code
 itself honours) — the list of a project's sessions, their first prompt, and when each last grew.
@@ -481,9 +494,10 @@ itself honours) — the list of a project's sessions, their first prompt, and wh
 | `GET /app` | the page, with the ticket and this process's build printed into it |
 | `GET /healthz` | which module, which build |
 | `WS /session` | the terminal. Origin and Host are checked on the upgrade; the ticket rides the first frame; nothing starts before it is read |
-| `GET /api/place?projectPath&key` | what a place holds: its sessions, the project's others, what is running, whether the program is installed. **Ticketed**, since it says what somebody worked on |
+| `GET /api/place?projectPath&key&projectId` | what a place holds: its sessions, the project's others, what is running, whether the program is installed. **Ticketed**, since it says what somebody worked on |
 | `POST /api/rekey` | bring the entries an older release filed under a kehikko's row number across to its key. Ticketed; the only thing that migrates |
 | `POST /api/end` | end a running session, because a person chose that one. Ticketed |
+| `POST /api/restart` | end a running session whose project's folder was renamed under it, so its views resume it in the new folder, because a person pressed that. Refused while it is working. Ticketed |
 | `POST /api/detach` | take a session off a place. Ticketed |
 | `GET /api/feed` | server-sent events: each running session's state as it changes, the notices for a framed page to pass on, and the whole activity list (`activity`: on arrival and on every change) that the page hands the host as `activity.set` (protocol 1.5.0; `activity:report`). Sent only to a host whose greeting says it answers the method. Colours match the host's dots: needs you yellow, finished green, working grey. Ticketed (in the query: an `EventSource` sends no header) |
 | `POST /api/state?event&session` | a session's own program saying what it is doing. Not the page's: it must carry that session's secret, reads no body, and answers 204 or one 403 that does not say why |
