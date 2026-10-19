@@ -380,7 +380,7 @@ switch kehikko. A line filed under the session's epic is the most that exists.
   other place in the project.
 - **The kehikko is named by its `key`, not its number.** `context.kehikko` carries both
   (`{ id, name, key }`, protocol 1.1.0). The `key` is the one the host writes in the project's own
-  `.kehikot/kehikko/kehikot.json`: the same after a rename, after the project is removed from the host
+  `.kehikot/host/kehikot.json` (`.kehikot/kehikko/` before protocol 2.2.0): the same after a rename, after the project is removed from the host
   and added again, and on another computer. The `id` is a row in one host's database — one kehikko was
   2, then 9, then 28 without anybody touching it — so it is written beside the key as a note
   (`"id": 3`, the number it last went by) and never compared or looked up.
@@ -429,7 +429,7 @@ resume a session another computer holds. So even with `places.json` shared, a se
 
 **`places.json` is ignored by git by default.** The first time this module writes the record it puts a
 `.gitignore` beside it, in its own `.kehikot/claude/` folder, naming `places.json` — the way the host
-does for its tracker reading in `.kehikot/kehikko/`. The reasons: the list means little where the
+does for its tracker reading in its own `.kehikot/host/` (`.kehikot/kehikko/` before protocol 2.2.0). The reasons: the list means little where the
 sessions are not, and it holds the first line of what was asked in each session, which is not
 something to publish into a repository's history without being asked. The `.gitignore` is written only
 when there is none, so to share the record anyway, delete the rule lines and keep the file; this
@@ -457,6 +457,17 @@ recorded session that Claude Code has nothing for here is:
 The words are *not on this computer* rather than *from another computer* because the module cannot
 tell the two causes apart, and the second would be false for a transcript that was cleaned away here.
 The MCP tool marks the same sessions `missing: true`.
+
+**A project whose folder was renamed or moved keeps its sessions.** Claude Code files a session under
+a folder named after the project's path, so after a rename the new path's folder is empty and every
+earlier transcript is under the old name. The record (`places.json`) moved with the project, so a
+recorded session that is not in the project's own folder is looked for by its id in every
+`~/.claude/projects/*/` folder — by file name only (`<session id>.jsonl`), one listing and one `stat`
+per folder, and where it was found is remembered. Found there, it is listed and opens as before:
+`claude --resume <id>` from the new folder loads a transcript filed under the old one and goes on
+writing it there (checked against Claude Code 2.1.303 with a scratch `CLAUDE_CONFIG_DIR`). Only the
+sessions the record names are looked for, with those they were carried on in; the old folder's
+other sessions are not taken as this project's.
 
 Read, never written: Claude Code's own records for the folder,
 `~/.claude/projects/<folder>/<session id>.jsonl` (or under `CLAUDE_CONFIG_DIR`, which Claude Code

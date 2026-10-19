@@ -892,7 +892,7 @@ export class Runs {
    * process is holding right now.
    */
   async head(projectPath: string, id: string, running?: Running): Promise<string> {
-    const held = new Map((await this.program.sessions(projectPath)).map((one) => [one.id, one]))
+    const held = new Map((await this.program.sessions(projectPath, [id])).map((one) => [one.id, one]))
     const live = new Set<string>(running?.known ? running.active.map((one) => one.session) : [])
     for (const run of this.runs.values()) if (run.settled) live.add(run.settled)
     return headOf(id, held, live)
@@ -933,7 +933,7 @@ export class Runs {
     const continued = (await this.head(run.projectPath, was, running)) === now
     run.settled = now
     this.log(`claude: the process behind ${run.id} is now on ${now} (${continued ? 'carried on from' : 'switched from'} ${was}) — recorded as its place's session`)
-    const known = (await this.program.sessions(run.projectPath)).find((one) => one.id === now)
+    const known = (await this.program.sessions(run.projectPath, [now])).find((one) => one.id === now)
     if (known?.label) run.label = known.label
     /* Carried on: the old id is the same conversation a step behind, and is replaced wherever it is. */
     if (continued) {
@@ -1121,7 +1121,7 @@ export class Runs {
       for (const viewer of run.viewers) viewer.say({ exists: true, session: run.settled })
     }
     run.asked += 1
-    const known = (await this.program.sessions(run.projectPath)).find((one) => one.id === run.settled)
+    const known = (await this.program.sessions(run.projectPath, [run.settled])).find((one) => one.id === run.settled)
     const label = known?.label ?? ''
     if (run.place) {
       const written = attach(run.projectPath, run.place, run.settled, { label, lastActive: known?.lastActive })

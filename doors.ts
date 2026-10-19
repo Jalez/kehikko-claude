@@ -5,7 +5,7 @@ import { TICKET, elsewhereOf, theRuns, type Elsewhere, type Run, type Runs } fro
 import { ID, MANIFEST, VERSION } from './manifest.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, readPlaceKey, type Place } from './place.ts'
 import { PROGRAM, headOf, home, type Program, type Recorded, type Running, type State } from './program.ts'
-import { WHERE, detach, follow, projectRoot, readPlaces, rekey, sessionsAt, type Places } from './record.ts'
+import { WHERE, detach, follow, projectRoot, readPlaces, recordedIds, rekey, sessionsAt, type Places } from './record.ts'
 
 /**
  * The HTTP doors, as one function: `answer` takes a request and returns a
@@ -218,7 +218,8 @@ export async function listing(
   /* A running session that had not been recorded, or named, the last time the
      program spoke may have been since: somebody is about to read the list. */
   await Promise.all(live.filter((run) => !run.settled || !run.label).map((run) => runs.settle(run).catch(() => {})))
-  const all = await program.sessions(root.value)
+  /* With the ids the record names, which may be under the folder's old name (a renamed project). */
+  const all = await program.sessions(root.value, recordedIds(recorded.value))
   const known = new Map(all.map((one) => [one.id, one]))
   /* Asked now, for this list, and kept nowhere: what is running elsewhere a
      moment from now is asked again when a session is opened (live.ts). */
@@ -381,7 +382,7 @@ async function call(name: string, args: Record<string, unknown>): Promise<string
   const read = readPlaces(root.value)
   if (!read.ok) throw new Error(read.error)
   const epic = named.epic
-  const recorded = await PROGRAM.sessions(root.value)
+  const recorded = await PROGRAM.sessions(root.value, recordedIds(read.value))
   const held = new Map(recorded.map((one) => [one.id, one]))
   const runs = theRuns()
   const live = runs.sessions()
