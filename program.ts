@@ -136,7 +136,17 @@ export interface Active {
   /** Milliseconds, or null when the program did not say. */
   startedAt: number | null
   name: string
+  /**
+   * What a background session is doing, as the program's `state` says it:
+   * `working` is working, `blocked` is waiting for the person, `done` is a
+   * turn that ended. Undocumented, so read by shape only: any other word, or
+   * none (an interactive session has none), is null — nothing said.
+   */
+  state?: State | null
 }
+
+/** The program's word for a background session's state, as this module says it. */
+const BACKGROUND_STATES: Record<string, State> = { working: 'working', blocked: 'needs-you', done: 'finished' }
 
 /**
  * What the program said is running — or that it could not be asked, which is
@@ -808,7 +818,7 @@ const HANDLE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
 /** One entry of `agents --json`, or null for anything that is not one. Nothing in it is trusted beyond its shape. */
 export function readActive(raw: unknown): Active | null {
   if (typeof raw !== 'object' || raw === null) return null
-  const said = raw as { sessionId?: unknown; kind?: unknown; id?: unknown; pid?: unknown; cwd?: unknown; startedAt?: unknown; name?: unknown }
+  const said = raw as { sessionId?: unknown; kind?: unknown; id?: unknown; pid?: unknown; cwd?: unknown; startedAt?: unknown; name?: unknown; state?: unknown }
   if (typeof said.sessionId !== 'string' || !SESSION_ID.test(said.sessionId)) return null
   const called = typeof said.kind === 'string' ? said.kind.slice(0, 40) : ''
   const kind = called === 'background' ? 'background' : called === 'interactive' ? 'interactive' : 'other'
@@ -821,6 +831,7 @@ export function readActive(raw: unknown): Active | null {
     cwd: typeof said.cwd === 'string' ? said.cwd.slice(0, 400) : '',
     startedAt: typeof said.startedAt === 'number' && Number.isFinite(said.startedAt) && said.startedAt > 0 ? said.startedAt : null,
     name: typeof said.name === 'string' ? said.name.slice(0, 120) : '',
+    state: typeof said.state === 'string' && Object.hasOwn(BACKGROUND_STATES, said.state) ? BACKGROUND_STATES[said.state]! : null,
   }
 }
 

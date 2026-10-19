@@ -227,11 +227,11 @@ describe('asking what is running', () => {
     try {
       expect(await PROGRAM.active(STAND_IN)).toEqual({
         known: true,
-        active: [{ session: A, kind: 'interactive', called: 'interactive', handle: null, pid: process.pid, cwd: '/p', startedAt: 1791893581186, name: 'project-ea' }],
+        active: [{ session: A, kind: 'interactive', called: 'interactive', handle: null, pid: process.pid, cwd: '/p', startedAt: 1791893581186, name: 'project-ea', state: null }],
       })
       writeFileSync(join(CONFIG, 'sessions', `${process.pid}.json`), JSON.stringify(entry({ kind: 'background', id: 'df6bd259', sessionId: B, state: 'working' })))
       const said = await PROGRAM.active(STAND_IN)
-      expect(said.known && said.active[0]).toMatchObject({ session: B, kind: 'background', handle: 'df6bd259' })
+      expect(said.known && said.active[0]).toMatchObject({ session: B, kind: 'background', handle: 'df6bd259', state: 'working' })
     } finally {
       rmSync(join(CONFIG, 'sessions'), { recursive: true, force: true })
     }
@@ -262,13 +262,21 @@ describe('asking what is running', () => {
     expect(readActive(null)).toBeNull()
     expect(readActive('x')).toBeNull()
     /* A background entry that was just started has no pid, name or status yet. */
-    expect(readActive({ id: '5e2cbccb', cwd: '/p', kind: 'background', startedAt: 1, sessionId: B, state: 'blocked' })).toEqual({ session: B, kind: 'background', called: 'background', handle: '5e2cbccb', pid: null, cwd: '/p', startedAt: 1, name: '' })
+    expect(readActive({ id: '5e2cbccb', cwd: '/p', kind: 'background', startedAt: 1, sessionId: B, state: 'blocked' })).toEqual({ session: B, kind: 'background', called: 'background', handle: '5e2cbccb', pid: null, cwd: '/p', startedAt: 1, name: '', state: 'needs-you' })
     /* An interactive session has no handle even if it claims one: it cannot be attached to. */
     expect(readActive(entry({ id: 'abcd1234' }))?.handle).toBeNull()
     for (const not of ['--dangerously-skip-permissions', '-x', 'two words', 'a;b', '', 'x'.repeat(65), 7]) {
       expect(readActive(entry({ kind: 'background', id: not }))?.handle).toBeNull()
     }
     expect(readActive(entry({ kind: 'sdk' }))).toMatchObject({ kind: 'other', called: 'sdk', handle: null })
+  })
+
+  test('a background session’s `state` is read by shape: working, blocked (needs you) and done (finished); any other word, or none, says nothing', () => {
+    const bg = (state: unknown) => readActive({ id: '5e2cbccb', cwd: '/p', kind: 'background', startedAt: 1, sessionId: B, state })?.state
+    expect(bg('working')).toBe('working')
+    expect(bg('blocked')).toBe('needs-you')
+    expect(bg('done')).toBe('finished')
+    for (const not of ['idle', 'Working', 'toString', '__proto__', '', 3, null, undefined, { working: true }]) expect(bg(not)).toBeNull()
   })
 
   test('a view of a background session is `attach <handle>` and nothing else — no settings, no prompt, and never a flag', () => {
@@ -286,7 +294,7 @@ describe('asking what is running', () => {
       expect(run(['--bg', '--resume', A]).stdout).toContain('backgrounded · 11111111')
       const listed = await PROGRAM.active(STAND_IN)
       const one = listed.known ? listed.active.find((each) => each.session === A) : undefined
-      expect(one).toMatchObject({ kind: 'background', handle: '11111111', cwd: project })
+      expect(one).toMatchObject({ kind: 'background', handle: '11111111', cwd: project, state: 'working' })
       /* As measured on 2.1.296: the full session id is not a job, and says so. */
       const full = run(['attach', A])
       expect(full.status).toBe(1)
