@@ -4,8 +4,8 @@ import { establishBuild, refuseTicket, sameTicket, type Reply, type Stream } fro
 import { TICKET, elsewhereOf, theRuns, type Elsewhere, type Run, type Runs } from './live.ts'
 import { ID, MANIFEST, VERSION } from './manifest.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, readPlaceKey, type Place } from './place.ts'
-import { PROGRAM, home, type Program, type Recorded, type Running, type State } from './program.ts'
-import { WHERE, detach, projectRoot, readPlaces, rekey, sessionsAt, type Places } from './record.ts'
+import { PROGRAM, headOf, home, type Program, type Recorded, type Running, type State } from './program.ts'
+import { WHERE, detach, follow, projectRoot, readPlaces, rekey, sessionsAt, type Places } from './record.ts'
 
 /**
  * The HTTP doors, as one function: `answer` takes a request and returns a
@@ -57,8 +57,14 @@ const bad = (why: string, status = 400): Reply => ({ status, body: { ok: false, 
 /** One session, as a row in a list. */
 export interface Row {
   id: string
-  /** The first line of its first prompt, cut short; `''` when it has none yet. */
+  /** What it is called: its name, else Claude Code's title for it, else its first prompt. `''` when it has none yet. */
   label: string
+  /** The first line of its first prompt, when that is not already the label. */
+  firstPrompt?: string
+  /** The last thing its person said. */
+  lastPrompt?: string
+  /** The pull requests it opened or pushed to, newest last. */
+  prs?: { number: number; url: string }[]
   /** Milliseconds, or null when nothing is known. */
   lastActive: number | null
   /** Whether this module is running it now. */
@@ -123,6 +129,8 @@ export interface Listing {
   }
   /** The sessions of this place, in the order they were added. */
   sessions: Row[]
+  /** The one last open here, which opens directly. Null, or absent, when the place has none. */
+  current?: string | null
   /**
    * The project's other sessions: they belong to no place, or to another.
    * The ones another place of this epic holds first (`near`), then the rest,
@@ -201,8 +209,8 @@ export async function listing(
   const root = projectRoot(projectPath)
   if (!root.ok) return root
   if (!readPlaceKey(key)) return { ok: false, error: 'That is not a place.' }
-  const read = readPlaces(root.value)
-  if (!read.ok) return read
+  const recorded = readPlaces(root.value)
+  if (!recorded.ok) return recorded
 
   const found = program.find()
   const able = found.file ? await program.supports(found.file) : { ok: true, missing: null, tells: false, lists: false }
@@ -210,19 +218,41 @@ export async function listing(
   /* A running session that had not been recorded, or named, the last time the
      program spoke may have been since: somebody is about to read the list. */
   await Promise.all(live.filter((run) => !run.settled || !run.label).map((run) => runs.settle(run).catch(() => {})))
-  const held = await program.sessions(root.value)
-  const known = new Map(held.map((one) => [one.id, one]))
+  const all = await program.sessions(root.value)
+  const known = new Map(all.map((one) => [one.id, one]))
   /* Asked now, for this list, and kept nowhere: what is running elsewhere a
      moment from now is asked again when a session is opened (live.ts). */
   const running: Running = found.file && able.ok ? await runs.running(found.file) : { known: false, why: 'failed' }
+
+  /* A conversation Claude Code carried on under a new id is listed under the new one: the old id
+     is a step behind it, and opening it would start another copy of an old point in it. The
+     record is brought along, so that the next open — here or anywhere — goes straight there. */
+  const holding = new Set<string>([...(running.known ? running.active.map((one) => one.session) : []), ...runs.sessions().flatMap((run) => (run.settled ? [run.settled] : []))])
+  let read = recorded
+  for (const id of sessionsAt(recorded.value, key)) {
+    const head = headOf(id, known, holding)
+    if (head === id) continue
+    const moved = follow(root.value, id, head, { label: known.get(head)?.label, lastActive: known.get(head)?.lastActive })
+    if (!moved.ok) continue
+    const again = readPlaces(root.value)
+    if (!again.ok) return again
+    read = again
+  }
+  /* What has been carried on elsewhere is not offered beside where it went. */
+  const held = all.filter((one) => !(one.next ?? []).some((next) => known.has(next)))
 
   const row = (id: string): Row => {
     const run = live.find((one) => one.id === id || one.settled === id)
     const kept = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id] : undefined
     const keptAt = kept?.lastActive ? Date.parse(kept.lastActive) : NaN
+    const said = known.get(id)
+    const label = said?.label || run?.label || kept?.label || ''
     return {
       id,
-      label: known.get(id)?.label || run?.label || kept?.label || '',
+      label,
+      ...(said?.firstPrompt && said.firstPrompt !== label ? { firstPrompt: said.firstPrompt } : {}),
+      ...(said?.lastPrompt && said.lastPrompt !== label ? { lastPrompt: said.lastPrompt } : {}),
+      ...(said?.prs?.length ? { prs: said.prs } : {}),
       lastActive: known.get(id)?.lastActive ?? (Number.isFinite(keptAt) ? keptAt : (run?.startedAt ?? null)),
       running: Boolean(run),
       ...stated(run),
@@ -252,6 +282,10 @@ export async function listing(
       asked: running.known ? 'yes' : running.why,
     },
     sessions: here.map(row),
+    current: (() => {
+      const entry = Object.hasOwn(read.value.places, key) ? read.value.places[key] : undefined
+      return entry?.current && here.includes(entry.current) ? entry.current : null
+    })(),
     others: ordered(held, here, key, read.value).map(({ one, near }) => ({ ...row(one.id), ...(near.length ? { near } : {}) })),
     running: live.map((run) => ({
       id: run.settled ?? run.id,
@@ -556,8 +590,12 @@ export const stream: Stream = (method, path, query, emit, ticket) => {
   if (path !== '/api/feed') return null
   if (method !== 'GET') return { reply: bad('this door takes GET', 405) }
   if (!sameTicket(ticket ?? query.get('ticket'), TICKET)) return { reply: refuseTicket(null, TICKET)! }
+  /* The project the page is framed in: its activity list is that project's sessions only. */
+  const asked = query.get('project')
+  const project = asked ? projectRoot(asked) : null
   const close = theRuns().subscribe({
     notices: query.get('notices') === '1',
+    project: project?.ok ? project.value : null,
     state: (stated) => emit(stated),
     notice: (notice) => emit(notice, 'notice'),
     activity: (items) => emit({ items }, 'activity'),

@@ -16,7 +16,10 @@ import type { State } from '../../program.ts'
  *   - none recorded → a new session, at once — unless the project already
  *     has sessions, and then the person is offered them first (below);
  *   - exactly one → that one, at once;
- *   - more than one → ask, and open nothing until the person has chosen.
+ *   - more than one → the one last open here (`current`, kept in the record
+ *     by every open and every conversation the terminal moved on to); ask
+ *     only when none of them is that, and open nothing until the person has
+ *     chosen.
  *
  * ## A place with none, in a project that has some
  *
@@ -75,6 +78,8 @@ export function decide(listing: Listing, showing: string | null = null): Step {
   if (listing.program.lacks) return { do: 'install', update: true }
   const here = listing.sessions.filter((one) => !one.missing)
   if (showing && here.some((one) => one.id === showing)) return { do: 'open', session: showing }
+  /* The one last open here opens again, however many others the place lists. */
+  if (listing.current && here.some((one) => one.id === listing.current)) return { do: 'open', session: listing.current }
   if (here.length === 0) return listing.others.length ? { do: 'offer' } : { do: 'open', session: null }
   if (here.length === 1) return { do: 'open', session: here[0]!.id }
   return { do: 'choose' }

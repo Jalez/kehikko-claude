@@ -24,6 +24,12 @@ describe('opening the module on a place', () => {
     expect(decide(listing([]))).toEqual({ do: 'open', session: null })
   })
 
+  test('more than one, one of them last open here: that one, at once', () => {
+    expect(decide({ ...listing([row('a'), row('b')]), current: 'b' })).toEqual({ do: 'open', session: 'b' })
+    /* One last open here that this computer does not have is not opened on that account. */
+    expect(decide({ ...listing([row('a'), row('b', { missing: true })]), current: 'b' })).toEqual({ do: 'open', session: 'a' })
+  })
+
   test('exactly one: that one, at once', () => {
     expect(decide(listing([row('a')]))).toEqual({ do: 'open', session: 'a' })
   })

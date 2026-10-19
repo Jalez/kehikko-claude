@@ -17,7 +17,8 @@ import { isKehikkoKey, placeKey, readPlaceKey, sortedParts, type Place } from '.
  *           "epic": "thesis",
  *           "parts": ["methods", "results"],
  *           "kehikko": { "key": "4072c9e5", "id": 3, "name": "writing" },
- *           "sessions": ["6f0c…", "a41e…"]
+ *           "sessions": ["6f0c…", "a41e…"],
+ *           "current": "a41e…"
  *         }
  *       },
  *       "sessions": {
@@ -124,6 +125,12 @@ export interface PlaceEntry {
    */
   kehikko: { key?: string; id?: number; name: string } | null
   sessions: string[]
+  /**
+   * The session last open at this place: the one a person last chose, opened
+   * or carried the conversation on in. Opened directly the next time, however
+   * many others the place lists. One of `sessions`, or absent.
+   */
+  current?: string
 }
 
 export interface SessionEntry {
@@ -192,6 +199,8 @@ export function attach(
       parts: sortedParts(place.parts),
       kehikko: beside(place.kehikko, place.kehikkoName ?? was?.kehikko?.name ?? '', place.kehikkoId ?? was?.kehikko?.id),
       sessions: was?.sessions.includes(id) ? was.sessions : [...(was?.sessions ?? []), id],
+      /* What was opened here last is what opens here next. */
+      current: id,
     }
     describe(places, id, about, now)
   })
@@ -263,6 +272,7 @@ export function rekey(
         parts: entry.parts,
         kehikko: moving && had ? had.kehikko : moving ? beside({ key: kehikko.key }, kehikko.name, kehikko.id) : entry.kehikko,
         sessions: [...new Set([...(first?.sessions ?? []), ...(second?.sessions ?? [])])],
+        ...((first?.current ?? second?.current) ? { current: (first?.current ?? second?.current)! } : {}),
       }
     }
     places.places = next
@@ -279,6 +289,32 @@ function movable(places: Places, name: string): string[] {
   return entries.filter(([, entry]) => entry.kehikko && entry.kehikko.key === undefined && entry.kehikko.name === name).map(([key]) => key)
 }
 
+/**
+ * A conversation that Claude Code carried on under a new id: wherever `from`
+ * is listed, `to` takes its place — in the same position, and as the place's
+ * current one where `from` was. `from` was a step behind the conversation and
+ * opening it again would start another copy of an old point in it, so it is
+ * not kept beside `to`. Its entry in `sessions` stays, as every entry does.
+ */
+export function follow(projectPath: string | null | undefined, from: string, to: string, about: { label?: string; lastActive?: number } = {}): Result<Places> {
+  if (from === to) return readPlaces(projectPath)
+  const read = readPlaces(projectPath)
+  if (!read.ok) return read
+  if (!Object.values(read.value.places).some((entry) => entry.sessions.includes(from))) return read
+  return change(projectPath, (places) => {
+    let moved = false
+    for (const entry of Object.values(places.places)) {
+      if (!entry.sessions.includes(from)) continue
+      moved = true
+      entry.sessions = [...new Set(entry.sessions.map((one) => (one === from ? to : one)))]
+      if (entry.current === from) entry.current = to
+    }
+    if (!moved) return false
+    const was = Object.hasOwn(places.sessions, from) ? places.sessions[from] : undefined
+    describe(places, to, { label: about.label || was?.label, lastActive: about.lastActive })
+  })
+}
+
 /** Take a session off a place. The session itself, and its entry here, are kept. */
 export function detach(projectPath: string | null | undefined, key: string, id: string): Result<Places> {
   if (!readPlaceKey(key)) return { ok: false, error: 'That is not a place this module wrote.' }
@@ -286,6 +322,7 @@ export function detach(projectPath: string | null | undefined, key: string, id: 
     if (!Object.hasOwn(places.places, key)) return
     const entry = places.places[key]!
     entry.sessions = entry.sessions.filter((one) => one !== id)
+    if (entry.current === id) delete entry.current
   })
 }
 
@@ -387,14 +424,16 @@ function tidy(raw: unknown): Places {
     for (const [key, value] of Object.entries(places)) {
       const place = readPlaceKey(key)
       if (!place || typeof value !== 'object' || value === null) continue
-      const entry = value as { kehikko?: { id?: unknown; name?: unknown } | null; sessions?: unknown }
+      const entry = value as { kehikko?: { id?: unknown; name?: unknown } | null; sessions?: unknown; current?: unknown }
       const seen = entry.kehikko?.id
+      const listed: string[] = Array.isArray(entry.sessions) ? [...new Set(entry.sessions.filter((one): one is string => typeof one === 'string' && one.length > 0 && one.length <= 128))] : []
       out.places[key] = {
         epic: place.epic,
         parts: place.parts,
         /* Which kehikko is read off the KEY. Of what is beside it only the name is taken, and the id as a note. */
         kehikko: beside(place.kehikko, typeof entry.kehikko?.name === 'string' ? entry.kehikko.name : '', typeof seen === 'number' ? seen : undefined),
-        sessions: Array.isArray(entry.sessions) ? [...new Set(entry.sessions.filter((one): one is string => typeof one === 'string' && one.length > 0 && one.length <= 128))] : [],
+        sessions: listed,
+        ...(typeof entry.current === 'string' && listed.includes(entry.current) ? { current: entry.current } : {}),
       }
     }
   }
