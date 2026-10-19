@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { letGo } from './let-go.ts'
+import { settleSize } from './settle-size.ts'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
@@ -209,6 +210,8 @@ export function TerminalView({
                 },
           ),
         )
+        /* The pty is put at this size on attach: a settle that fits to it has nothing to say. */
+        settled.known({ cols: terminal.cols, rows: terminal.rows })
         told.current?.({ at: 'live' })
         if (visible.current) terminal.focus()
         /* Whatever was typed while this was opening, in order, after the opening frame. */
@@ -262,21 +265,30 @@ export function TerminalView({
       if (!socket && usable()) connect()
     })
 
+    /* Fitted and sent once the box has held still, not on every frame of it moving (`settle-size.ts`):
+       each size is a SIGWINCH, and Claude Code reprints its conversation on every one, leaving the
+       last copy in the scrollback — nine of them for one 200ms animation of the host's grid. */
+    const settled = settleSize(
+      () => {
+        /* An absent measurement is not a small one: do nothing at all. */
+        if (!usable()) return null
+        try {
+          fit.fit()
+        } catch {
+          return null
+        }
+        return { cols: terminal.cols, rows: terminal.rows }
+      },
+      (size) => {
+        if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ r: size }))
+      },
+    )
     const resized = new ResizeObserver(() => {
       if (!socket) {
         if (usable()) connect()
         return
       }
-      /* An absent measurement is not a small one: do nothing at all. */
-      if (!usable()) return
-      try {
-        fit.fit()
-      } catch {
-        return
-      }
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ r: { cols: terminal.cols, rows: terminal.rows } }))
-      }
+      settled.observe()
     })
     resized.observe(node)
 
@@ -297,6 +309,7 @@ export function TerminalView({
       left = true
       clearTimeout(soon)
       resized.disconnect()
+      settled.dispose()
       typing.dispose()
       /* The viewer leaves. The session, on the server, is not touched. A socket still connecting is
          let go of rather than closed (`let-go.ts`): closing it is what the browser logs as a failure. */

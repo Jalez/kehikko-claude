@@ -551,6 +551,14 @@ export interface Run {
   screen: Screen
   viewers: Set<Viewer>
   /**
+   * Viewers that have attached and are waiting for the screen as it stands, each with what the
+   * program has said since it asked. The screen is taken from inside the emulator's write queue,
+   * so it holds everything said BEFORE the viewer asked and nothing after; what is said after is
+   * kept here and sent behind the screen. Without it, output that arrived while the screen was
+   * being taken reached neither: the viewer was not yet following, and the screen was already cut.
+   */
+  joining: Map<Viewer, string[]>
+  /**
    * The viewers that have it on screen. A page keeps views of other places
    * mounted behind the one it shows, each with its socket open, so "has a
    * viewer" is not "is being looked at"; the page says which (`look`).
@@ -1160,6 +1168,7 @@ export class Runs {
       pty,
       screen,
       viewers: new Set(),
+      joining: new Map(),
       looking: new Set(),
       ended: false,
     }
@@ -1199,6 +1208,7 @@ export class Runs {
       run.printedAt = run.stirredAt
       run.screen.write(chunk)
       for (const viewer of run.viewers) viewer.output(chunk)
+      for (const since of run.joining.values()) since.push(chunk)
       /* A new session exists once the program has written its record, which
          is when the person first says something. Asked when the program
          speaks rather than on a clock, and not more often than this. */
@@ -1267,8 +1277,9 @@ export class Runs {
       await this.settle(run).catch(() => {})
       this.log(`claude: session ${run.settled ?? run.id} ended (${exitCode})`)
     }
-    for (const viewer of run.viewers) viewer.close(code, why)
+    for (const viewer of [...run.viewers, ...run.joining.keys()]) viewer.close(code, why)
     run.viewers.clear()
+    run.joining.clear()
     run.looking.clear()
     run.screen.dispose()
   }
@@ -1277,8 +1288,12 @@ export class Runs {
    * Put a viewer on a run: the screen as it stands, then everything after.
    *
    * The screen is asked for from inside the emulator's own write queue, so
-   * what is sent is everything the pty said up to this moment and the viewer
-   * joins exactly there — nothing twice and nothing missed. Then the pty is
+   * what is sent is everything the pty said up to this moment. What the pty
+   * says between this call and the screen being taken is not in it — it is
+   * queued behind the marker — so it is kept for this viewer (`joining`) and
+   * sent right behind the screen, and only then does the viewer follow along:
+   * nothing twice and nothing missed. A viewer that leaves before its screen
+   * is taken is sent nothing and is never added. Then the pty is
    * told this viewer's size, which is also what makes a full-screen program
    * redraw itself for the window it is now in.
    */
@@ -1303,10 +1318,17 @@ export class Runs {
     })
     /* On screen until the page says otherwise: a view connects when it is shown. */
     run.looking.add(viewer)
+    /* The same viewer attaching again replaces its own wait rather than adding a second. */
+    run.viewers.delete(viewer)
+    const since: string[] = []
+    run.joining.set(viewer, since)
     run.screen.write('', () => {
+      if (run.joining.get(viewer) !== since) return
+      run.joining.delete(viewer)
       if (run.ended) return
       const screen = run.screen.serialize()
       if (screen) viewer.output(screen)
+      for (const chunk of since) viewer.output(chunk)
       run.viewers.add(viewer)
       this.resize(run, cols, rows)
     })
@@ -1509,16 +1531,17 @@ export class Runs {
 
   detach(run: Run, viewer: Viewer): void {
     run.viewers.delete(viewer)
+    run.joining.delete(viewer)
     if (run.looking.delete(viewer) && run.looking.size === 0) this.left(run)
-    if (run.what !== 'session' || run.ended || run.viewers.size > 0 || run.touched || run.settled || run.idle) return
+    if (run.what !== 'session' || run.ended || run.viewers.size + run.joining.size > 0 || run.touched || run.settled || run.idle) return
     run.idle = setTimeout(() => {
       run.idle = null
-      if (run.ended || run.viewers.size > 0 || run.touched) return
+      if (run.ended || run.viewers.size + run.joining.size > 0 || run.touched) return
       /* Asked once more: the program may have recorded it since. */
       void this.settle(run)
         .catch(() => {})
         .then(() => {
-          if (run.ended || run.viewers.size > 0 || run.touched || run.settled) return
+          if (run.ended || run.viewers.size + run.joining.size > 0 || run.touched || run.settled) return
           this.log(`claude: ended ${run.id}, which nobody had typed into and nobody was looking at`)
           kill(run.pty)
         })
@@ -1623,6 +1646,7 @@ export class Runs {
       pty,
       screen,
       viewers: new Set(),
+      joining: new Map(),
       looking: new Set(),
       ended: false,
     }

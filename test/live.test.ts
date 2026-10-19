@@ -467,6 +467,72 @@ describe('a session outlives whoever is looking at it', () => {
     expect(listed(dir, { epic: 'thesis', parts: [], kehikko: { id: 3 }, kehikkoName: 'writing' })).toEqual([A])
   })
 
+  /* What a viewer was sent, written into a fresh emulator the way the page writes it: the lines a person reads. */
+  const read = async (out: string, cols = 100, rows = 30) => {
+    const screen = await headless(cols, rows)
+    await new Promise<void>((done) => screen.write(out, done))
+    const lines = screen.serialize().split(/\r?\n/).map((line) => line.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').trimEnd())
+    screen.dispose()
+    return lines
+  }
+  const times = (lines: string[], line: string) => lines.filter((one) => one === line).length
+
+  test('a viewer arriving while the program is printing sees every line exactly once — nothing twice, nothing missed', async () => {
+    const dir = project()
+    const w = world()
+    const run = (await w.runs.open(ask(dir, null), new Watcher())) as Run
+    await settle()
+    for (let n = 0; n < 5; n += 1) w.ptys[0]!.says(`before ${n}\r\n`)
+    /* The viewer attaches with output still in the emulator's queue, and more arrives before its screen is taken. */
+    const late = new Watcher()
+    w.runs.attach(run, late, 100, 30, 'attached')
+    for (let n = 0; n < 5; n += 1) w.ptys[0]!.says(`during ${n}\r\n`)
+    await settle()
+    for (let n = 0; n < 5; n += 1) w.ptys[0]!.says(`after ${n}\r\n`)
+    await settle()
+    const lines = await read(late.out)
+    for (const when of ['before', 'during', 'after']) {
+      for (let n = 0; n < 5; n += 1) expect(times(lines, `${when} ${n}`)).toBe(1)
+    }
+  })
+
+  test('detached and attached again, twice in quick succession: every line once', async () => {
+    const dir = project()
+    const w = world()
+    const first = new Watcher()
+    const run = (await w.runs.open(ask(dir, null), first)) as Run
+    await settle()
+    w.ptys[0]!.says('one\r\ntwo\r\n')
+    w.runs.detach(run, first)
+    const second = new Watcher()
+    w.runs.attach(run, second, 100, 30, 'attached')
+    w.ptys[0]!.says('three\r\n')
+    w.runs.detach(run, second)
+    const third = new Watcher()
+    w.runs.attach(run, third, 100, 30, 'attached')
+    w.ptys[0]!.says('four\r\n')
+    await settle()
+    const lines = await read(third.out)
+    for (const line of ['one', 'two', 'three', 'four']) expect(times(lines, line)).toBe(1)
+    /* A viewer that left is sent nothing more. */
+    expect(second.out).not.toContain('four')
+  })
+
+  test('a viewer that leaves before its screen is taken is sent nothing and never follows', async () => {
+    const dir = project()
+    const w = world()
+    const run = (await w.runs.open(ask(dir, null), new Watcher())) as Run
+    await settle()
+    const gone = new Watcher()
+    w.runs.attach(run, gone, 100, 30, 'attached')
+    w.runs.detach(run, gone)
+    w.ptys[0]!.says('later\r\n')
+    await settle()
+    expect(gone.out).toBe('')
+    expect(run.viewers.has(gone)).toBe(false)
+    expect(run.joining.size).toBe(0)
+  })
+
   test('when the program exits, everyone watching is told, and it is no longer running', async () => {
     const dir = project()
     const w = world()
