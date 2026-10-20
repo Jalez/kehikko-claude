@@ -11,7 +11,7 @@ import { PROGRAM, readActive, type Active, type Program, type Recorded } from '.
 import { assign, attach, ignore, readPlaces, sessionsAt, type NamedPlace } from '../record.ts'
 import type { DoorsAsked, SessionDoor } from '../doorConfig.ts'
 import { existsSync, readFileSync, statSync } from 'node:fs'
-import { PLUGIN_DIR } from '../skills.ts'
+import { skillText } from '../skills.ts'
 import { CONFIG } from './setup.ts'
 
 /**
@@ -2353,13 +2353,17 @@ describe('a conversation’s place, on every Kehikot door (protocol 2.4.0)', () 
 
   test('a session started here is given /kehikot-here for that one process, before its doors, and nothing is written for it', async () => {
     const dir = project()
-    const w = world({ plugins: true, configures: true, doors: doors([]), configBase: project() })
+    const base = project()
+    const w = world({ plugins: true, configures: true, doors: doors([]), configBase: base })
     await w.runs.open(ask(dir, null, KEYED), new Watcher())
     const args = w.ptys[0]!.args
     expect(args.slice(0, 2)).toEqual(['--session-id', B])
-    expect(args.slice(-4, -2)).toEqual(['--plugin-dir', PLUGIN_DIR])
+    expect(args.at(-4)).toBe('--plugin-dir')
     expect(args.at(-2)).toBe('--mcp-config')
-    expect(existsSync(join(PLUGIN_DIR, 'skills', 'kehikot-here', 'SKILL.md'))).toBe(true)
+    /* The skill filled in for the origin this module serves on, beside the session's doors. */
+    const plugin = args.at(-3)!
+    expect(plugin.startsWith(base)).toBe(true)
+    expect(readFileSync(join(plugin, 'skills', 'kehikot-here', 'SKILL.md'), 'utf8')).toBe(skillText('kehikot-here')!)
     expect(existsSync(join(CONFIG, 'skills'))).toBe(false)
     /* A copy without the flag is started without it. */
     const old = world({ plugins: false })

@@ -8,7 +8,7 @@ import { PROGRAM, headOf, home, type Program, type Recorded, type Running, type 
 import { PLACE_TOKEN, WHERE, assign, detach, follow, homeOf, ignore, ownOf, projectRoot, readPlaces, recordedIds, rekey, sessionsAt, unassigned, type Places } from './record.ts'
 import { enable, enabled, hookCommand, settingsFile } from './hook.ts'
 import { here } from './here.ts'
-import { skillAt, skillDeclarations } from './skills.ts'
+import { serveFrom, skillAt, skillDeclarations } from './skills.ts'
 
 /**
  * The HTTP doors, as one function: `answer` takes a request and returns a
@@ -53,6 +53,17 @@ export { TICKET }
 
 /** The manifest as served: the one in manifest.ts with the skills this module offers (skills.ts). */
 export const MANIFEST: Manifest = manifestSchema.parse({ ...DECLARED, declares: { ...DECLARED.declares, skills: skillDeclarations() } })
+
+/**
+ * Say the origin this process really serves on, once it is listening (vite.config.ts): the skills'
+ * text is filled in for it, and the versions the manifest declares follow. In place, because the
+ * manifest `doors()` serves is this object's `declares`, read on every request.
+ */
+export function servingAt(origin: string): void {
+  serveFrom(origin)
+  const skills = MANIFEST.declares?.skills
+  if (skills) skills.splice(0, skills.length, ...skillDeclarations())
+}
 
 /** Whether the host holds a folder as a project: the protocol's question, here so a test can stand a host in. */
 export const hostCheck = { has: (folder: string) => hostHasProject(folder) }

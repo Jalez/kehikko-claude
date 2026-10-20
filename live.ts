@@ -11,7 +11,7 @@ import { typedByPerson } from './input.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, sortedParts, type Kehikko } from './place.ts'
 import { PROGRAM, headOf, home, sessionName, type Active, type Program, type Running, type State } from './program.ts'
 import { assign, attach, born, byToken, follow, homeOf, note, projectRoot, readPlaces, recordedIds, sighted, tokenFor, unassigned, type NamedPlace, type PlaceEntry, type Places } from './record.ts'
-import { PLUGIN_DIR } from './skills.ts'
+import { sessionPlugin } from './skills.ts'
 import { freshToken, hostDoors, removeConfig, writeConfig, type DoorsAsked, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
 
@@ -932,7 +932,7 @@ export interface RunsOptions {
   log?: (line: string) => void
   /** Asks the host for a session's doors (`hostDoors`); a test stands one in. */
   doors?: (asked: DoorsAsked) => Promise<SessionDoor[] | null>
-  /** The plugin folder a session is given with `--plugin-dir`; this module's own (`PLUGIN_DIR`) by default. */
+  /** The plugin folder a session is given with `--plugin-dir`; by default this module's own, filled in for the origin it serves on (`sessionPlugin`, under `configBase`). */
   plugins?: string
   /** Where `--mcp-config` files are written; this user's temporary folder by default. */
   configBase?: string
@@ -1539,7 +1539,7 @@ export class Runs {
           ...(settled ? this.program.resume(settled, name || undefined) : this.program.fresh(id, name || undefined)),
           ...(tells ? this.program.reports(tellLine) : []),
           /* `/kehikot-here`, for this one process: nothing is written into the person's config. */
-          ...((await this.program.supports(found.file)).plugins ? ['--plugin-dir', this.options.plugins ?? PLUGIN_DIR] : []),
+          ...((await this.program.supports(found.file)).plugins ? ['--plugin-dir', this.options.plugins ?? sessionPlugin(undefined, this.options.configBase)] : []),
           /* Last: the flag takes every word after it until the next flag. */
           ...(config ? ['--mcp-config', config] : []),
         ]
