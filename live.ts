@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import type { IncomingMessage } from 'node:http'
 import { basename, join } from 'node:path'
@@ -10,7 +10,7 @@ import { mintTicket, sameTicket } from 'kehikot-module-protocol/serve'
 import { typedByPerson } from './input.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, sortedParts, type Kehikko } from './place.ts'
 import { PROGRAM, headOf, home, sessionName, type Active, type Program, type Running, type State } from './program.ts'
-import { assign, attach, born, byToken, follow, homeOf, note, projectRoot, readPlaces, recordedIds, sighted, tokenFor, unassigned, type NamedPlace, type PlaceEntry, type Places } from './record.ts'
+import { assign, attach, born, byToken, follow, homeOf, note, projectRoot, readPlaces, recordedIds, sighted, tokenFor, type NamedPlace, type PlaceEntry, type Places } from './record.ts'
 import { sessionPlugin } from './skills.ts'
 import { freshToken, hostDoors, removeConfig, writeConfig, type DoorsAsked, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
@@ -715,7 +715,7 @@ export interface ActivityRow {
   place?: { epic?: string; parts?: string[]; kehikko?: string }
   since: number
   detail: string
-  /** How pressing it is (protocol 1.7.0): absent is `normal`. The unassigned count is `low` — informational. */
+  /** How pressing it is (protocol 1.7.0): absent is `normal`. */
   priority?: 'urgent' | 'normal' | 'low'
   /**
    * The folder of the project the session runs in (protocol 1.8.0). A session keeps running
@@ -736,53 +736,6 @@ const ACTIVITY_STATE = { working: 'working', 'needs-you': 'attention', finished:
 const ACTIVITY_ORDER = { attention: 0, working: 1, done: 2 } as const
 
 const clip = (text: string, most: number): string => (text.length <= most ? text : `${text.slice(0, most - 1).trimEnd()}…`)
-
-/**
- * The id of the one Inbox item that counts a project's unassigned conversations. One per project,
- * and a list spanning projects has no id twice (the protocol refuses that), so the project is in it.
- */
-export const unassignedItem = (project: string): string => `unassigned-in:${createHash('sha256').update(project).digest('hex').slice(0, 16)}`
-
-/**
- * The project's conversations that belong to no place, as ONE quiet Inbox
- * item: how many there are, and where the answers are. Null when there are
- * none, which closes the item.
- *
- * Not `attention`: a conversation started in a terminal or as a background
- * job is not waiting for anybody, and many of them were never meant for a
- * kehikko. It is `working` at `low` priority — the protocol's informational
- * item — so it is listed and counted without lighting "needs you" or Next.
- *
- * No `place`: a host opens an item without one by revealing this module's
- * container — on the kehikko on screen when that has one, else on a kehikko
- * of the project that does — and that container draws the answers (assign
- * here, to another kehikko, or "Not a Kehikot conversation") in its own page,
- * at any width. A `place` would only switch the kehikko.
- */
-export function unassignedRow(places: Places, project: string, now: number): ActivityRow | null {
-  const ids = unassigned(places)
-  if (!ids.length) return null
-  const first = places.sessions[ids[0]!]
-  const name = ids.length === 1 ? (first?.label ?? '').replace(/\s+/g, ' ').trim() : ''
-  const since = Math.min(...ids.map((id) => Date.parse(places.sessions[id]?.seen?.at ?? '') || now))
-  return {
-    id: unassignedItem(project),
-    state: 'working',
-    priority: 'low',
-    label: clip(
-      ids.length === 1
-        ? `A Claude Code session isn’t assigned to a kehikko${name ? `: ${name}` : ''}`
-        : `${ids.length} Claude Code sessions aren’t assigned to a kehikko`,
-      ACTIVITY_LABEL,
-    ),
-    since,
-    detail: clip(
-      'Started outside Kehikot. Open the Claude container to assign them to a kehikko, or mark them “Not a Kehikot conversation”. With no Claude container on a kehikko, add one to answer.',
-      ACTIVITY_DETAIL,
-    ),
-    project,
-  }
-}
 
 /**
  * The COMPLETE list of the sessions whose state is known, most urgent first: needs you,
@@ -906,8 +859,15 @@ export interface Follower {
   notice(notice: Notice): void
   /** The whole activity list, when it changes and once on arrival. */
   activity?(rows: ActivityRow[]): void
-  /** A project's list of sessions changed under the page: one was reported started, not yet assigned. */
-  sessions?(project: string): void
+  /** A project's record changed under the page: one was reported started, or one was connected (`assigned`). */
+  sessions?(project: string, assigned?: { key: string; session: string }): void
+}
+
+/** What the feed's `sessions` event says: the project whose record changed, and — from `/kehikot-here` — where which conversation was connected. */
+export interface SessionsChanged {
+  project: string
+  key?: string
+  session?: string
 }
 
 export interface RunsOptions {
@@ -1310,10 +1270,13 @@ export class Runs {
       .filter((one) => (seen.has(one.key) ? false : (seen.add(one.key), true)))
   }
 
-  /** Every page following this project reads its list again: the record changed under it (a conversation was assigned). */
-  told(projectPath: string): void {
+  /**
+   * Every page following this project reads its list again: the record changed under it. `assigned`
+   * is `/kehikot-here` having connected a conversation to a place: the page on that place puts it on screen.
+   */
+  told(projectPath: string, assigned?: { key: string; session: string }): void {
     this.changed()
-    for (const follower of this.followers) if (!follower.project || follower.project === projectPath) follower.sessions?.(projectPath)
+    for (const follower of this.followers) if (!follower.project || follower.project === projectPath) follower.sessions?.(projectPath, assigned)
   }
 
   /** The projects this server has been told of (by a page, an open or a report), resolved. */
@@ -1880,16 +1843,9 @@ export class Runs {
 
   /** The activity list as it stands — one project's, or every project's (for a test, and for a page that has just arrived). */
   activity(project: string | null = null): ActivityRow[] {
-    const rows = activityRows(this.runs.values(), project, this.unviewed.values())
-    const asking: ActivityRow[] = []
-    for (const root of project !== null ? [project] : this.projects) {
-      const read = readPlaces(root)
-      if (read.ok) {
-        const row = unassignedRow(read.value, root, this.now())
-        if (row) asking.push(row)
-      }
-    }
-    return [...asking, ...rows].slice(0, ACTIVITY_ITEMS)
+    /* The sessions, and nothing about conversations that belong to no kehikko: that is said on the
+       page of the kehikko that has none, not in the Inbox. A host closes an item absent from the list. */
+    return activityRows(this.runs.values(), project, this.unviewed.values()).slice(0, ACTIVITY_ITEMS)
   }
 
   /**

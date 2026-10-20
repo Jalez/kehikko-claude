@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react'
 import type { ActivityItem, HeaderItemInput } from 'kehikot-module-protocol'
 
-import { ANSWER, BACK_OWN, MAKE_OWN, UNASSIGNED, ownHeader } from './view/own.ts'
-import { Unassigned } from './view/unassigned.tsx'
 import { held, probeServer, type PressAnswer } from 'kehikot-module-protocol/client'
 import { Cover, coverFor, useFocus, useHost, useServerStanding, type CoverState } from 'kehikot-module-protocol/client/react'
 
@@ -11,20 +9,19 @@ import type { Elsewhere } from '../live.ts'
 import { ID, NOTICES } from '../manifest.ts'
 import type { State } from '../program.ts'
 import { api as realApi, type Api } from './api.ts'
-import { Chooser } from './view/chooser.tsx'
+import { NoConversationBar } from './view/bar.tsx'
+import { DISCONNECT, MAKE_OWN, NOT_CONNECTED, VIEW, connected, viewHeader } from './view/conversations.ts'
 import { ElsewhereQuestion } from './view/elsewhere.tsx'
 import {
-  MARKS,
+  COPY,
   MOST_VIEWS,
   SETTLE_MS,
   brief,
   decide,
-  named,
   noticeLine,
   placeId,
   projectOf,
   relinked,
-  since,
   standing,
   standingWords,
   surplus,
@@ -69,7 +66,7 @@ type Press = (press: { item: string; value?: string | boolean }) => PressAnswer
 
 /**
  * What the page asks of a host beyond being told where it stands: carry a
- * notice, and draw the way to the sessions in the container's own menus.
+ * notice, and draw this kehikko's conversations in the container's own menus.
  * Handed to `Sessions` whole, so that a test can stand one in and a page
  * nothing is framing has none.
  */
@@ -92,32 +89,6 @@ export interface Hosted {
   header(items: HeaderItemInput[]): void
   /** Where the page puts what takes a press. */
   presses: MutableRefObject<Press | null>
-  /**
-   * Whether a host has ever pressed one of the header items: such a host draws the header, and
-   * the corner control — which is only for a page whose host draws none — is gone for good.
-   */
-  drawn?: boolean
-}
-
-const DRAWN_KEY = 'kehikot.claude.header-drawn'
-
-/** Whether a host has ever pressed a header item on this page's origin. */
-function headerDrawn(): boolean {
-  try {
-    return window.localStorage.getItem(DRAWN_KEY) === 'yes'
-  } catch {
-    return false
-  }
-}
-
-/**
- * Whether the host draws this module's header, so that the module's own corner control is not needed
- * (protocol 1.4.0, docs/header.md). The greeting's `header` when the host said: `true` draws none,
- * `false` draws it, whatever an earlier press proved on this origin. From a host that did not say
- * (`null`), a press having arrived is the proof, as before.
- */
-export function hostDrawsHeader(said: boolean | null, pressed: boolean): boolean {
-  return said === null ? pressed : said
 }
 
 /** Whether the host's greeting says it takes `activity.set`, and so makes notices from it. */
@@ -127,7 +98,6 @@ export function holdsActivity(answers: readonly string[] | null | undefined): bo
 
 export function App() {
   const presses = useRef<Press | null>(null)
-  const [drawn, setDrawn] = useState(headerDrawn)
   const host = useHost(ID, {
     /* Answered at once and always no: a terminal holds a session, not a
        document with anchors, and silence would make every reference pointing
@@ -135,16 +105,7 @@ export function App() {
     onGoto: (_goto, answer) => {
       answer(false, 'A terminal holds a session, not a document: there is nothing here to walk to.')
     },
-    onPress: (press) => {
-      /* Only a host that draws the header sends a press, so from the first one on the corner control is not needed. */
-      try {
-        window.localStorage.setItem(DRAWN_KEY, 'yes')
-      } catch {
-        /* Gone for this page's life all the same. */
-      }
-      setDrawn(true)
-      return presses.current ? presses.current(press) : 'There is no session here to go to yet.'
-    },
+    onPress: (press) => (presses.current ? presses.current(press) : 'There is no conversation here yet.'),
   })
   /* The parts as one steady value: the same array until the list changes by
      value, so the place below moves when a part is picked and not every time
@@ -161,13 +122,10 @@ export function App() {
   )
   const server = useServerStanding()
   const cover = coverFor({ where, projectPath, server })
-  const { request, header, drawsHeader, activity, answers } = host
-  /* The greeting's word when there is one (protocol 1.4.0): true draws no control of our own, false does.
-     From a host that did not say, the first press proves it draws the header, as before. */
-  const hostDraws = hostDrawsHeader(drawsHeader, drawn)
+  const { request, header, activity, answers } = host
   const hosted = useMemo<Hosted | null>(
-    () => (where === 'hosted' ? { emit: (extension, payload) => request('events.emit', { extension, payload }), activity, answers, header, presses, drawn: hostDraws } : null),
-    [where, request, header, activity, answers, hostDraws],
+    () => (where === 'hosted' ? { emit: (extension, payload) => request('events.emit', { extension, payload }), activity, answers, header, presses } : null),
+    [where, request, header, activity, answers],
   )
   /* The modules on this kehikko, as one steady string: a change is what offers "Restart to load …". */
   const containers = host.containers.map((one) => one.module).sort().join(',')
@@ -197,38 +155,37 @@ export function App() {
  * (`QUIET_REST` in live.ts); its view here is told so, is let go without a
  * word, and coming back to the place resumes the same session.
  *
- * ## A place with no session, and a session that is running elsewhere
+ * ## Claude Code's own UI, always
  *
- * Two questions are put before anything is started, both in the terminal's
- * own space, which is empty when they are asked:
+ * There is no list of the project's conversations to pick from: the place
+ * opens one of its connected conversations, or a new one when it has none
+ * (`decide` in view/places.ts). Choosing among the connected ones is the
+ * header's View menu; starting another is Claude Code's own `/clear`, and
+ * going to an older one its own `/resume`, both in the terminal.
  *
- *  - a place with no session, in a project that has others, is offered them
- *    (`offer` in view/places.ts) with *New session* first;
- *  - a session another Claude Code process has open, and that cannot be
- *    attached to, is not resumed: the server says who has it and closes the
- *    socket (`ELSEWHERE`), and the person chooses between leaving it and
- *    opening a copy, with what a copy means beside the word. While that
- *    stands for a place, nothing is opened there by itself (`blocked`).
- *
- * A session Claude Code runs in the background needs no question: the server
- * attaches to it, and the corner says so.
+ * One question is still put before anything is started, in the terminal's
+ * own space: a session another Claude Code process has open, and that cannot
+ * be attached to, is not resumed. The server says who has it and closes the
+ * socket (`ELSEWHERE`), and the person chooses between leaving it and opening
+ * a copy, with what a copy means beside the word. While that stands for a
+ * place, nothing is opened there by itself (`blocked`). A session Claude
+ * Code runs in the background needs no question: the server attaches to it.
  *
  * ## What is drawn besides the terminal
  *
- * Nothing that costs a row while a session is running. The session's short
- * label and the way to the list sit in the terminal's own corner, over it.
- * A strip appears along the bottom only when there is nothing running to
- * take the space from: the session has ended, the install did not finish, or
- * this module's server has gone.
+ * One slim bar above it while no conversation is connected to this kehikko
+ * (`view/bar.tsx`), saying so and what to type where. Nothing else costs a
+ * row while a session is running. A strip appears along the bottom only when
+ * there is nothing running to take the space from: the session has ended,
+ * the install did not finish, or this module's server has gone.
  *
  * ## What a session is doing, and what is done about it
  *
  * Its program says — working, needs you, finished (`State` in program.ts) —
  * and the page is told as it changes, on the view's own socket and, for the
  * sessions it has no view of, on one feed (`api.feed`). It is drawn as one
- * glyph: in the corner control, before the label, for the session on screen;
- * and on each running row of the list, where the word "running" was. Neither
- * adds a row, a line or a pixel of height.
+ * glyph before its title in the header's View menu, and adds no row, line or
+ * pixel of height to the page.
  *
  * When a session nobody has on screen comes to need its person, or finishes,
  * the server raises a notice and ONE framed page passes it to the host, in
@@ -237,11 +194,16 @@ export function App() {
  * nowhere: the format carries an epic and no place, and a line on somebody
  * else's panel is not this module's to make pressable.
  *
- * The same sessions are declared as a Go item for the container's header, so
- * a host that draws headers offers them in its own menu. The corner control
- * stays until a host has pressed one of those items — a page cannot tell
- * whether its host draws headers, and without it a host that does not would
- * leave no way to the list — and is then gone for good (`headerDrawn`).
+ * The connected conversations are declared for the container's header as a
+ * View switch, with "Make this the kehikko's own" and "Disconnect from this
+ * kehikko" beside it (`viewHeader` in view/conversations.ts).
+ *
+ * ## When a conversation is connected from inside it
+ *
+ * `/kehikot-here`, typed in a conversation, writes the record and tells every
+ * page following the project which place it went to (the feed's `sessions`
+ * event). The page on that place reads its list again — so the bar goes —
+ * and puts that conversation on screen (`switchTo`).
  */
 export function Sessions({
   theme,
@@ -277,10 +239,8 @@ export function Sessions({
   const [states, setStates] = useState<Record<string, { state: State | null; since: number }>>({})
   const [listing, setListing] = useState<{ id: string; value: Listing } | null>(null)
   const [refusal, setRefusal] = useState<string | null>(null)
-  /** The person opened the list over a running terminal. */
-  const [asking, setAsking] = useState(false)
-  /** Whether the answers for the project's unassigned conversations are open (`view/unassigned.tsx`). */
-  const [answering, setAnswering] = useState(false)
+  /** A conversation `/kehikot-here` just connected to a place: put on screen there once the list has it. */
+  const [switchTo, setSwitchTo] = useState<{ place: string; session: string } | null>(null)
   /**
    * The session this place would open is open in another process, and nothing
    * was started: who has it, and whether the person has said to leave it.
@@ -372,14 +332,13 @@ export function Sessions({
   }, [project, projectId])
 
   /*
-   * Another place. The list that was open over the last one is not about
-   * this one; and a view left behind with nothing in it — a new session
+   * Another place. A question about the last one is not about this one;
+   * and a view left behind with nothing in it — a new session
    * nobody typed into — is let go rather than kept, so that walking through
    * places does not leave a process at each. The server ends what was behind
    * it a little later, unless somebody comes back first.
    */
   useEffect(() => {
-    setAsking(false)
     setBlocked(null)
     setNotMoved(null)
     const gone = views.filter((one) => !one.kept && placeId(one.at) !== id).map((one) => one.n)
@@ -416,7 +375,6 @@ export function Sessions({
   /** Put a session on screen for this place: null is a new one. `copy` is a person's answer to "it is open elsewhere". */
   const open = (session: string | null, copy = false) => {
     if (!at || id === null) return
-    setAsking(false)
     setBlocked(null)
     const was = views.find((one) => one.n === shownBy[id])
     if (was && session && was.session === session && standings[was.n]?.at !== 'closed') return
@@ -434,8 +392,7 @@ export function Sessions({
    *
    * Only when nothing is on screen for the place. A view that is already
    * there — the person was here before, and its session has been running
-   * since — is shown as it is, and the list is only what the corner control
-   * will draw.
+   * since — is shown as it is.
    */
   const opened = useRef(open)
   opened.current = open
@@ -451,6 +408,28 @@ export function Sessions({
     return () => clearTimeout(waited)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [here, view === null, installing === null, blocked === null])
+
+  /*
+   * A conversation connected to this place while something else is on screen:
+   *
+   *  - the one `/kehikot-here` just connected here (`switchTo`), once the list has it;
+   *  - or, for a new conversation nobody has spoken to yet, whichever the place now opens.
+   *
+   * Nothing else is switched away from: a conversation the person is in stays on screen.
+   */
+  useEffect(() => {
+    if (!at || !here || !view || installing || id === null) return
+    const ids = connected(here).map((one) => one.id)
+    if (switchTo && switchTo.place === id && ids.includes(switchTo.session)) {
+      setSwitchTo(null)
+      if (view.session !== switchTo.session) opened.current(switchTo.session)
+      return
+    }
+    if (view.session !== null || view.kept || !ids.length) return
+    const step = decide(here, null)
+    if (step.do === 'open' && step.session) opened.current(step.session)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [here, switchTo, view?.n])
 
   /* Looked at again: this is the most recently shown, for when views are let go. */
   useEffect(() => {
@@ -528,8 +507,14 @@ export function Sessions({
       /* The server writes the whole list and says it again on every change and on arrival; this only
          passes it on. The client drops an identical one and sends nothing to a host without the method. */
       activity: (items) => told.current.hosted?.activity?.(items),
-      /* A session was reported started somewhere in this project: the list is read again. */
-      sessions: () => setAgain((n) => n + 1),
+      /* The project's record changed: the list is read again. When it was `/kehikot-here` connecting a
+         conversation to the place this page is on, that conversation is put on screen. */
+      sessions: (event) => {
+        setAgain((n) => n + 1)
+        const on = standingOn.current
+        /* By the place's key, which names the kehikko by its own key: the folder the server resolved may be spelled otherwise. */
+        if (on && event?.key === on.key && event.session) setSwitchTo({ place: placeId(on), session: event.session })
+      },
       notice: (notice) => {
         /* One report: a host that holds the activity list makes the notice from it. Sending this
            one too would give the person every notice twice. Only a host that did not say it
@@ -570,15 +555,16 @@ export function Sessions({
 
   /* The question about a session that is open elsewhere, for this place, until it is answered. */
   const stuck = blocked && blocked.place === id && !view ? blocked : null
-  const questioning = Boolean(at && here && !installing && stuck && !stuck.left && !asking)
-  const choosing = Boolean(at && here && !installing && !questioning && (asking || (!view && (step?.do === 'choose' || step?.do === 'offer')) || stuck?.left))
+  const questioning = Boolean(at && here && !installing && stuck && !stuck.left)
+  /* Answered "Leave it": nothing is on screen, and one sentence says so. */
+  const leftAlone = Boolean(at && here && !installing && stuck?.left)
+  const stuckLabel = stuck ? labels[stuck.session] || [...(here?.sessions ?? []), ...(here?.others ?? [])].find((one) => one.id === stuck.session)?.label || '' : ''
   const wanting = Boolean(at && here && !installing && !view && step?.do === 'install')
-  const terminal = Boolean(at && view && !choosing && !installing)
+  const terminal = Boolean(at && view && !installing)
   const label = view ? brief((view.session && (labels[view.session] || here?.sessions.find((one) => one.id === view.session)?.label)) || '') : ''
   /* What the session on screen is besides this module's own: a view of a background one, a copy, or unchecked. */
   const how = view ? standingWords(hows[view.n], here?.program.name ?? 'Claude Code', Date.now()) : null
   const doing = (view?.session && Object.hasOwn(states, view.session) ? states[view.session] : undefined) ?? null
-  const mark = doing?.state ? MARKS[doing.state] : null
   /* The session on screen runs in a folder its project has left: the line saying so, until dismissed. */
   const movedTo = view && at && moves[view.n] && dismissed[view.n] !== moves[view.n] ? at.projectPath : null
   const working = doing?.state === 'working'
@@ -616,91 +602,52 @@ export function Sessions({
   }
 
   /*
-   * The same way to the sessions, declared for the container's header: a Go
-   * item with this place's sessions, a new one, and the list. Person-only —
-   * it says nothing about agents, so none can open a session through it.
+   * This kehikko's conversations, as the program can open them here: what the bar and the View menu
+   * are about. Nothing while the program is missing or being installed.
    */
-  const offered = at && here && here.program.found && !here.program.lacks && !installing ? here.sessions.filter((one) => !one.missing).slice(0, 60) : null
-  const here_label = (() => {
-    if (!view || !label) return 'Sessions'
-    const text = `Sessions · ${mark ? `${mark.glyph} ` : ''}${label}${how ? ` · ${how.word}` : ''}`
-    return text.length > 56 ? `${text.slice(0, 55).trimEnd()}…` : text
-  })()
-  /* Which conversation is this place's own, and whether the one on screen is it. */
-  const titleOf = (session: string) => labels[session] || [...(here?.sessions ?? []), ...(here?.unassigned ?? [])].find((one) => one.id === session)?.label || ''
-  const ownSaid = ownHeader({
-    own: here ? here.own : undefined,
-    usual: here_label,
-    viewing: view?.session ?? null,
-    title: titleOf,
-    unassigned: (here?.unassigned ?? []).map((one) => ({ id: one.id, label: one.label })),
-    hasOwn: Boolean(here?.ownNow),
-    working,
-  })
-  /* Nothing left to answer: the answers close, so the next one to arrive is a line again. */
-  const waitingCount = here?.unassigned?.length ?? 0
-  useEffect(() => {
-    if (waitingCount === 0) setAnswering(false)
-  }, [waitingCount])
-  const items = useMemo<HeaderItemInput[]>(() => {
-    if (!offered) return []
-    const worded = (row: (typeof offered)[number]) => {
-      const text = `${row.state ? `${MARKS[row.state].glyph} ` : ''}${labels[row.id] || named(row)}`
-      return text.length > 48 ? `${text.slice(0, 47).trimEnd()}…` : text
-    }
-    return [
-      {
-        kind: 'go',
-        id: 'sessions',
-        /* The corner control's job when the host draws the header and ours is gone: which session is on screen. */
-        label: ownSaid.label ?? here_label,
-        options: [...offered.map((row) => ({ id: row.id, label: worded(row) })), { id: 'new', label: 'New session' }, { id: 'list', label: 'All sessions…' }],
-      },
-      ...ownSaid.items,
-    ]
+  const usable = Boolean(at && here && here.program.found && !here.program.lacks && !installing)
+  const rows = usable ? connected(here) : []
+  /* What each row says, with what has been said since the list was read. */
+  const worded = rows.map((one) => (labels[one.id] ? { ...one, label: labels[one.id]! } : one))
+  const items = useMemo<HeaderItemInput[]>(
+    () => (usable ? viewHeader({ rows: worded, own: here ? here.own : undefined, viewing: view?.session ?? null, viewingLabel: label, how: how?.word ?? null, now: Date.now() }) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [JSON.stringify(offered?.map((row) => [row.id, row.label, row.state ?? ''])), labels, here_label, JSON.stringify(ownSaid)])
+    [usable, JSON.stringify(worded.map((one) => [one.id, one.label, one.state ?? '', one.lastActive])), here?.own, view?.session, label, how?.word],
+  )
   useEffect(() => {
     hosted?.header(items)
   }, [hosted, items])
   if (hosted) {
     hosted.presses.current = ({ item, value }) => {
+      const session = view?.session ?? null
+      const on = session !== null && rows.some((one) => one.id === session)
+      if (item === VIEW) {
+        if (typeof value !== 'string') return 'Choose one of this kehikko’s conversations.'
+        if (value === session || (value === NOT_CONNECTED && session === null)) return true
+        if (!rows.some((one) => one.id === value)) return 'That conversation is no longer connected to this kehikko.'
+        open(value)
+        return true
+      }
       if (item === MAKE_OWN) {
-        const session = view?.session
-        if (!session || !at || !api.assign) return 'There is no conversation on screen to make this kehikko’s own.'
+        if (!session || !on || !at || !api.assign) return 'There is no conversation of this kehikko’s on screen to make its own.'
         void api.assign(at.projectPath, at.key, session, true, at.kehikkoName).finally(() => setAgain((n) => n + 1))
         return true
       }
-      if (item === BACK_OWN) {
-        const own = here?.own
-        if (!own) return 'This kehikko has no conversation of its own.'
-        open(own)
+      if (item === DISCONNECT) {
+        if (!session || !on || !at || !view) return 'There is no conversation of this kehikko’s on screen to disconnect.'
+        const gone = view.n
+        if (remembered.at(projectOf(at)).read(at.key) === session) remembered.at(projectOf(at)).keep(at.key, null)
+        /* Taken off the record, then off the screen: the place opens what it opens now — another of its
+           conversations, or a new one with the bar — from the list read after the record changed. The
+           conversation itself is not ended. */
+        void api.detach(at.projectPath, at.key, session).finally(() => {
+          setListing(null)
+          drop(gone)
+          setAgain((n) => n + 1)
+        })
         return true
       }
-      if (item === UNASSIGNED) {
-        if (value === ANSWER) {
-          if (!here?.unassigned?.length) return 'No conversation is waiting to be assigned any more.'
-          setAnswering(true)
-          return true
-        }
-        if (typeof value !== 'string' || !at || !api.assign || !here?.unassigned?.some((one) => one.id === value)) return 'That conversation is not waiting to be assigned any more.'
-        /* A place with an own conversation has two ways to assign, and they are the page's to show:
-           the header's press opens them rather than choosing one. With none, it becomes the own. */
-        if (here.ownNow) {
-          setAnswering(true)
-          return true
-        }
-        void api.assign(at.projectPath, at.key, value, false, at.kehikkoName).finally(() => setAgain((n) => n + 1))
-        return true
-      }
-      if (item !== 'sessions' || typeof value !== 'string') return 'That is not something here to go to.'
-      if (value === 'list') {
-        setAsking(true)
-        setAgain((n) => n + 1)
-      } else if (value === 'new') open(null)
-      else if (offered?.some((one) => one.id === value)) open(value)
-      else return 'That session is no longer one of this place’s.'
-      return true
+      return 'That is not something here.'
     }
   }
 
@@ -715,36 +662,9 @@ export function Sessions({
         <Cover state="refused" name={NAME} detail={refusal} onRetry={() => setAgain((n) => n + 1)} />
       )}
 
-      {/* The project's conversations that belong to no place, and the answers to each: a line of
-          their own at any width, which the Inbox's item reveals. */}
-      {!cover && at && here && !installing && (
-        <Unassigned
-          rows={(here.unassigned ?? []).map((one) => ({ id: one.id, label: one.label }))}
-          hereSaid={[at.kehikkoName, at.epic ?? 'no epic'].filter(Boolean).join(' · ')}
-          hereOwn={here.ownNow ?? null}
-          elsewhere={here.assignable ?? []}
-          open={answering}
-          onOpen={setAnswering}
-          onAssign={async (session, key, own) => {
-            if (!api.assign) return
-            const there = key === null ? null : (here.assignable ?? []).find((one) => one.key === key)
-            if (key !== null && !there) return
-            try {
-              await api.assign(at.projectPath, there ? there.key : at.key, session, own, there ? there.kehikko : at.kehikkoName)
-            } finally {
-              setAgain((n) => n + 1)
-            }
-          }}
-          onIgnore={async (session) => {
-            if (!api.ignore) return
-            try {
-              await api.ignore(at.projectPath, session)
-            } finally {
-              setAgain((n) => n + 1)
-            }
-          }}
-        />
-      )}
+      {/* No conversation is connected to this kehikko: one slim line above Claude Code, saying so and
+          what to type where. Gone once the record lists one. */}
+      {!cover && usable && rows.length === 0 && <NoConversationBar />}
 
       {wanting && here && (
         <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-4" data-install={here.program.lacks ? 'update' : 'install'}>
@@ -770,34 +690,13 @@ export function Sessions({
         </div>
       )}
 
-      {choosing && here && (
-        <div className="min-h-0 flex-1">
-          <Chooser
-            /* Remounted when the occasion changes: where the keyboard starts depends on it. */
-            key={view ? 'sessions' : (step?.do ?? 'sessions')}
-            mode={view ? 'sessions' : step?.do === 'offer' ? 'offer' : step?.do === 'choose' ? 'ask' : 'sessions'}
-            listing={here}
-            current={view?.session ?? null}
-            onOpen={open}
-            onClose={view ? () => setAsking(false) : undefined}
-            onEnd={(session) => void api.end(session).finally(() => setTimeout(() => setAgain((n) => n + 1), 150))}
-            onEnableHook={api.enableHook ? () => void api.enableHook!().finally(() => setAgain((n) => n + 1)) : undefined}
-            onDetach={(session) => {
-              if (!at) return
-              if (remembered.at(projectOf(at)).read(at.key) === session) remembered.at(projectOf(at)).keep(at.key, null)
-              void api.detach(at.projectPath, at.key, session).finally(() => setAgain((n) => n + 1))
-            }}
-          />
-        </div>
-      )}
-
       {/* A session another process has open: nothing was started, and the two answers are put in
           words where the terminal would be. */}
       {questioning && here && stuck && (
         <div className="min-h-0 flex-1">
           <ElsewhereQuestion
             program={here.program.name}
-            label={labels[stuck.session] || [...here.sessions, ...here.others].find((one) => one.id === stuck.session)?.label || ''}
+            label={stuckLabel}
             there={stuck.there}
             onLeave={() => {
               setBlocked((was) => (was ? { ...was, left: true } : was))
@@ -805,6 +704,19 @@ export function Sessions({
             }}
             onCopy={() => open(stuck.session, true)}
           />
+        </div>
+      )}
+
+      {/* "Leave it": nothing was started and nothing is on screen. The place opens nothing by itself until
+          the canvas moves; the View menu, or a copy, is the person's. */}
+      {leftAlone && here && stuck && (
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-4" data-left-alone>
+          <Cover state="empty" name={NAME}>
+            {`${stuckLabel ? `“${brief(stuckLabel, 60)}”` : 'This conversation'} stays open in the other ${here.program.name} process. Nothing was started here.`}
+          </Cover>
+          <Button size="sm" variant="outline" className="h-7 px-3 text-xs" title={COPY.means} onClick={() => open(stuck.session, true)}>
+            {COPY.word}
+          </Button>
         </div>
       )}
 
@@ -865,35 +777,6 @@ export function Sessions({
           )
         })}
         </div>
-        {/* The one control, in a gutter of its own beside the terminal: it takes columns and no row, and
-            covers none of what the terminal prints. Which session this is is its title; the state is its
-            glyph. Drawn only when the host does not draw the header (`drawsHeader`). */}
-        {terminal && !ended && !hosted?.drawn && (
-          <button
-            type="button"
-            data-sessions
-            aria-label={`Sessions — ${label}${mark ? ` (${mark.word})` : ''}${how ? ` (${how.word})` : ''}`}
-            title={`${doing?.state ? `Sessions for this place — this one: ${since(doing.state, doing.since, Date.now())}` : 'Sessions for this place'}${how ? `. ${how.means}` : ''}`}
-            data-state={doing?.state ?? undefined}
-            data-how={how?.word}
-            className="text-muted-foreground hover:text-foreground hover:bg-accent flex w-5 shrink-0 flex-col items-center gap-1 border-l pt-1 font-mono text-[10px] opacity-70 hover:opacity-100 focus-visible:opacity-100"
-            onClick={() => {
-              setAsking(true)
-              setAgain((n) => n + 1)
-            }}
-          >
-            {mark ? (
-              <span className={mark.colour} aria-hidden>
-                {mark.glyph}
-              </span>
-            ) : null}
-            <span className="max-h-[70%] min-h-0 truncate [writing-mode:vertical-rl]">
-              {label}
-              {how ? ` · ${how.word}` : ''}
-              {' ▾'}
-            </span>
-          </button>
-        )}
       </div>
 
       {cover && (view || installing) && <Cover strip state={cover} name={NAME} onRetry={knock} />}
@@ -958,17 +841,6 @@ export function Sessions({
           <span className="flex shrink-0 gap-1">
             <Button size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={() => open(view.session)}>
               Resume
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-6 px-2 text-xs"
-              onClick={() => {
-                setAsking(true)
-                setAgain((n) => n + 1)
-              }}
-            >
-              Sessions
             </Button>
           </span>
         </div>
