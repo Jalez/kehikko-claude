@@ -169,6 +169,13 @@ export interface SessionEntry {
    * `home`, it is listed as not yet assigned.
    */
   seen?: { via: 'hook' | 'agents'; at: string }
+  /**
+   * A person's say that this conversation is NOT a Kehikot one — a background
+   * job, an agent's own run, something started for the computer and not for a
+   * kehikko. Kept like an assignment, so it is never listed or asked about
+   * again; assigning it later takes it back.
+   */
+  ignored?: { at: string }
 }
 
 export interface Places {
@@ -399,11 +406,33 @@ export function byToken(places: Places, token: string): { id: string; home: stri
   return null
 }
 
-/** The conversations the record has seen and that belong nowhere: started outside, reported, not yet assigned. */
+/**
+ * The conversations the record has seen and that belong nowhere: started
+ * outside, reported, not yet assigned — and not said to be no Kehikot
+ * conversation at all (`ignore`).
+ */
 export function unassigned(places: Places): string[] {
   return Object.entries(places.sessions)
-    .filter(([id, entry]) => entry.seen && !homeOf(places, id))
+    .filter(([id, entry]) => entry.seen && !entry.ignored && !homeOf(places, id))
     .map(([id]) => id)
+}
+
+/**
+ * A person's say: this conversation is not a Kehikot one. Recorded on its
+ * entry (`ignored`), so it stays out of every list and every Inbox count
+ * through restarts, and a later report of it changes nothing. Refused for one
+ * that belongs to a place: that is undone by taking it off the place.
+ */
+export function ignore(projectPath: string | null | undefined, id: string, now = Date.now()): Result<Places> {
+  const read = readPlaces(projectPath)
+  if (!read.ok) return read
+  const home = homeOf(read.value, id)
+  if (home) return { ok: false, error: 'That conversation belongs to a place already; take it off that place instead.' }
+  if (Object.hasOwn(read.value.sessions, id) && read.value.sessions[id]!.ignored) return read
+  return change(projectPath, (places) => {
+    describe(places, id, {}, now)
+    places.sessions[id]!.ignored = { at: new Date(now).toISOString() }
+  })
 }
 
 /**
@@ -447,18 +476,20 @@ export function assign(
     const key = placeKey(place)
     describe(places, id, { label: options.label, lastActive: options.lastActive }, now)
     places.sessions[id]!.home = key
+    /* Assigning one that was said to be no Kehikot conversation is the person changing their mind. */
+    delete places.sessions[id]!.ignored
     if (options.own || !places.places[key]!.own) places.places[key]!.own = id
   })
 }
 
 /** A conversation this module did not start, reported by Claude Code: listed as not yet assigned until somebody says. */
-export function sighted(projectPath: string | null | undefined, id: string, via: 'hook' | 'agents', now = Date.now()): Result<Places> {
+export function sighted(projectPath: string | null | undefined, id: string, via: 'hook' | 'agents', now = Date.now(), label = ''): Result<Places> {
   const read = readPlaces(projectPath)
   if (!read.ok) return read
   const had = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id] : undefined
-  if (had?.seen || homeOf(read.value, id)) return read
+  if (had?.seen || had?.ignored || homeOf(read.value, id)) return read
   return change(projectPath, (places) => {
-    describe(places, id, {}, now)
+    describe(places, id, { label }, now)
     places.sessions[id]!.seen = { via, at: new Date(now).toISOString() }
   })
 }
@@ -534,6 +565,7 @@ function describe(places: Places, id: string, about: { label?: string; lastActiv
     ...(was?.home ? { home: was.home } : {}),
     ...(was?.token ? { token: was.token } : {}),
     ...(was?.seen ? { seen: was.seen } : {}),
+    ...(was?.ignored ? { ignored: was.ignored } : {}),
   }
 }
 
@@ -624,7 +656,7 @@ function tidy(raw: unknown): Places {
   if (typeof sessions === 'object' && sessions !== null) {
     for (const [id, value] of Object.entries(sessions)) {
       if (!id || id.length > 128 || typeof value !== 'object' || value === null) continue
-      const entry = value as { added?: unknown; label?: unknown; lastActive?: unknown; home?: unknown; token?: unknown; seen?: { via?: unknown; at?: unknown } }
+      const entry = value as { added?: unknown; label?: unknown; lastActive?: unknown; home?: unknown; token?: unknown; seen?: { via?: unknown; at?: unknown }; ignored?: { at?: unknown } }
       const via = entry.seen?.via
       out.sessions[id] = {
         added: typeof entry.added === 'string' ? entry.added : '',
@@ -633,6 +665,7 @@ function tidy(raw: unknown): Places {
         ...(typeof entry.home === 'string' && readPlaceKey(entry.home) ? { home: entry.home } : {}),
         ...(typeof entry.token === 'string' && PLACE_TOKEN.test(entry.token) ? { token: entry.token } : {}),
         ...((via === 'hook' || via === 'agents') && typeof entry.seen?.at === 'string' ? { seen: { via, at: entry.seen.at } } : {}),
+        ...(typeof entry.ignored?.at === 'string' ? { ignored: { at: entry.ignored.at } } : {}),
       }
     }
   }

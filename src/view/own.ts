@@ -12,8 +12,12 @@ import type { HeaderItemInput } from 'kehikot-module-protocol'
  *
  * The project's conversations that belong to no place — started outside
  * Kehikot and reported by Claude Code, or running here with no record — are
- * listed in the same header with "Assign to this kehikko", so not knowing
- * where one belongs lasts as long as it takes to press it.
+ * listed in the same header with "Assign to this kehikko", and a last option
+ * that opens every answer in the page (`view/unassigned.tsx`): another
+ * kehikko, or "Not a Kehikot conversation". The page also says so in a line
+ * of its own, because this is a Go item, and a trigger that says "Go" — a
+ * compass under 300 pixels, a "⋯" under 220 — does not say something is
+ * waiting in it.
  *
  * Everything is header items, which the host lays out: words, then icons
  * under 300 pixels, then one "⋯" under 220 (`modeFor` in the host). A label
@@ -23,6 +27,8 @@ import type { HeaderItemInput } from 'kehikot-module-protocol'
 export const MAKE_OWN = 'make-own'
 export const BACK_OWN = 'back-own'
 export const UNASSIGNED = 'unassigned'
+/** The Not-yet-assigned menu's last option: opens the answers in the page (another kehikko, or not a Kehikot conversation). */
+export const ANSWER = 'answer'
 
 const cut = (text: string, most: number) => (text.length > most ? `${text.slice(0, most - 1).trimEnd()}…` : text)
 
@@ -66,7 +72,10 @@ export function ownHeader(o: {
       kind: 'go',
       id: UNASSIGNED,
       label: `Not yet assigned (${o.unassigned.length})`,
-      options: o.unassigned.slice(0, 40).map((one) => ({ id: one.id, label: cut(`Assign to this kehikko: ${one.label || one.id.slice(0, 8)}`, 64) })),
+      options: [
+        ...o.unassigned.slice(0, 40).map((one) => ({ id: one.id, label: cut(`Assign to this kehikko: ${one.label || one.id.slice(0, 8)}`, 64) })),
+        { id: ANSWER, label: 'Another kehikko, or not a Kehikot conversation…' },
+      ],
     })
   }
   return { label: label ? cut(label, 72) : null, items, other }

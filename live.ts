@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import type { IncomingMessage } from 'node:http'
 import { basename, join } from 'node:path'
@@ -714,6 +714,8 @@ export interface ActivityRow {
   place?: { epic?: string; parts?: string[]; kehikko?: string }
   since: number
   detail: string
+  /** How pressing it is (protocol 1.7.0): absent is `normal`. The unassigned count is `low` — informational. */
+  priority?: 'urgent' | 'normal' | 'low'
   /**
    * The folder of the project the session runs in (protocol 1.8.0). A session keeps running
    * when the person switches project, and the page framed now is the one that reports it; a
@@ -733,6 +735,53 @@ const ACTIVITY_STATE = { working: 'working', 'needs-you': 'attention', finished:
 const ACTIVITY_ORDER = { attention: 0, working: 1, done: 2 } as const
 
 const clip = (text: string, most: number): string => (text.length <= most ? text : `${text.slice(0, most - 1).trimEnd()}…`)
+
+/**
+ * The id of the one Inbox item that counts a project's unassigned conversations. One per project,
+ * and a list spanning projects has no id twice (the protocol refuses that), so the project is in it.
+ */
+export const unassignedItem = (project: string): string => `unassigned-in:${createHash('sha256').update(project).digest('hex').slice(0, 16)}`
+
+/**
+ * The project's conversations that belong to no place, as ONE quiet Inbox
+ * item: how many there are, and where the answers are. Null when there are
+ * none, which closes the item.
+ *
+ * Not `attention`: a conversation started in a terminal or as a background
+ * job is not waiting for anybody, and many of them were never meant for a
+ * kehikko. It is `working` at `low` priority — the protocol's informational
+ * item — so it is listed and counted without lighting "needs you" or Next.
+ *
+ * No `place`: a host opens an item without one by revealing this module's
+ * container — on the kehikko on screen when that has one, else on a kehikko
+ * of the project that does — and that container draws the answers (assign
+ * here, to another kehikko, or "Not a Kehikot conversation") in its own page,
+ * at any width. A `place` would only switch the kehikko.
+ */
+export function unassignedRow(places: Places, project: string, now: number): ActivityRow | null {
+  const ids = unassigned(places)
+  if (!ids.length) return null
+  const first = places.sessions[ids[0]!]
+  const name = ids.length === 1 ? (first?.label ?? '').replace(/\s+/g, ' ').trim() : ''
+  const since = Math.min(...ids.map((id) => Date.parse(places.sessions[id]?.seen?.at ?? '') || now))
+  return {
+    id: unassignedItem(project),
+    state: 'working',
+    priority: 'low',
+    label: clip(
+      ids.length === 1
+        ? `A Claude Code session isn’t assigned to a kehikko${name ? `: ${name}` : ''}`
+        : `${ids.length} Claude Code sessions aren’t assigned to a kehikko`,
+      ACTIVITY_LABEL,
+    ),
+    since,
+    detail: clip(
+      'Started outside Kehikot. Open the Claude container to assign them to a kehikko, or mark them “Not a Kehikot conversation”. With no Claude container on a kehikko, add one to answer.',
+      ACTIVITY_DETAIL,
+    ),
+    project,
+  }
+}
 
 /**
  * The COMPLETE list of the sessions whose state is known, most urgent first: needs you,
@@ -1197,13 +1246,13 @@ export class Runs {
    * assigned (one this module runs, or one that belongs somewhere, is left as
    * it is), and every page following that project reads its list again.
    */
-  sighted(projectPath: string, id: string, via: 'hook' | 'agents'): boolean {
+  sighted(projectPath: string, id: string, via: 'hook' | 'agents', label = ''): boolean {
     if (!this.program.isId(id)) return false
     if ([...this.runs.values()].some((run) => run.id === id || run.settled === id)) return false
     const root = projectRoot(projectPath)
     if (!root.ok) return false
     const before = readPlaces(root.value)
-    const written = sighted(root.value, id, via)
+    const written = sighted(root.value, id, via, this.now(), label)
     if (!written.ok) return false
     const was = before.ok ? JSON.stringify(before.value.sessions[id] ?? null) : ''
     if (JSON.stringify(written.value.sessions[id] ?? null) === was) return false
@@ -1772,22 +1821,12 @@ export class Runs {
   /** The activity list as it stands — one project's, or every project's (for a test, and for a page that has just arrived). */
   activity(project: string | null = null): ActivityRow[] {
     const rows = activityRows(this.runs.values(), project, this.unviewed.values())
-    /* A conversation reported started that belongs to no place yet needs the person: one row each,
-       so the Inbox asks, and the container's header has the press that answers. */
     const asking: ActivityRow[] = []
     for (const root of project !== null ? [project] : this.projects) {
       const read = readPlaces(root)
-      if (!read.ok) continue
-      for (const id of unassigned(read.value)) {
-        const kept = read.value.sessions[id]
-        asking.push({
-          id: `unassigned:${id}`,
-          state: 'attention',
-          label: clip(`A Claude Code session belongs to no kehikko yet${kept?.label ? `: ${kept.label}` : ''}`, ACTIVITY_LABEL),
-          since: Date.parse(kept?.seen?.at ?? '') || this.now(),
-          detail: 'Started outside Kehikot. Assign it from the Claude container’s header: Not yet assigned.',
-          project: root,
-        })
+      if (read.ok) {
+        const row = unassignedRow(read.value, root, this.now())
+        if (row) asking.push(row)
       }
     }
     return [...asking, ...rows].slice(0, ACTIVITY_ITEMS)

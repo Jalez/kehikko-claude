@@ -5,10 +5,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { listing, type Listing } from '../doors.ts'
-import { CLOSED, Runs, activityRows, sameProject, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
+import { CLOSED, Runs, activityRows, sameProject, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, unassignedItem, type Follower, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
 import { placeKey } from '../place.ts'
 import { PROGRAM, readActive, type Active, type Program, type Recorded } from '../program.ts'
-import { assign, attach, readPlaces, sessionsAt, type NamedPlace } from '../record.ts'
+import { assign, attach, ignore, readPlaces, sessionsAt, type NamedPlace } from '../record.ts'
 import type { DoorsAsked, SessionDoor } from '../doorConfig.ts'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 
@@ -2379,17 +2379,39 @@ describe('a conversation’s place, on every Kehikot door (protocol 2.4.0)', () 
     expect(w.runs.restartIn(B, 'doors')).toBe(true)
   })
 
-  test('a session reported started outside is listed as not yet assigned, and asks in the Inbox', async () => {
+  test('sessions reported started outside are ONE quiet Inbox item per project, closed when none are left', async () => {
     const dir = project()
     const w = world()
     expect(w.runs.sighted(dir, A, 'hook')).toBe(true)
     /* Twice is once. */
     expect(w.runs.sighted(dir, A, 'hook')).toBe(false)
+    expect(w.runs.sighted(dir, B, 'agents', 'kehikko modules issue triage')).toBe(true)
     const rows = w.runs.activity(dir)
-    expect(rows[0]).toMatchObject({ id: `unassigned:${A}`, state: 'attention', project: dir })
+    const asking = rows.filter((one) => one.id.startsWith('unassigned'))
+    expect(asking).toHaveLength(1)
+    expect(asking[0]).toMatchObject({ id: unassignedItem(dir), state: 'working', priority: 'low', label: '2 Claude Code sessions aren’t assigned to a kehikko', project: dir })
+    expect(asking[0]!.place).toBeUndefined()
     expect(activityItemsSchema.safeParse(rows.map(({ project: _p, ...one }) => one)).success).toBe(true)
-    /* Assigned: it belongs here, and asks no more. */
-    assign(dir, KEYED, A)
-    expect(w.runs.activity(dir).some((one) => one.id === `unassigned:${A}`)).toBe(false)
+    /* Not a Kehikot conversation: the count goes down, and the one left is named. */
+    ignore(dir, A)
+    w.runs.recorded()
+    expect(w.runs.activity(dir).filter((one) => one.id.startsWith('unassigned'))).toEqual([
+      expect.objectContaining({ id: unassignedItem(dir), label: 'A Claude Code session isn’t assigned to a kehikko: kehikko modules issue triage' }),
+    ])
+    /* Assigned: none are left, and the item is gone, which closes it. */
+    assign(dir, KEYED, B)
+    expect(w.runs.activity(dir).some((one) => one.id.startsWith('unassigned'))).toBe(false)
+  })
+
+  test('across projects, each has its own item, and the list has no id twice', () => {
+    const one = project()
+    const two = project()
+    const w = world()
+    w.runs.sighted(one, A, 'hook')
+    w.runs.sighted(two, B, 'hook')
+    const rows = w.runs.activity().filter((row) => row.id.startsWith('unassigned'))
+    expect(rows.map((row) => row.project).sort()).toEqual([one, two].sort())
+    expect(new Set(rows.map((row) => row.id)).size).toBe(2)
+    expect(activityItemsSchema.safeParse(rows.map(({ project: _p, ...row }) => row)).success).toBe(true)
   })
 })

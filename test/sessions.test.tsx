@@ -4,7 +4,7 @@ import { headerItemsSchema } from 'kehikot-module-protocol'
 import { resetServerStanding } from 'kehikot-module-protocol/client'
 import { useEffect, useRef } from 'react'
 
-import type { Listing, Row } from '../doors.ts'
+import type { Assignable, Listing, Row } from '../doors.ts'
 import type { ActivityRow, Notice, Stated } from '../live.ts'
 import { NOTICES } from '../manifest.ts'
 import type { Api } from '../src/api.ts'
@@ -65,7 +65,7 @@ const row = (id: string, more: Partial<Row> = {}): Row => ({ id, label: '', last
 /** A server in a variable: what each place holds, and what was asked of it. */
 function server(start: Record<string, Row[]> = {}) {
   const held: Record<string, Row[]> = { ...start }
-  const state = { found: '/bin/claude' as string | null, lacks: null as string | null, running: [] as Listing['running'], others: [] as Row[] }
+  const state = { found: '/bin/claude' as string | null, lacks: null as string | null, running: [] as Listing['running'], others: [] as Row[], unassigned: [] as Row[], assignable: [] as Assignable[] }
   const asked: string[] = []
   /** What the page asked to have brought across to a kehikko's key, in order with the reads. */
   const order: string[] = []
@@ -84,7 +84,17 @@ function server(start: Record<string, Row[]> = {}) {
         sessions: held[key] ?? [],
         others: state.others,
         running: state.running,
+        unassigned: state.unassigned,
+        assignable: state.assignable,
       }
+    },
+    assign: async (_projectPath, key, session, own, kehikkoName) => {
+      asked.push(`assign ${session} ${key}${own ? ' own' : ''} ${kehikkoName ?? ''}`.trimEnd())
+      state.unassigned = state.unassigned.filter((one) => one.id !== session)
+    },
+    ignore: async (_projectPath, session) => {
+      asked.push(`ignore ${session}`)
+      state.unassigned = state.unassigned.filter((one) => one.id !== session)
     },
     end: async (session) => {
       asked.push(`end ${session}`)
@@ -781,6 +791,57 @@ describe('a notice for a person who is not looking', () => {
     }
     expect(said.length).toBe(1)
     expect(container.querySelector('[data-terminal]')).not.toBeNull()
+  })
+})
+
+describe('conversations that belong to no place, answered in the page', () => {
+  const OTHER: Assignable = { key: 'epic=paper;parts=;kehikko=key:f00dcafe', kehikko: 'reviews', label: 'paper · whole epic' }
+  const lines = (container: HTMLElement) => container.querySelector('[data-unassigned]')
+
+  test('a line at any width, and each answer — here, another kehikko, not Kehikot — from the open list', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'one' })] })
+    s.state.unassigned = [row('u1', { label: 'kehikko modules issue triage' }), row('u2', { label: 'started in a terminal' }), row('u3')]
+    s.state.assignable = [OTHER]
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    expect(lines(container)?.textContent).toContain('3 Claude Code sessions in this project aren’t assigned to a kehikko.')
+    expect(container.querySelector('[data-unassigned-list]')).toBeNull()
+    fireEvent.click([...lines(container)!.querySelectorAll('button')].find((one) => one.textContent === 'Answer')!)
+    const answers = (id: string) => container.querySelector(`[data-unassigned-row="${id}"]`) as HTMLElement
+    expect(answers('u3').textContent).toContain('Session u3')
+
+    fireEvent.click([...answers('u1').querySelectorAll('button')].find((one) => one.textContent === 'Not a Kehikot conversation')!)
+    await flush()
+    expect(s.asked).toContain('ignore u1')
+    expect(answers('u1')).toBeNull()
+
+    fireEvent.click([...answers('u2').querySelectorAll('button')].find((one) => one.textContent === 'Assign here')!)
+    await flush()
+    expect(s.asked).toContain(`assign u2 ${KEY()} k3`)
+
+    fireEvent.change(answers('u3').querySelector('select')!, { target: { value: OTHER.key } })
+    await flush()
+    expect(s.asked).toContain(`assign u3 ${OTHER.key} reviews`)
+    /* None left: no line, and the header's item is withdrawn. */
+    expect(lines(container)).toBeNull()
+    expect((s.headers.at(-1) as { id: string }[]).some((one) => one.id === 'unassigned')).toBe(false)
+  })
+
+  test('the header’s Not yet assigned item opens the same answers', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'one' })] })
+    s.state.unassigned = [row('u1', { label: 'started in a terminal' })]
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    const item = (s.headers.at(-1) as { id: string; options: { id: string }[] }[]).find((one) => one.id === 'unassigned')!
+    expect(item.options.map((one) => one.id)).toEqual(['u1', 'answer'])
+    expect(headerItemsSchema.safeParse(s.headers.at(-1)).success).toBe(true)
+    let answer: unknown
+    act(() => {
+      answer = s.hosted.presses.current?.({ item: 'unassigned', value: 'answer' })
+    })
+    expect(answer).toBe(true)
+    await flush()
+    expect(container.querySelector('[data-unassigned-row="u1"]')).not.toBeNull()
   })
 })
 

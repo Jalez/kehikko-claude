@@ -5,7 +5,7 @@ import { TICKET, elsewhereOf, sameProject, theRuns, type Elsewhere, type Run, ty
 import { ID, MANIFEST, VERSION } from './manifest.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, readPlaceKey, type Place } from './place.ts'
 import { PROGRAM, headOf, home, type Program, type Recorded, type Running, type State } from './program.ts'
-import { PLACE_TOKEN, WHERE, assign, detach, follow, homeOf, ownOf, projectRoot, readPlaces, recordedIds, rekey, sessionsAt, unassigned, type Places } from './record.ts'
+import { PLACE_TOKEN, WHERE, assign, detach, follow, homeOf, ignore, ownOf, projectRoot, readPlaces, recordedIds, rekey, sessionsAt, unassigned, type Places } from './record.ts'
 import { enable, enabled, hookCommand, settingsFile } from './hook.ts'
 
 /**
@@ -144,6 +144,12 @@ export interface Listing {
    * or running (`agents --json`) in this folder with no record. Each can be assigned here.
    */
   unassigned?: Row[]
+  /**
+   * The project's other places an unassigned conversation can be assigned to: every place the
+   * record knows on a kehikko, but this one. Grouped by kehikko, each kehikko's most recently used
+   * place first — the one a person most likely means by "that kehikko".
+   */
+  assignable?: Assignable[]
   /** Whether sessions started outside Kehikot are reported here (the SessionStart hook is installed). */
   hook?: boolean
   /**
@@ -181,6 +187,35 @@ function besides(id: string, run: Run | undefined, running: Running, runs: Runs)
   const { background, open } = runs.others(running, id)
   const there = background ?? open
   return there ? { elsewhere: elsewhereOf(there) } : {}
+}
+
+/** A place an unassigned conversation can be assigned to, in words. */
+export interface Assignable {
+  key: string
+  /** The kehikko's name, by which the choices are grouped. */
+  kehikko: string
+  /** The epic and parts: "thesis · methods + results", "thesis · whole epic", "no epic". */
+  label: string
+}
+
+/**
+ * The places, other than `key`, that a conversation can be assigned to: those on a kehikko, by
+ * kehikko (in the order each was last used), most recently used first within each. At most `most`.
+ */
+export function assignable(places: Places, key: string, most = 24): Assignable[] {
+  const used = (entry: Places['places'][string]) =>
+    Math.max(0, ...entry.sessions.map((id) => Date.parse((Object.hasOwn(places.sessions, id) ? places.sessions[id]?.lastActive : null) ?? '') || 0))
+  const rows = Object.entries(places.places)
+    .filter(([one, entry]) => one !== key && entry.kehikko !== null)
+    .map(([one, entry]) => ({
+      key: one,
+      kehikko: entry.kehikko?.name || 'a kehikko',
+      label: entry.epic ? `${entry.epic} · ${entry.parts.length ? entry.parts.join(' + ') : 'whole epic'}` : 'no epic',
+      used: used(entry),
+    }))
+    .sort((a, b) => b.used - a.used)
+  const order = [...new Set(rows.map((one) => one.kehikko))]
+  return order.flatMap((name) => rows.filter((one) => one.kehikko === name)).slice(0, most).map(({ used: _used, ...rest }) => rest)
 }
 
 /** A recorded place in a few words: its parts, or "whole epic", and what its kehikko is called. */
@@ -270,7 +305,7 @@ export async function listing(
   if (running.known) {
     for (const one of running.active) {
       if (one.cwd !== root.value || live.some((run) => run.id === one.session || run.settled === one.session)) continue
-      if (!homeOf(read.value, one.session)) runs.sighted(root.value, one.session, 'agents')
+      if (!homeOf(read.value, one.session)) runs.sighted(root.value, one.session, 'agents', one.name)
     }
     const again = readPlaces(root.value)
     if (again.ok) read = again
@@ -332,6 +367,7 @@ export async function listing(
       }),
     ),
     unassigned: unassigned(read.value).filter((id) => !here.includes(id)).map(row),
+    assignable: assignable(read.value, key),
     hook: enabled(),
     others: ordered(held, here, key, read.value).map(({ one, near }) => ({ ...row(one.id), ...(near.length ? { near } : {}) })),
     running: live.map((run) => ({
@@ -646,6 +682,16 @@ export async function answer(
     if (!place) return bad('that is not a place')
     const names = (typeof body?.names === 'object' && body.names !== null ? body.names : {}) as { kehikko?: unknown }
     const written = assign(typeof body?.projectPath === 'string' ? body.projectPath : null, { ...place, ...(typeof names.kehikko === 'string' ? { kehikkoName: names.kehikko.slice(0, 120) } : {}) }, id, { own: body?.own === true })
+    if (written.ok) theRuns().recorded()
+    return written.ok ? ok({ ok: true }) : bad(written.error)
+  }
+
+  /* A person's say that a conversation that belongs nowhere is not a Kehikot one at all: kept in
+     the record like an assignment, so it is never listed or counted in the Inbox again. */
+  if (path === '/api/ignore' && method === 'POST') {
+    const id = typeof body?.session === 'string' ? body.session : ''
+    if (!PROGRAM.isId(id)) return bad('that is not a session id')
+    const written = ignore(typeof body?.projectPath === 'string' ? body.projectPath : null, id)
     if (written.ok) theRuns().recorded()
     return written.ok ? ok({ ok: true }) : bad(written.error)
   }

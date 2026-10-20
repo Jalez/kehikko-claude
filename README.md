@@ -385,9 +385,17 @@ Kehikot door:
 - **Started outside Kehikot.** With the SessionStart hook installed (the
   *Report them* press in the list, which adds one entry to Claude Code's
   `settings.json` — see `hook.ts`), a session started in a terminal is listed
-  in its project at once as *Not yet assigned*, and asks in the Inbox; so is
-  one `claude agents --json` reports running in the project with no record.
-  *Assign to this kehikko* in the header records it.
+  in its project at once as *Not yet assigned*; so is one
+  `claude agents --json` reports running in the project with no record. The
+  Inbox has ONE quiet item per project for them ("2 Claude Code sessions
+  aren't assigned to a kehikko": `working`, priority `low`, no place), and
+  opening it reveals the Claude container, whose page says so in a line of
+  its own at any width. *Answer* there gives each conversation *Assign here*,
+  *Assign to…* (another place the record knows, by kehikko) and *Not a
+  Kehikot conversation* — the last recorded on the session (`ignored`), so it
+  is never listed or counted again. The header's Go menu has the same item
+  (*Not yet assigned (n)*), with *Assign to this kehikko* and a last option
+  that opens the answers.
 - **The kehikko gains or loses a module** while a session runs: one line
   offers *Restart* to load the new doors (disabled while it is working).
 
