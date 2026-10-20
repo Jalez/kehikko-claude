@@ -23,6 +23,14 @@ that automatically opens claude code session in the terminal. It should be the s
 with this specific epic > parts > kehikko, and if there are more than one session associated with it,
 then it asks which one to open before it opens it."*
 
+The asking was later taken out, on the same person's word: *"picking from the unique list of selected
+'Claude Code sessions in this project' is not really that useful; I'd rather just have Claude Code's own
+UI … the Claude module itself alerts if it doesn't have an assigned conversation for the current
+kehikko, at the top, with a suggestion to use /kehikot-here … And then we'll have a view menu at the top
+that shows all the conversations that you have connected with /kehikot-here to that instance."* So the
+container always shows Claude Code, a bar says when nothing is connected, and the header's View menu
+holds this kehikko's conversations.
+
 It is a module of its own and not a mode of Terminal, because the two keep opposite promises. A shell
 belongs to a folder and ignores the epic on purpose; a session here belongs to the epic, the parts
 picked out of it and the kehikko, and moves when any of them does.
@@ -33,20 +41,20 @@ A **place** is the exact combination *project + epic + the set of picked parts +
 and Methods with Results are different places; nothing picked is a place too (the whole epic); the
 order parts were picked in does not matter.
 
-Opening the module on a place:
+Opening the module on a place always shows **Claude Code's own UI** — the program itself, in a
+terminal — and never a list of the project's conversations to pick from:
 
-- **no session there, and none anywhere in the project** — a new Claude Code session starts in the
-  project's folder;
-- **no session there, and the project has others** — the list, before anything is started (see
-  [A place with no session](#a-place-with-no-session-in-a-project-that-has-some));
-- **exactly one** — it is opened at once: resumed, or — when Claude Code is already running it somewhere
-  else — attached to or asked about (see [A session that is already
-  running](#a-session-that-is-already-running-somewhere-else));
-- **more than one** — the one that was last open there (`current`), at once. Only when none of them
-  is, a short list in the terminal's own space, before anything is opened: each session's name, the
-  last thing said in it, its pull requests, when it was last active and whether it is running, plus
-  *New session* and *Attach an existing session*. Arrows (or `j`/`k`) and Enter, a digit, or the
-  pointer.
+- **conversations are connected to it** — one of them, at once: the one this page was showing there,
+  else the one last open there (`current`), else the place's own, else the most recently active.
+  Resumed, or — when Claude Code is already running it somewhere else — attached to or asked about
+  (see [A session that is already running](#a-session-that-is-already-running-somewhere-else));
+- **none is** — a new conversation starts in the project's folder, and a bar above it says that
+  nothing is connected (see [No conversation connected](#no-conversation-connected-the-bar)).
+
+The rest of the project's conversations are never offered here. The person picks among this
+kehikko's own in the header's **View** menu (see [What is on screen](#what-is-on-screen)), starts
+another with Claude Code's own `/clear`, goes to an older one with its own `/resume`, and connects
+one that runs elsewhere by typing `/kehikot-here` in it.
 
 **What is open at a place is what opens there next.** Every open makes that session the place's
 `current` one, and so does the terminal moving on by itself: Claude Code carrying the conversation on
@@ -62,33 +70,34 @@ background session that is attached to keeps the name it has: its process is not
 Only sessions that are on this computer count towards that (see [What is shared between
 computers](#what-is-shared-between-computers-and-what-is-not)).
 
-### A place with no session, in a project that has some
+### No conversation connected: the bar
 
-Work on an epic often starts in a plain terminal, on another kehikko, or before the parts were picked
-this way — and every combination of parts is a place of its own, so narrowing from the whole epic to
-one part used to start an empty conversation beside the one the person was just having. So a place
-with no session asks first, when Claude Code holds other sessions for the project's folder:
+A conversation is **connected** to a kehikko (strictly, to its place) when the record lists it there.
+Exactly two things put it there, and neither is a guess:
 
-> No session here yet. Start a new one, or carry on with one this project already has.
+- **`/kehikot-here`**, typed by the person in that conversation (see
+  [below](#assigning-a-conversation-from-inside-it-kehikot-here));
+- **it was started here**: the new conversation this container opened, which is written at its place
+  once Claude Code has a record of it — when the person first says something in it — and so is a
+  conversation the container's terminal moves on to (`/resume`, `/clear` in it).
 
-- **New session** is the first row and where the keyboard starts: Enter, and a person who always wants
-  a new one has pressed one key.
-- Under it, laid out and not folded away, **every** session of the project — there is no number at
-  which the list stops — most likely wanted first: the ones another place of the *same epic* already
-  holds (other parts, another kehikko; marked *this epic*, with those places as the `title`), then the
-  rest by when each was last active. Each with its first prompt and when it was last active.
-- A row says when its session is running: on this module with what it is doing, *running in the
-  background*, or *open elsewhere* (next section). One the record lists and this computer does not
-  have is last, muted and unopenable, as everywhere.
-- **Choosing one makes it this place's session** and takes it from nowhere: a session may belong to
-  several places.
-- **Asked once per place.** A place that has a session opens it directly from then on.
-- **Nothing is started before the answer.** No empty session exists to be dealt with afterwards, and
-  walking on to another place leaves nothing behind.
-- The list is drawn where the terminal would be, which is empty at that moment. It adds no row and no
-  banner to anything.
+Why the second is not a guess: the person is typing into it in this kehikko's container. Leaving it
+unrecorded would lose it — the next visit would start yet another — and its Kehikot doors, which find
+their place through the record (`my_place`), would know none. Nothing else connects a conversation: one
+started in a terminal is not filed under a kehikko because it runs in the same folder, and none of the
+project's conversations is offered here.
 
-When the project has no other session there is nothing to choose from, and a new one starts as before.
+While a place has **no** conversation connected — none at all, or only ones that are not on this
+computer — one slim bar sits above Claude Code (not an Inbox item):
+
+> No conversation is connected to this kehikko. Type /kehikot-here in the Claude Code conversation you want here.
+
+with **Copy /kehikot-here** beside it. The new conversation below it is running all the same. The bar
+goes when the record lists one: when the person speaks in the new one, or when `/kehikot-here` is
+typed in another — and then the container switches to that one (the server tells every page following
+the project where it went: the feed's `sessions` event carries the place's key and the conversation;
+the page on that place reads its list and opens it). A conversation the person is in is never switched
+away from by anything else.
 
 ### A conversation carried on under another id
 
@@ -117,7 +126,7 @@ answer is never kept: a session can start or stop between two opens.
 | Claude Code says the session is… | what opening it here does |
 |---|---|
 | not running | `claude --resume <id>`, exactly as before |
-| running in the **background** | `claude attach <handle>` in this module's terminal: a view of the process that is already there. No second process, and Remote Control stays where it is. The corner says *background* |
+| running in the **background** | `claude attach <handle>` in this module's terminal: a view of the process that is already there. No second process, and Remote Control stays where it is. The View menu says *background* |
 | open in **another process** with a terminal of its own | nothing is started. The place says where and since when, and puts two answers in words |
 | *(cannot be asked)* | `claude --resume <id>` as before — and it is said |
 
@@ -132,10 +141,11 @@ answer is never kept: a session can start or stop between two opens.
 > 2 **Open a copy anyway** — A second process on the same conversation. Remote Control stays with the
 > other one until /remote-control is run here, and the two do not see each other's turns.
 
-*Leave it* is first and where Enter lands: a question somebody did not expect should start nothing. It
-goes to the list. What a copy means is beside the word **before** it is chosen, and stays in the
-corner control afterwards (*copy*, with the sentence as its `title`). Coming back to the place asks
-Claude Code again.
+*Leave it* is first and where Enter lands: a question somebody did not expect should start nothing.
+One sentence then says the conversation stays open in the other process and nothing was started here,
+with *Open a copy anyway* still one press away. What a copy means is beside the word **before** it is
+chosen, and the View menu says *copy* beside it afterwards. Coming back to the place asks Claude Code
+again.
 
 **Nothing here stops, signals or takes over a process this module did not start** — it may be
 mid-task. A view of a background session is this module's to close (*Close* on its row; also what
@@ -160,7 +170,7 @@ one Claude Code runs in the background. Each is listed once — under the place 
 else the first place that lists it — with its place, the name Claude Code gives it and its `state`,
 and a change of state is noticed as a view's is (one first seen in a state is listed, not noticed).
 A view of it is the row while it is open. A background session no place holds is not this module's
-to file under an epic, and is not listed; *Attach an existing session* makes it a place's.
+to file under an epic, and is not listed; `/kehikot-here` typed in it makes it a place's.
 
 **A Claude Code too old for `agents --json` or `attach`** is told apart from "nothing is running".
 Such a copy resumes a session as it always did, and says so on the terminal's first line —
@@ -169,7 +179,7 @@ Such a copy resumes a session as it always did, and says so on the terminal's fi
 > no `agents --json` or no `attach`), so this one was resumed without checking. Update Claude Code to
 > have that checked.
 
-— and in the corner (*unchecked*). The same when a copy that has the commands could not be asked.
+— and in the View menu (*unchecked*). The same when a copy that has the commands could not be asked.
 
 Measured on the real 2.1.296, with a scratch config folder and a stand-in for the model API:
 
@@ -195,30 +205,43 @@ Measured on the real 2.1.296, with a scratch config folder and a stand-in for th
 
 Nothing is remembered as a default. One narrower thing is: which session *this page* was showing for a
 place, for as long as its tab lives — so a page that reloads (the plumbing does that by itself when its
-server restarts) comes back to what was on screen. A page opened afresh asks.
+server restarts) comes back to what was on screen. A page opened afresh opens what the place opens.
 
 With no project open there is one sentence and no session. Terminal falls back to a home shell there;
 a Claude session in no folder is not what was asked for.
 
 ### What is on screen
 
-The terminal, and nothing that costs a row while a session is running. The session's short label and
-the way to the list sit in the terminal's own top-right corner, over it. A strip appears along the
-bottom only when nothing is running to take the space from: the session ended (**Resume**,
-**Sessions**), the install did not finish, or this module's server has gone.
+Claude Code, and nothing that costs a row while a conversation is connected and running. The bar
+above it while none is connected (above). A strip appears along the bottom only when nothing is
+running to take the space from: the session ended (**Resume**), the install did not finish, or this
+module's server has gone.
 
-What a session is doing is one glyph, with the word as its `title`: before the label in the corner
-control for the session on screen, and on each running row of the list, where the word "running" was.
-`●` working, `◆` needs you, `○` finished — three shapes, so it does not rest on colour. A session that
-has not said what it is doing has no mark. It adds no row, no line and no height (measured in WebKit:
-the terminal the same 40 rows and the corner control the same 21 px tall, with and without it).
+A host that draws headers (protocol 1.1.0, `kehikot.header`) is given one **View** menu — a `switch`,
+*This kehikko’s conversations* — listing every conversation connected to this place, and nothing else:
+the own one first, then by when each was last active. Each line is its mark, its title, when it was
+last active and *own* for the place's own, cut to the protocol's 48 characters with the time and *own*
+kept whole:
 
-A host that draws headers (protocol 1.1.0) also offers the place's sessions in the container's own
-**Go** menu — each with its mark, then *New session* and *All sessions…* — in the header row the host
-already draws. The corner control stays as well: a page cannot tell whether its host draws headers.
+> ◆ tighten the methods · 2 h ago · own
+> draft the results · 5 min ago
 
-From the list a session can be opened, a running one **End**ed, and one taken off the place (`×`): the
-session and its transcript are kept, and it goes back among the ones that can be attached.
+The value is the one on screen (*· copy*, *· background* or *· unchecked* beside it when it is one of
+those). Choosing another resumes it in the container. Beside it, in the host's Run menu, for the one
+on screen:
+
+- **Make this the kehikko’s own** — only when it is not; rewrites the record (`own`).
+- **Disconnect from this kehikko** — a `confirm` run (the host's two-press arm). The record no longer
+  lists it here; the conversation itself is not ended, and the place opens what it has left — another
+  of its conversations, or a new one with the bar.
+
+None of them is marked `agents: true`: no agent presses them. With nothing connected, the header is
+`[]` and the bar says why. The host lays the menus out at every width (words, icons under 300 px, one
+"⋯" under 220); each item has an icon and every label fits one line.
+
+What a session is doing is one glyph before its title in that menu: `●` working, `◆` needs you, `○`
+finished — three shapes, so it does not rest on colour. A session that has not said what it is doing
+has no mark.
 
 ### A session outlives the page
 
@@ -378,24 +401,15 @@ Kehikot door:
   2.1.304). A door asks the host, the host asks this module
   (`GET /api/kehikot/place`), and the answer is the record as it is now.
 - **Its place's own.** A place has one conversation of its own (`own`): the
-  first started there, or the one a person made its own. Viewing another one
-  here changes nothing in the record; the frame's header says
-  "Viewing … — not this kehikko's own (…)" with *Make this the kehikko's own*
-  (rewrites the record) and *Back to its own*.
-- **Started outside Kehikot.** With the SessionStart hook installed (the
-  *Report them* press in the list, which adds one entry to Claude Code's
-  `settings.json` — see `hook.ts`), a session started in a terminal is listed
-  in its project at once as *Not yet assigned*; so is one
-  `claude agents --json` reports running in the project with no record. The
-  Inbox has ONE quiet item per project for them ("2 Claude Code sessions
-  aren't assigned to a kehikko": `working`, priority `low`, no place), and
-  opening it reveals the Claude container, whose page says so in a line of
-  its own at any width. *Answer* there gives each conversation *Assign here*,
-  *Assign to…* (another place the record knows, by kehikko) and *Not a
-  Kehikot conversation* — the last recorded on the session (`ignored`), so it
-  is never listed or counted again. The header's Go menu has the same item
-  (*Not yet assigned (n)*), with *Assign to this kehikko* and a last option
-  that opens the answers.
+  first started or connected there, or the one a person made its own. Viewing
+  another one here changes nothing in the record; the View menu marks which is
+  the own one and offers *Make this the kehikko's own* for the one on screen.
+- **Started outside Kehikot.** It belongs nowhere until `/kehikot-here` is
+  typed in it. Nothing lists it, counts it or asks about it — no line on the
+  page and no Inbox item: the kehikko that has no conversation says so in its
+  own bar. (The SessionStart hook, `hook.ts`, and `claude agents --json` still
+  note such a conversation in the record as *seen*; and a record's earlier
+  *Not a Kehikot conversation* — `ignored` — still reads. Neither is shown.)
 - **The kehikko gains or loses a module** while a session runs: one line
   offers *Restart* to load the new doors (disabled while it is working).
 
@@ -459,8 +473,8 @@ conversation's project. With none or several, nothing is written and the kehikot
 > Kehikot: No kehikko with a Claude container is on screen in thesis, so nothing was assigned. Open the kehikko this conversation belongs to and type /kehikot-here again, or name one:
 >   /kehikot-here kehikko: k1a2b3c4  (writing)
 
-**What it says** when it assigns (and writes the conversation's token, and the Inbox's count and
-the lists are said again):
+**What it says** when it assigns (and writes the conversation's token; the page on that place reads
+its list again, its bar goes, and it puts that conversation on screen):
 
 > Kehikot: Assigned to writing · thesis (Methods). It’s now this kehikko’s own (it had none).
 >
@@ -479,8 +493,6 @@ the lists are said again):
   2.5.0: name, summary, and as version the first twelve hex digits of the text's sha256) and
   serves the text at `GET /kehikot/skills/kehikot-here.md`; the host shows it and installs it on
   the person's press.
-
-The *Not yet assigned* line says so: "… Answer here, or type /kehikot-here in that conversation."
 
 ## Where its data lives
 
@@ -510,8 +522,7 @@ The *Not yet assigned* line says so: "… Answer here, or type /kehikot-here in 
   person first says something. A session that was opened, shown a sign-in screen and closed was never a
   session, and leaves no row.
 - When a **part or a kehikko is deleted**, its key can no longer be reached. Nothing is deleted: the
-  entry stays in the file, and its sessions are listed under *Attach an existing session* for every
-  other place in the project.
+  entry stays in the file, and `/kehikot-here` connects one of its conversations elsewhere.
 - **The kehikko is named by its `key`, not its number.** `context.kehikko` carries both
   (`{ id, name, key }`, protocol 1.1.0). The `key` is the one the host writes in the project's own
   `.kehikot/host/kehikot.json` (`.kehikot/kehikko/` before protocol 2.2.0): the same after a rename, after the project is removed from the host
@@ -542,12 +553,12 @@ that kehikko's entries across (`POST /api/rekey`, before the place is read):
 - if an entry filed under a key already carries that name, the name is taken — the migration has run,
   or another kehikko is called the same — and entries under numbers are left alone rather than guessed
   at. So it happens once per kehikko;
-- an entry that matches nothing stays exactly as it is. It is not deleted, and its sessions are under
-  *Attach an existing session* at every place. When nothing matches, the file is not written.
+- an entry that matches nothing stays exactly as it is. It is not deleted, and `/kehikot-here` connects
+  its conversations wherever they are wanted. When nothing matches, the file is not written.
 
 Reading never migrates: `GET /api/place` and the MCP tool return what the file says. A kehikko that
 was renamed between the old file being written and the first open with a key is not matched; attach
-its sessions by hand, or rename it back for one open.
+its conversations with `/kehikot-here`, or rename it back for one open.
 
 ### What is shared between computers, and what is not
 
@@ -575,14 +586,10 @@ rule does not untrack a file. `git rm --cached .kehikot/claude/places.json` does
 between computers, or simply this computer after Claude Code cleaned an old transcript away — a
 recorded session that Claude Code has nothing for here is:
 
-- **shown, not hidden**: in the list it is a muted row with its first prompt, *not on this computer*
-  where "running" would be, and when it was last active. No extra row or notice says so. (Hiding it
-  was the other choice. It was not taken because the list would then disagree with the file, and a
-  person who remembers the conversation would have no way to learn why it is not offered.)
-- **not openable**: the row does not open, by pointer, Enter or digit. It can be taken off the place
-  (`×`), which is the person's choice and removes it from that place only.
-- **not counted**: a place whose only recorded session is elsewhere opens a new one at once, as an
-  empty place does, and one session here plus one elsewhere opens the one here without asking.
+- **not offered**: the View menu lists only what this computer can open, and the MCP tool marks it
+  `missing: true`.
+- **not counted**: a place whose only recorded session is elsewhere opens a new one at once, with the
+  bar, as an empty place does; one session here plus one elsewhere opens the one here.
 - **never started under its old id**: the server refuses to open an id Claude Code has no record of
   on this computer. `claude --session-id <that id>` would be a new, empty conversation wearing the old
   one's id, and would collide with the real one if the two computers' records ever met.
@@ -632,13 +639,14 @@ itself honours) — the list of a project's sessions, their first prompt, and wh
 | `POST /api/rekey` | bring the entries an older release filed under a kehikko's row number across to its key. Ticketed; the only thing that migrates |
 | `POST /api/end` | end a running session, because a person chose that one. Ticketed |
 | `POST /api/restart` | end a running session whose project's folder was renamed under it, so its views resume it in the new folder, because a person pressed that. Refused while it is working. Ticketed |
-| `POST /api/detach` | take a session off a place. Ticketed |
+| `POST /api/assign` | "Make this the kehikko’s own": the record says the conversation on screen is its place's own. Ticketed |
+| `POST /api/detach` | "Disconnect from this kehikko": take a session off a place; the session is not ended. Ticketed |
 | `POST /api/showing` | what a page has on screen: its project, its place, and whether its kehikko has a Claude container — what `/kehikot-here` assigns to. Ticketed; forgotten when the page's feed closes |
 | `POST /api/here?session&say` | `/kehikot-here`, from the skill: assign a conversation Claude Code lists as running to the place on screen in its project. No ticket (the conversation has none); answers plain text beginning `Kehikot:` |
 | `GET /kehikot/skills/kehikot-here.md` | the skill's SKILL.md, as `text/markdown` (protocol 2.5.0, `declares.skills`). Public: it holds nothing of anybody's |
-| `GET /api/feed` | server-sent events: each running session's state as it changes, the notices for a framed page to pass on, and the whole activity list (`activity`: on arrival and on every change) that the page hands the host as `activity.set` (protocol 1.5.0; `activity:report`). Sent only to a host whose greeting says it answers the method. Colours match the host's dots: needs you yellow, finished green, working grey. Ticketed (in the query: an `EventSource` sends no header) |
+| `GET /api/feed` | server-sent events: each running session's state as it changes, `sessions` when a project's record changed (with `key` and `session` when `/kehikot-here` connected one: the page on that place puts it on screen), the notices for a framed page to pass on, and the whole activity list (`activity`: on arrival and on every change) that the page hands the host as `activity.set` (protocol 1.5.0; `activity:report`). Sent only to a host whose greeting says it answers the method. Colours match the host's dots: needs you yellow, finished green, working grey. Ticketed (in the query: an `EventSource` sends no header) |
 | `POST /api/state?event&session` | a session's own program saying what it is doing. Not the page's: it must carry that session's secret, reads no body, and answers 204 or one 403 that does not say why |
-| `POST /mcp` | one tool, `sessions { projectPath, epic?, place? }`: the places of a project and their sessions, `missing: true` on one that is not on this computer, `state` and `since` on a running one that has said what it is doing, and `runningElsewhere` on one Claude Code runs in a process this module did not start. With `place: { epic, parts, kehikko }` it answers in words what opening the module there does — for a place with no session: *this place has no session yet*, and the project's sessions in the order they are offered (`readOnlyHint: true`). The door asks to be registered as `kehikko-claude` (`mcp.as`) |
+| `POST /mcp` | one tool, `sessions { projectPath, epic?, place? }`: the places of a project and their sessions, `missing: true` on one that is not on this computer, `state` and `since` on a running one that has said what it is doing, and `runningElsewhere` on one Claude Code runs in a process this module did not start. With `place: { epic, parts, kehikko }` it answers in words what opening the module there does — for a place with no session: *no conversation connected*, a new one starts and `/kehikot-here` connects another; nothing is offered from the project (`readOnlyHint: true`). The door asks to be registered as `kehikko-claude` (`mcp.as`) |
 
 **One report, not two.** The module's single report is `activity.set`: the whole list of sessions with their state, a label (the session's first prompt, the words the notice used) and place. A host that answers `activity.set` derives the one-time notice ("Finished: “<first prompt>”", "Waiting for you: …") from the list's transitions, dedupes it and keeps quiet for a place that is on screen, so this module sends it no `events.emit` at all. The greeting carries no host name, version or build, only `answers`, so that is the signal: `answers` includes `activity.set` means no notice from here; `answers` lacking it, or absent (hosts before 1.4.0, which draw no dots), means the notice is still sent, unwatched-only, once per transition and rationed, because it is then the only signal. The trade-off: a host that answers `activity.set` but does not yet derive notices (app 0.1.20 exactly) shows the dots and gets no log rows from this module until it is updated to 0.1.21, which the updater offers.
 
@@ -704,7 +712,8 @@ already running elsewhere and how one of those is opened without starting anothe
 | `here.ts` | `/kehikot-here`: which conversation is believed, which place it goes to, and what is said |
 | `skills.ts`, `plugin/` | the skills offered (`declares.skills`), and the plugin folder a session started here is given |
 | `src/view/places.ts` | what the page does when the canvas names a place. Pure |
-| `src/view/chooser.tsx` | the list |
+| `src/view/conversations.ts` | which conversations are connected here, the bar's words and the View menu. Pure |
+| `src/view/bar.tsx` | the bar above Claude Code while none is connected |
 | `src/view/elsewhere.tsx` | the question, when a session is open in another process |
 | `src/view/terminal-view.tsx` | xterm, and a viewer's socket |
 | `src/app.tsx` | the state, and what is drawn |
@@ -712,7 +721,7 @@ already running elsewhere and how one of those is opened without starting anothe
 ## Checks
 
 ```bash
-bun test                    # the key, the record, the adapter against a stand-in claude, the runs and their states, the report, the list, the page
+bun test                    # the key, the record, the adapter against a stand-in claude, the runs and their states, the report, the View menu, the bar, the page
 bun run typecheck
 bunx kehikot-check-parts .
 ```

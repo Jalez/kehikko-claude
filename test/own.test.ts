@@ -7,8 +7,6 @@ import { TICKET, answer, hostCheck } from '../doors.ts'
 import { enable, enabled, hookCommand, settingsFile } from '../hook.ts'
 import { placeKey } from '../place.ts'
 import { assign, attach, born, byToken, detach, follow, homeOf, ignore, ownOf, readPlaces, sighted, unassigned } from '../record.ts'
-import { assignable } from '../doors.ts'
-import { ANSWER, BACK_OWN, MAKE_OWN, UNASSIGNED, ownHeader } from '../src/view/own.ts'
 
 /**
  * Where a conversation belongs, and which is a place's own — the record the
@@ -112,59 +110,6 @@ describe('the record', () => {
   })
 })
 
-describe('the frame says which conversation is the kehikko’s own', () => {
-  const title = (id: string) => ({ [A]: 'tighten the methods', [B]: 'draft results' })[id] ?? ''
-
-  test('viewing its own: said beside the usual label, nothing to press', () => {
-    const said = ownHeader({ own: A, viewing: A, usual: 'Sessions · tighten the methods', title, unassigned: [], working: false })
-    expect(said.other).toBe(false)
-    expect(said.label).toBe('Sessions · tighten the methods · this kehikko’s own')
-    expect(said.items).toEqual([])
-  })
-
-  test('viewing another: said, with make-own and back-to-own', () => {
-    const said = ownHeader({ own: A, viewing: B, title, unassigned: [], working: false })
-    expect(said.other).toBe(true)
-    expect(said.label).toBe('Viewing draft results — not this kehikko’s own (tighten the methods)')
-    expect(said.items.map((one) => one.id)).toEqual([MAKE_OWN, BACK_OWN])
-  })
-
-  test('unassigned conversations are offered to assign here', () => {
-    const said = ownHeader({ own: null, viewing: null, title, unassigned: [{ id: C, label: 'started in a terminal' }], working: false })
-    expect(said.items).toEqual([
-      {
-        kind: 'go',
-        id: UNASSIGNED,
-        label: 'Not yet assigned (1)',
-        options: [
-          { id: C, label: 'Assign to this kehikko: started in a terminal' },
-          { id: ANSWER, label: 'Another kehikko, or not a Kehikot conversation…' },
-        ],
-      },
-    ])
-  })
-
-  test('where the place has an own conversation, the header option says the choice is made in the page', () => {
-    const said = ownHeader({ own: A, viewing: A, title, unassigned: [{ id: C, label: 'started in a terminal' }], hasOwn: true, working: false })
-    const item = said.items.find((one) => one.id === UNASSIGNED) as { options: { id: string; label: string }[] }
-    expect(item.options.map((one) => one.label)).toEqual(['Assign to this kehikko…: started in a terminal', 'Another kehikko, or not a Kehikot conversation…'])
-    /* One item and one option per conversation: nothing the header's width rules have to fit twice. */
-    expect(said.items.length).toBe(1)
-    expect(item.options.every((one) => one.label.length <= 48)).toBe(true)
-  })
-
-  test('the header item is the same at every width: what it says does not depend on how the host lays it out', () => {
-    /* The host folds a module's menus into icons under 300 px and one "⋯" under 220, and a folded
-       menu keeps every item; nothing here is width-dependent, and the page says it in a line of its own. */
-    const said = ownHeader({ own: A, viewing: A, title, unassigned: [{ id: C, label: '' }], working: false })
-    expect(said.items.find((one) => one.id === UNASSIGNED)).toMatchObject({ kind: 'go', label: 'Not yet assigned (1)' })
-  })
-
-  test('a server that does not say a place’s own claims nothing', () => {
-    expect(ownHeader({ own: undefined, viewing: B, title, unassigned: [], working: false })).toEqual({ label: null, items: [], other: false })
-  })
-})
-
 describe('not a Kehikot conversation', () => {
   test('ignored is a record: never listed again, not by a later report, and it survives a re-read', () => {
     const p = dir()
@@ -194,17 +139,6 @@ describe('not a Kehikot conversation', () => {
     expect(homeOf(read(p), B)).toBe(placeKey(RESULTS))
   })
 
-  test('the places to assign to: every other place on a kehikko, by kehikko, the most recently used first', () => {
-    const p = dir()
-    const OTHER = { epic: 'paper', parts: [], kehikko: { key: 'f00dcafe' }, kehikkoName: 'reviews' }
-    born(p, METHODS, A, null, { lastActive: 1_000 })
-    born(p, RESULTS, B, null, { label: 'draft results', lastActive: 3_000 })
-    born(p, OTHER, C, null, { label: 'reply to reviewer 2', lastActive: 2_000 })
-    expect(assignable(read(p), placeKey(METHODS))).toEqual([
-      { key: placeKey(RESULTS), kehikko: 'writing', label: 'thesis · results', own: { id: B, title: 'draft results', lastActive: 3_000 } },
-      { key: placeKey(OTHER), kehikko: 'reviews', label: 'paper · whole epic', own: { id: C, title: 'reply to reviewer 2', lastActive: 2_000 } },
-    ])
-  })
 })
 
 describe('the doors', () => {
@@ -241,14 +175,12 @@ describe('the doors', () => {
     expect(ownOf(read(p), placeKey(METHODS))).toBe(A)
   })
 
-  test('/api/ignore is the page’s: ticketed, and it writes the decision', async () => {
+  test('the answers that went with the "Not yet assigned" line are gone: /api/ignore is no door', async () => {
     const p = dir()
     sighted(p, A, 'hook')
-    const body = { projectPath: p, session: A }
-    expect((await answer('POST', '/api/ignore', none, body, null))?.status).toBe(403)
-    expect((await answer('POST', '/api/ignore', none, body, TICKET))?.status).toBe(200)
-    expect(unassigned(read(p))).toEqual([])
-    expect((await answer('POST', '/api/ignore', none, { projectPath: p, session: 'nope' }, TICKET))?.status).toBe(400)
+    const reply = await answer('POST', '/api/ignore', none, { projectPath: p, session: A }, TICKET)
+    expect(reply?.status ?? 404).toBe(404)
+    expect(read(p).sessions[A]?.ignored).toBeUndefined()
   })
 })
 

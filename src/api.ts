@@ -1,7 +1,7 @@
 import { answered, ask, follow, ticket } from 'kehikot-module-protocol/client'
 
 import type { Listing } from '../doors.ts'
-import type { ActivityRow, Notice, Stated } from '../live.ts'
+import type { ActivityRow, Notice, SessionsChanged, Stated } from '../live.ts'
 
 /**
  * This module's own `/api`, as the page calls it. `ask` carries the ticket —
@@ -23,23 +23,16 @@ export interface Api {
    * folder was renamed: the server ends it and its views open it again. Refused while it is working.
    */
   restart?(session: string, why?: 'moved' | 'doors'): Promise<void>
-  /**
-   * A person's say about where a conversation belongs: assign one that belongs nowhere to this
-   * place, or — `own` — make the one on screen this place's own. Rewrites the record.
-   */
+  /** A person's say: make the conversation on screen this place's own (`own`). Rewrites the record. */
   assign?(projectPath: string, key: string, session: string, own: boolean, kehikkoName?: string): Promise<void>
-  /** A person's say that a conversation belonging nowhere is not a Kehikot one: never listed or counted again. */
-  ignore?(projectPath: string, session: string): Promise<void>
   /** Which doors a running session would be given now that it was not; null when not known. */
   doors?(session: string): Promise<{ added: string[]; removed: string[] } | null>
-  /** Install Claude Code's SessionStart hook that reports sessions started outside Kehikot; says the file written. */
-  enableHook?(): Promise<{ file: string; already: boolean }>
   /**
    * Say what this page has on screen — its place, and whether the open kehikko has a Claude
    * container — or `null` for nothing. What `/kehikot-here` typed in a conversation assigns to.
    */
   showing?(page: string, at: { projectPath: string; key: string; kehikkoName: string; partNames: string[]; onScreen: boolean } | null): Promise<void>
-  /** Take a session off a place. The session itself is kept. */
+  /** Take a session off a place ("Disconnect from this kehikko"). The session itself is kept. */
   detach(projectPath: string, key: string, session: string): Promise<void>
   /**
    * Follow what changes while the page is open: every running session's
@@ -48,7 +41,7 @@ export interface Api {
    * list (on arrival and on every change). Returns the function that
    * stops following.
    */
-  feed?(notices: boolean, heard: { state(stated: Stated): void; notice(notice: Notice): void; activity?(items: ActivityRow[]): void; sessions?(): void }, project?: string | null, page?: string): () => void
+  feed?(notices: boolean, heard: { state(stated: Stated): void; notice(notice: Notice): void; activity?(items: ActivityRow[]): void; sessions?(event?: SessionsChanged): void }, project?: string | null, page?: string): () => void
 }
 
 export const api: Api = {
@@ -67,15 +60,8 @@ export const api: Api = {
   async assign(projectPath, key, session, own, kehikkoName) {
     answered(await ask('./api/assign', { body: { projectPath, key, session, own, ...(kehikkoName ? { names: { kehikko: kehikkoName } } : {}) } }))
   },
-  async ignore(projectPath, session) {
-    answered(await ask('./api/ignore', { body: { projectPath, session } }))
-  },
   async doors(session) {
     return answered(await ask<{ ok: true; changed: { added: string[]; removed: string[] } | null }>('./api/doors', { query: { session }, ticket: true })).changed
-  },
-  async enableHook() {
-    const said = answered(await ask<{ ok: true; file: string; already: boolean }>('./api/hook', { body: {} }))
-    return { file: said.file, already: said.already }
   },
   async showing(page, at) {
     answered(await ask('./api/showing', { body: at ? { page, ...at } : { page } }))
@@ -84,14 +70,14 @@ export const api: Api = {
     answered(await ask('./api/detach', { body: { projectPath, key, session } }))
   },
   feed(notices, heard, project, page) {
-    return follow<Stated | Notice | { items: ActivityRow[] }>(
+    return follow<Stated | Notice | { items: ActivityRow[] } | SessionsChanged>(
       './api/feed',
       (event, name) => name === 'notice'
           ? heard.notice(event as Notice)
           : name === 'activity'
             ? heard.activity?.((event as { items: ActivityRow[] }).items)
             : name === 'sessions'
-              ? heard.sessions?.()
+              ? heard.sessions?.(event as SessionsChanged)
               : heard.state(event as Stated),
       /* An EventSource sends no header, so the ticket rides the query (see `stream` in doors.ts). */
       /* The activity list is of the project the page is framed in only: a host files it under that one. */

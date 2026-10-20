@@ -50,8 +50,8 @@ export interface HereNeeds {
   knownProjects(): string[]
   /** Whether the host holds a folder as a project. */
   hostHas(folder: string): Promise<boolean>
-  /** The record changed under this project: the lists and the Inbox are said again. */
-  told(projectPath: string): void
+  /** The record changed under this project: the lists are said again, and the page on `assigned`'s place puts it on screen. */
+  told(projectPath: string, assigned?: { key: string; session: string }): void
   env?: NodeJS.ProcessEnv
 }
 
@@ -191,7 +191,7 @@ export async function here(id: string, say: string, needs: HereNeeds): Promise<s
   if (!written.ok) return `${SAID} The record could not be written (${written.error}), so nothing was assigned.`
   /* Its token, so the doors of a session this module gives them to know its place now. */
   tokenFor(project, id, freshToken)
-  needs.told(project)
+  needs.told(project, { key, session: id })
 
   if (!hadOwn) return `${SAID} Assigned to ${said}. It’s now this kehikko’s own (it had none).`
   if (hadOwn === id) return `${SAID} Assigned to ${said}. It is this kehikko’s own.`

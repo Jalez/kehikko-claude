@@ -1,4 +1,4 @@
-import type { Listing, Row } from '../../doors.ts'
+import type { Listing } from '../../doors.ts'
 import type { Elsewhere, Notice } from '../../live.ts'
 import { projectKey } from 'kehikot-module-protocol'
 
@@ -9,48 +9,34 @@ import type { State } from '../../program.ts'
  * What the page does when the canvas names a place, decided from what the
  * server says is there.
  *
- * ## The rule that was asked for
+ * ## The rule
  *
- * "It should be the same session associated with this specific epic > parts >
- * kehikko, and if there are more than one session associated with it, then it
- * asks which one to open before it opens it."
+ * The container always shows Claude Code itself — its own UI, in a terminal
+ * — and never a list of the project's conversations to pick from:
  *
- *   - none recorded → a new session, at once — unless the project already
- *     has sessions, and then the person is offered them first (below);
- *   - exactly one → that one, at once;
- *   - more than one → the one last open here (`current`, kept in the record
- *     by every open and every conversation the terminal moved on to); ask
- *     only when none of them is that, and open nothing until the person has
- *     chosen.
+ *   - the place has conversations connected (`view/conversations.ts`) → one
+ *     of them, at once: the one this page was showing for it, else the one
+ *     last open there (`current`), else its own, else the most recently
+ *     active;
+ *   - none → a new conversation in the project's folder, after the canvas
+ *     has stopped moving (`SETTLE_MS`). The page says above it that nothing
+ *     is connected, and how to connect one.
  *
- * ## A place with none, in a project that has some
- *
- * Starting a new conversation without a word was right only when there was
- * nothing else to carry on with. Work on an epic often begins in a plain
- * terminal, on another kehikko, or before the parts were picked this way —
- * and every combination of parts is its own place, so narrowing from the
- * whole epic to one part used to start an empty conversation beside the one
- * the person was just having. So: when the place has no session and Claude
- * Code holds others for the project's folder, the list is drawn before
- * anything is started (`offer`), "New session" first so that Enter is all a
- * person who wants a new one has to press. When the project has no other
- * session there is nothing to choose from, and a new one starts as before.
- *
- * It is asked once per place: choosing a session makes it the place's, and a
- * place with a session opens it directly.
+ * Which conversation that new one becomes is never guessed: it is this
+ * place's once the person says something in it (it was started here), and
+ * any other conversation is this place's once `/kehikot-here` is typed in it.
  *
  * Nothing is remembered as a default. The one thing that is remembered is
  * narrower and is not a default: which session THIS PAGE was showing for a
  * place, for as long as the page's tab lives (`held`, in `app.tsx`). A page
  * that reloads — which the plumbing does by itself when its server restarts —
- * comes back to what was on screen instead of asking a question the person
- * answered a minute ago. A page opened afresh asks.
+ * comes back to what was on screen.
  *
  * ## Why this file holds no socket, no emulator and no React
  *
  * As in Terminal's `sessions.ts`: everything here is a pure function of what
- * was said and what is held, so the tests can say "two sessions, so it asks"
- * without a browser or a pty in the room.
+ * was said and what is held, so the tests can say "two sessions, so it opens
+ * the own one" without a browser or a pty in the room.
  */
 
 export type Step =
@@ -58,10 +44,6 @@ export type Step =
   | { do: 'install'; update: boolean }
   /** Open this session; null is a new one. */
   | { do: 'open'; session: string | null }
-  /** More than one belongs here: ask. */
-  | { do: 'choose' }
-  /** None belongs here, and the project has others: offer them, a new one first, before anything is started. */
-  | { do: 'offer' }
 
 /**
  * `showing` is the session this page was showing for the place, if it was
@@ -72,19 +54,21 @@ export type Step =
  * Only sessions that are HERE count — the ones Claude Code has on this
  * computer. One the record lists and this computer does not have (`missing`:
  * it ran on another, or its transcript was cleaned away) cannot be opened,
- * so it is neither the one to open nor a reason to ask: a place whose only
- * recorded session is somewhere else gets a new one, and nothing is said.
+ * so it is not the one to open: a place whose only recorded session is
+ * somewhere else gets a new one.
  */
 export function decide(listing: Listing, showing: string | null = null): Step {
   if (!listing.program.found) return { do: 'install', update: false }
   if (listing.program.lacks) return { do: 'install', update: true }
   const here = listing.sessions.filter((one) => !one.missing)
-  if (showing && here.some((one) => one.id === showing)) return { do: 'open', session: showing }
+  const has = (id: string | null | undefined): id is string => Boolean(id) && here.some((one) => one.id === id)
+  if (has(showing)) return { do: 'open', session: showing }
   /* The one last open here opens again, however many others the place lists. */
-  if (listing.current && here.some((one) => one.id === listing.current)) return { do: 'open', session: listing.current }
-  if (here.length === 0) return listing.others.length ? { do: 'offer' } : { do: 'open', session: null }
-  if (here.length === 1) return { do: 'open', session: here[0]!.id }
-  return { do: 'choose' }
+  if (has(listing.current)) return { do: 'open', session: listing.current }
+  if (has(listing.own)) return { do: 'open', session: listing.own }
+  if (here.length === 0) return { do: 'open', session: null }
+  const latest = [...here].sort((a, b) => (b.lastActive ?? 0) - (a.lastActive ?? 0))[0]!
+  return { do: 'open', session: latest.id }
 }
 
 /** A place as the page holds it: the project's folder with the key inside it. */
@@ -193,12 +177,7 @@ export function surplus(views: readonly View[], shown: number | null, most = MOS
   return others.slice(0, Math.max(0, views.length - most))
 }
 
-/** What a session is called where there is room for a few words. */
-export function named(row: Pick<Row, 'label'> | null | undefined): string {
-  return row?.label || 'No prompt yet'
-}
-
-/** The same, for the corner of the terminal: short enough to cost nothing. */
+/** What a session is called where there is room for a few words, short enough to cost nothing. */
 export function brief(label: string, most = 28): string {
   const text = label || 'New session'
   return text.length > most ? `${text.slice(0, most - 1).trimEnd()}…` : text
@@ -345,12 +324,4 @@ export function standingWords(
     }
   }
   return null
-}
-
-/** The same for a row of the list, where "running" would be: the words, and the sentence behind them. Null when nothing else has it. */
-export function elsewhereRow(there: Elsewhere | undefined, now: number): { word: string; means: string } | null {
-  if (!there) return null
-  return there.kind === 'background'
-    ? { word: 'running in the background', means: `Running as ${whereWords(there, now)}. Opening it here attaches to it: no second process is started.` }
-    : { word: 'open elsewhere', means: `Open as ${whereWords(there, now)}. It cannot be attached to: opening it here asks before a copy is started.` }
 }

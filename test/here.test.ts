@@ -56,20 +56,23 @@ function machine(options: { lists?: boolean } = {}) {
   }
   const runs = new Runs({ program, spawn: () => { throw new Error('nothing is started here') }, screen: headless, every: null, watchEvery: null })
   const told: string[] = []
+  const where: ({ key: string; session: string } | undefined)[] = []
   const needs: HereNeeds = {
     program,
     showingIn: (project) => runs.showingIn(project),
     knownProjects: () => known,
     hostHas: async (folder) => held.has(folder),
-    told: (project) => {
+    told: (project, assigned) => {
       told.push(project)
-      runs.told(project)
+      where.push(assigned)
+      runs.told(project, assigned)
     },
   }
   return {
     runs,
     needs,
     told,
+    where,
     /** Claude Code runs conversation `id` in `cwd`, in a terminal of its own. */
     runsIn: (id: string, cwd: string) => running.push({ session: id, kind: 'interactive', called: 'interactive', handle: null, pid: 4242, cwd, startedAt: 1, name: '' }),
     hold: (project: string) => {
@@ -157,8 +160,9 @@ describe('what it assigns to', () => {
     expect(record.sessions[A]?.home).toBe(placeKey(WRITING))
     expect(record.places[placeKey(WRITING)]?.own).toBe(A)
     expect(record.sessions[A]?.token).toMatch(/^[A-Za-z0-9_-]{22,64}$/)
-    /* The lists and the Inbox's count are said again. */
+    /* The lists are said again, with where it went: the page on that place puts it on screen. */
     expect(m.told).toEqual([p])
+    expect(m.where).toEqual([{ key: placeKey(WRITING), session: A }])
     expect(await here(A, '', m.needs)).toBe(`${SAID} This conversation is already this kehikko’s own (writing · thesis (Methods)). Nothing changed.`)
   })
 

@@ -3,7 +3,7 @@ import { notificationPayload } from 'kehikot-module-protocol'
 
 import type { Listing, Row } from '../doors.ts'
 import { STATES } from '../program.ts'
-import { COPY, LEAVE, MARKS, ago, brief, decide, elsewhereRow, elsewhereSaid, noticeLine, placeId, placeWords, since, standing, standingWords, surplus, whereWords, type View } from '../src/view/places.ts'
+import { COPY, LEAVE, MARKS, ago, brief, decide, elsewhereSaid, noticeLine, placeId, placeWords, since, standing, standingWords, surplus, whereWords, type View } from '../src/view/places.ts'
 
 /**
  * What the page does when the canvas names a place. Pure, so the rule that
@@ -40,20 +40,19 @@ describe('opening the module on a place', () => {
     expect(decide(listing([away]))).toEqual({ do: 'open', session: null })
     /* One here and one elsewhere is exactly one that can be opened. */
     expect(decide(listing([away, row('a')]))).toEqual({ do: 'open', session: 'a' })
-    expect(decide(listing([away, row('a'), row('b')]))).toEqual({ do: 'choose' })
     /* Not even on the strength of what this page was showing. */
-    expect(decide(listing([away, row('a'), row('b')]), 'away')).toEqual({ do: 'choose' })
+    expect(decide(listing([away, row('a', { lastActive: 1 }), row('b', { lastActive: 2 })]), 'away')).toEqual({ do: 'open', session: 'b' })
   })
 
-  test('more than one: ask, and open nothing', () => {
-    expect(decide(listing([row('a'), row('b')]))).toEqual({ do: 'choose' })
-    /* Not even the one that is running, and not the most recent: the owner wants to be asked. */
-    expect(decide(listing([row('a', { running: true, lastActive: 9 }), row('b', { lastActive: 1 })]))).toEqual({ do: 'choose' })
+  test('more than one: never a question — the one last open there, else its own, else the most recently active', () => {
+    expect(decide({ ...listing([row('a'), row('b')]), current: 'a', own: 'b' })).toEqual({ do: 'open', session: 'a' })
+    expect(decide({ ...listing([row('a'), row('b')]), own: 'b' })).toEqual({ do: 'open', session: 'b' })
+    expect(decide(listing([row('a', { lastActive: 1 }), row('b', { lastActive: 9 })]))).toEqual({ do: 'open', session: 'b' })
   })
 
   test('what this page was showing for the place is shown again — while it still belongs there', () => {
-    expect(decide(listing([row('a'), row('b')]), 'b')).toEqual({ do: 'open', session: 'b' })
-    expect(decide(listing([row('a'), row('b')]), 'gone')).toEqual({ do: 'choose' })
+    expect(decide({ ...listing([row('a'), row('b')]), own: 'a' }, 'b')).toEqual({ do: 'open', session: 'b' })
+    expect(decide({ ...listing([row('a'), row('b')]), own: 'a' }, 'gone')).toEqual({ do: 'open', session: 'a' })
     expect(decide(listing([]), 'gone')).toEqual({ do: 'open', session: null })
   })
 
@@ -237,24 +236,14 @@ describe('the mark for what a session is doing', () => {
 describe('a place with no session', () => {
   const others = (rows: Row[]): Listing => ({ ...listing([]), others: rows })
 
-  test('in a project that has other sessions: they are offered before anything is started', () => {
-    expect(decide(others([row('x')]))).toEqual({ do: 'offer' })
+  test('a new one, at once, whatever else the project holds: nothing is offered from it', () => {
+    expect(decide(others([row('x'), row('y')]))).toEqual({ do: 'open', session: null })
     /* Whatever this page remembers showing: it no longer belongs here. */
-    expect(decide(others([row('x')]), 'x')).toEqual({ do: 'offer' })
-  })
-
-  test('in a project with no other session there is nothing to choose from: a new one, at once', () => {
-    expect(decide(others([]))).toEqual({ do: 'open', session: null })
-  })
-
-  test('asked once per place: a place that has a session opens it directly, whatever else the project holds', () => {
-    expect(decide({ ...listing([row('a')]), others: [row('x'), row('y')] })).toEqual({ do: 'open', session: 'a' })
+    expect(decide(others([row('x')]), 'x')).toEqual({ do: 'open', session: null })
   })
 
   test('a place whose only recorded session is not on this computer is a place with none', () => {
-    const away = row('away', { missing: true })
-    expect(decide({ ...listing([away]), others: [row('x')] })).toEqual({ do: 'offer' })
-    expect(decide({ ...listing([away]), others: [] })).toEqual({ do: 'open', session: null })
+    expect(decide({ ...listing([row('away', { missing: true })]), others: [row('x')] })).toEqual({ do: 'open', session: null })
   })
 
   test('the program missing still comes first', () => {
@@ -303,12 +292,5 @@ describe('the words for a session that is running somewhere else', () => {
     expect(copy?.means).toContain('Remote Control stays with the other one until /remote-control is run here, and the two do not see each other’s turns.')
     expect(standingWords({ unchecked: 'too-old' }, 'Claude Code', NOW)?.means).toBe('Resumed without checking whether it is already running somewhere else: this Claude Code is too old to say. Update it to have that checked.')
     expect(standingWords({ unchecked: 'failed' }, 'Claude Code', NOW)?.means).toContain('could not be asked')
-  })
-
-  test('a row says which of the two it is, and what opening it will do', () => {
-    expect(elsewhereRow(undefined, NOW)).toBeNull()
-    expect(elsewhereRow(job, NOW)).toEqual({ word: 'running in the background', means: 'Running as a background session, process 82454, in /Users/someone/Projects/thesis, started 3 h ago. Opening it here attaches to it: no second process is started.' })
-    expect(elsewhereRow(terminal, NOW)?.word).toBe('open elsewhere')
-    expect(elsewhereRow(terminal, NOW)?.means).toContain('It cannot be attached to: opening it here asks before a copy is started.')
   })
 })

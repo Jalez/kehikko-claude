@@ -447,25 +447,22 @@ describe('what the list says about sessions running elsewhere, and a place with 
       const said = (await listing(dir, placeKey(place(['methods'])), runs, program)) as Listing
       expect(said.program.asked).toBe('too-old')
       expect(said.others.some((one) => 'elsewhere' in one)).toBe(false)
-      expect((await text({ place: { epic: 'thesis', parts: ['methods'], kehikko: '4072c9e5' } }))?.content?.[0]?.text).toContain('too old to say')
+      expect((await text({ place: { epic: 'thesis', parts: [], kehikko: '4072c9e5' } }))?.content?.[0]?.text).toContain('too old to say')
     } finally {
       lists.yes = true
       elsewhere.length = 0
     }
   })
 
-  test('an agent asking about a place with no session is told so in words, and which sessions the project has, in the order they are offered', async () => {
+  test('an agent asking about a place with no session is told a new one starts, and nothing is offered from the project', async () => {
     const told = await text({ place: { epic: 'thesis', parts: ['methods'], kehikko: '4072c9e5' } })
     expect(told?.isError).toBeUndefined()
     const said = told?.content?.[0]?.text ?? ''
-    expect(said).toContain('This place (epic=thesis;parts=methods;kehikko=key:4072c9e5) has no session yet.')
-    expect(said).toContain('Claude Code has 4 other sessions for this project, so opening the module here starts nothing')
-    expect(said).toContain('"New session" first, which Enter takes')
-    expect(said).toContain('without taking it from any other place')
-    const offered = JSON.parse(said.slice(said.indexOf('\n'))) as { id: string; firstPrompt: string; sameEpicAt?: string[] }[]
-    expect(offered.map((one) => one.id)).toEqual([E, A, B, C])
-    expect(offered[0]).toMatchObject({ firstPrompt: 'the same epic on another kehikko', sameEpicAt: ['results · reading'] })
-    expect(offered[3]?.sameEpicAt).toBeUndefined()
+    expect(said).toContain('This place (epic=thesis;parts=methods;kehikko=key:4072c9e5) has no conversation connected.')
+    expect(said).toContain('starts a new Claude Code conversation')
+    expect(said).toContain('/kehikot-here')
+    expect(said).toContain('Nothing is offered from the project’s other sessions.')
+    expect(said).not.toContain('\n')
   })
 
   test('and about a place in a project with no other session: a new one starts at once', async () => {
@@ -475,7 +472,7 @@ describe('what the list says about sessions running elsewhere, and a place with 
       held[HELD] = runs
       try {
         const told = (await rpc('tools/call', { name: 'sessions', arguments: { projectPath: empty, place: { epic: 'thesis', parts: [], kehikko: '4072c9e5' } } })).result
-        expect(told?.content?.[0]?.text).toBe('This place (epic=thesis;parts=-;kehikko=key:4072c9e5) has no session, and Claude Code has no other session for this project: opening the module here starts a new one at once.')
+        expect(told?.content?.[0]?.text).toStartWith('This place (epic=thesis;parts=-;kehikko=key:4072c9e5) has no conversation connected. Opening the module here starts a new Claude Code conversation')
       } finally {
         held[HELD] = was
       }
@@ -484,11 +481,11 @@ describe('what the list says about sessions running elsewhere, and a place with 
     }
   })
 
-  test('a place that has its session is said to open it directly, and one with several to ask which', async () => {
+  test('a place that has its session is said to open it directly, and one with several to open one of them without asking', async () => {
     expect((await text({ place: { epic: 'thesis', parts: [], kehikko: '4072c9e5' } }))?.content?.[0]?.text).toContain('has one session, and opening the module here opens it at once — which is resumed.')
     attach(dir, place([]), C)
     try {
-      expect((await text({ place: { epic: 'thesis', parts: [], kehikko: '4072c9e5' } }))?.content?.[0]?.text).toContain('has 2 sessions, so opening the module here asks its person which one')
+      expect((await text({ place: { epic: 'thesis', parts: [], kehikko: '4072c9e5' } }))?.content?.[0]?.text).toContain('has 2 sessions. Opening the module here opens one at once — the one last open there, else its own, else the most recently active')
     } finally {
       detachFrom(dir, placeKey(place([])), C)
     }

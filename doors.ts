@@ -5,7 +5,7 @@ import { TICKET, elsewhereOf, sameProject, theRuns, type Elsewhere, type Run, ty
 import { ID, MANIFEST as DECLARED, VERSION } from './manifest.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, readPlaceKey, type Place } from './place.ts'
 import { PROGRAM, headOf, home, type Program, type Recorded, type Running, type State } from './program.ts'
-import { PLACE_TOKEN, WHERE, assign, detach, follow, homeOf, ignore, ownOf, projectRoot, readPlaces, recordedIds, rekey, sessionsAt, unassigned, type Places } from './record.ts'
+import { PLACE_TOKEN, WHERE, assign, detach, follow, homeOf, ownOf, projectRoot, readPlaces, recordedIds, rekey, sessionsAt, type Places } from './record.ts'
 import { enable, enabled, hookCommand, settingsFile } from './hook.ts'
 import { here } from './here.ts'
 import { serveFrom, skillAt, skillDeclarations } from './skills.ts'
@@ -155,19 +155,6 @@ export interface Listing {
   own?: string | null
   /** Where each listed conversation belongs, by id, when it belongs to another place: that place in a few words. */
   homes?: Record<string, string>
-  /**
-   * The project's conversations that belong to no place: reported started by Claude Code's hook,
-   * or running (`agents --json`) in this folder with no record. Each can be assigned here.
-   */
-  unassigned?: Row[]
-  /**
-   * The project's other places an unassigned conversation can be assigned to: every place the
-   * record knows on a kehikko, but this one. Grouped by kehikko, each kehikko's most recently used
-   * place first — the one a person most likely means by "that kehikko".
-   */
-  assignable?: Assignable[]
-  /** This place's own conversation as the record has it (what "Assign here" keeps or replaces), or null for none. */
-  ownNow?: OwnConversation | null
   /** Whether sessions started outside Kehikot are reported here (the SessionStart hook is installed). */
   hook?: boolean
   /**
@@ -205,53 +192,6 @@ function besides(id: string, run: Run | undefined, running: Running, runs: Runs)
   const { background, open } = runs.others(running, id)
   const there = background ?? open
   return there ? { elsewhere: elsewhereOf(there) } : {}
-}
-
-/** A place an unassigned conversation can be assigned to, in words. */
-export interface Assignable {
-  key: string
-  /** The kehikko's name, by which the choices are grouped. */
-  kehikko: string
-  /** The epic and parts: "thesis · methods + results", "thesis · whole epic", "no epic". */
-  label: string
-  /** That place's own conversation — what assigning here would keep or replace — or null when it has none yet. */
-  own: OwnConversation | null
-}
-
-/** A place's own conversation, said by title and when it was last active. */
-export interface OwnConversation {
-  id: string
-  /** Its title; `''` when it has none yet (the page says "untitled"). */
-  title: string
-  lastActive: number | null
-}
-
-/**
- * The places, other than `key`, that a conversation can be assigned to: those on a kehikko, by
- * kehikko (in the order each was last used), most recently used first within each. At most `most`.
- */
-export function assignable(places: Places, key: string, most = 24, own: (id: string) => OwnConversation = (id) => recordedOwn(places, id)): Assignable[] {
-  const used = (entry: Places['places'][string]) =>
-    Math.max(0, ...entry.sessions.map((id) => Date.parse((Object.hasOwn(places.sessions, id) ? places.sessions[id]?.lastActive : null) ?? '') || 0))
-  const rows = Object.entries(places.places)
-    .filter(([one, entry]) => one !== key && entry.kehikko !== null)
-    .map(([one, entry]) => ({
-      key: one,
-      kehikko: entry.kehikko?.name || 'a kehikko',
-      label: entry.epic ? `${entry.epic} · ${entry.parts.length ? entry.parts.join(' + ') : 'whole epic'}` : 'no epic',
-      own: ownOf(places, one) ? own(ownOf(places, one)!) : null,
-      used: used(entry),
-    }))
-    .sort((a, b) => b.used - a.used)
-  const order = [...new Set(rows.map((one) => one.kehikko))]
-  return order.flatMap((name) => rows.filter((one) => one.kehikko === name)).slice(0, most).map(({ used: _used, ...rest }) => rest)
-}
-
-/** A conversation as the record alone knows it: the title it was given, and when it was last active. */
-function recordedOwn(places: Places, id: string): OwnConversation {
-  const kept = Object.hasOwn(places.sessions, id) ? places.sessions[id] : undefined
-  const at = kept?.lastActive ? Date.parse(kept.lastActive) : NaN
-  return { id, title: kept?.label ?? '', lastActive: Number.isFinite(at) ? at : null }
 }
 
 /** A recorded place in a few words: its parts, or "whole epic", and what its kehikko is called. */
@@ -402,17 +342,6 @@ export async function listing(
         return home && home !== key && Object.hasOwn(read.value.places, home) ? [[id, placeSaid(read.value.places[home]!)]] : []
       }),
     ),
-    unassigned: unassigned(read.value).filter((id) => !here.includes(id)).map(row),
-    assignable: assignable(read.value, key, 24, (id) => {
-      const one = row(id)
-      return { id, title: one.label, lastActive: one.lastActive }
-    }),
-    ownNow: (() => {
-      const id = ownOf(read.value, key)
-      if (!id) return null
-      const one = row(id)
-      return { id, title: one.label, lastActive: one.lastActive }
-    })(),
     hook: enabled(),
     others: ordered(held, here, key, read.value).map(({ one, near }) => ({ ...row(one.id), ...(near.length ? { near } : {}) })),
     running: live.map((run) => ({
@@ -457,10 +386,11 @@ function tools() {
         + 'terminal or an editor and its person is asked before a copy is started. '
         + `Read from ${WHERE}. Give the absolute project directory as `
         + 'project, and an epic slug to see only that epic’s places. Give `place` — the epic, the picked parts and '
-        + 'the kehikko — to be told in words what opening the module there will do: a place with a session opens it; a '
-        + 'place with none starts a new one at once only when the project has no other session, and otherwise asks its '
-        + 'person which to carry on with, and the answer lists those sessions in the order they are offered. Reads '
-        + 'only: nothing here starts, ends, attaches or types into a session.',
+        + 'the kehikko — to be told in words what opening the module there will do: a place with sessions opens one at '
+        + 'once (the one last open there, else its own, else the most recently active); a place with none starts a new '
+        + 'one and says that no conversation is connected, which the person does by typing /kehikot-here in the one they '
+        + 'want there. Nothing is offered from the rest of the project. Reads only: nothing here starts, ends, attaches '
+        + 'or types into a session.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -547,9 +477,8 @@ async function call(name: string, args: Record<string, unknown>): Promise<string
     }
     const here = all.map(session)
     const openable = here.filter((one) => !('missing' in one))
-    const others = offered(all, key)
     const kept = here.length > openable.length ? ` It also lists ${here.length - openable.length} that ${PROGRAM.name} has no record of on this computer, which cannot be opened here.` : ''
-    if (openable.length > 1) return `This place (${key}) has ${openable.length} sessions, so opening the module here asks its person which one before anything is opened.${kept}${unasked}\n${JSON.stringify(here, null, 2)}`
+    if (openable.length > 1) return `This place (${key}) has ${openable.length} sessions. Opening the module here opens one at once — the one last open there, else its own, else the most recently active — and its View menu lists the others.${kept}${unasked}\n${JSON.stringify(here, null, 2)}`
     if (openable.length === 1) {
       const one = openable[0]!
       const how = one.running
@@ -561,11 +490,10 @@ async function call(name: string, args: Record<string, unknown>): Promise<string
             : 'which is resumed'
       return `This place (${key}) has one session, and opening the module here opens it at once — ${how}.${kept}${unasked}\n${JSON.stringify(here, null, 2)}`
     }
-    if (!others.length) return `This place (${key}) has no session, and ${PROGRAM.name} has no other session for this project: opening the module here starts a new one at once.${kept}`
     return (
-      `This place (${key}) has no session yet. ${PROGRAM.name} has ${others.length} other session${others.length === 1 ? '' : 's'} for this project, so opening the module here starts nothing: `
-      + 'it asks its person which to carry on with — "New session" first, which Enter takes, then these in this order (the ones another place of the same epic holds, `sameEpicAt`, then the rest by when '
-      + `each was last active). Choosing one makes it this place’s session without taking it from any other place.${kept}${unasked}\n${JSON.stringify(others, null, 2)}`
+      `This place (${key}) has no conversation connected. Opening the module here starts a new ${PROGRAM.name} conversation in the project’s folder, `
+      + 'which becomes this place’s once its person says something in it, and says above it that none is connected: '
+      + `typing /kehikot-here in another conversation connects that one instead. Nothing is offered from the project’s other sessions.${kept}`
     )
   }
 
@@ -584,7 +512,7 @@ async function call(name: string, args: Record<string, unknown>): Promise<string
     if (!loose.length) return said
     return (
       `${said} ${PROGRAM.name} has ${loose.length} session${loose.length === 1 ? '' : 's'} for the folder that ${epic ? 'no place of that epic holds' : loose.length === 1 ? 'belongs to no place' : 'belong to no place'}: `
-      + `a place opened there asks its person which to carry on with before starting a new one.${unasked}\n${JSON.stringify(loose, null, 2)}`
+      + `none is connected to a place until /kehikot-here is typed in it.${unasked}\n${JSON.stringify(loose, null, 2)}`
     )
   }
   return JSON.stringify(places, null, 2)
@@ -696,7 +624,7 @@ export async function answer(
       showingIn: (project) => runs.showingIn(project),
       knownProjects: () => runs.knownProjects(),
       hostHas: (folder) => hostCheck.has(folder),
-      told: (project) => runs.told(project),
+      told: (project, assigned) => runs.told(project, assigned),
     })
     return { status: 200, body: null, raw: { bytes: `${said}\n`, type: 'text/plain; charset=utf-8' } }
   }
@@ -742,8 +670,8 @@ export async function answer(
     return done === true ? ok({ ok: true }) : bad(done, 409)
   }
 
-  /* A person's say about where a conversation belongs: "Assign to this kehikko" for one that
-     belongs nowhere, "Make this the kehikko's own" for one being viewed here (`own`). */
+  /* A person's say about where a conversation belongs: "Make this the kehikko's own" for the one on
+     screen (`own`). `/kehikot-here` assigns through its own door below. */
   if (path === '/api/assign' && method === 'POST') {
     const id = typeof body?.session === 'string' ? body.session : ''
     const key = typeof body?.key === 'string' ? body.key : ''
@@ -752,16 +680,6 @@ export async function answer(
     if (!place) return bad('that is not a place')
     const names = (typeof body?.names === 'object' && body.names !== null ? body.names : {}) as { kehikko?: unknown }
     const written = assign(typeof body?.projectPath === 'string' ? body.projectPath : null, { ...place, ...(typeof names.kehikko === 'string' ? { kehikkoName: names.kehikko.slice(0, 120) } : {}) }, id, { own: body?.own === true })
-    if (written.ok) theRuns().recorded()
-    return written.ok ? ok({ ok: true }) : bad(written.error)
-  }
-
-  /* A person's say that a conversation that belongs nowhere is not a Kehikot one at all: kept in
-     the record like an assignment, so it is never listed or counted in the Inbox again. */
-  if (path === '/api/ignore' && method === 'POST') {
-    const id = typeof body?.session === 'string' ? body.session : ''
-    if (!PROGRAM.isId(id)) return bad('that is not a session id')
-    const written = ignore(typeof body?.projectPath === 'string' ? body.projectPath : null, id)
     if (written.ok) theRuns().recorded()
     return written.ok ? ok({ ok: true }) : bad(written.error)
   }
@@ -851,7 +769,7 @@ export const stream: Stream = (method, path, query, emit, ticket) => {
     state: (stated) => emit(stated),
     notice: (notice) => emit(notice, 'notice'),
     activity: (items) => emit({ items }, 'activity'),
-    sessions: (project) => emit({ project }, 'sessions'),
+    sessions: (project, assigned) => emit({ project, ...(assigned ?? {}) }, 'sessions'),
   })
   /* A page that stops following has nothing on screen any more, as far as `/kehikot-here` knows. */
   const close = () => {

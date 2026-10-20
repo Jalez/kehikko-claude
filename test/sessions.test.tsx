@@ -4,11 +4,11 @@ import { headerItemsSchema } from 'kehikot-module-protocol'
 import { resetServerStanding } from 'kehikot-module-protocol/client'
 import { useEffect, useRef } from 'react'
 
-import type { Assignable, Listing, OwnConversation, Row } from '../doors.ts'
-import type { ActivityRow, Notice, Stated } from '../live.ts'
+import type { Listing, Row } from '../doors.ts'
+import type { ActivityRow, Notice, SessionsChanged, Stated } from '../live.ts'
 import { NOTICES } from '../manifest.ts'
 import type { Api } from '../src/api.ts'
-import { hostDrawsHeader, type Hosted } from '../src/app.tsx'
+import type { Hosted } from '../src/app.tsx'
 import { standing } from '../src/view/places.ts'
 import type { Said, Standing, Target } from '../src/view/terminal-view.tsx'
 
@@ -65,7 +65,7 @@ const row = (id: string, more: Partial<Row> = {}): Row => ({ id, label: '', last
 /** A server in a variable: what each place holds, and what was asked of it. */
 function server(start: Record<string, Row[]> = {}) {
   const held: Record<string, Row[]> = { ...start }
-  const state = { found: '/bin/claude' as string | null, lacks: null as string | null, running: [] as Listing['running'], others: [] as Row[], unassigned: [] as Row[], assignable: [] as Assignable[], ownNow: null as OwnConversation | null }
+  const state = { found: '/bin/claude' as string | null, lacks: null as string | null, running: [] as Listing['running'], others: [] as Row[], own: undefined as string | null | undefined, current: undefined as string | null | undefined }
   const asked: string[] = []
   /** What the page asked to have brought across to a kehikko's key, in order with the reads. */
   const order: string[] = []
@@ -84,18 +84,13 @@ function server(start: Record<string, Row[]> = {}) {
         sessions: held[key] ?? [],
         others: state.others,
         running: state.running,
-        unassigned: state.unassigned,
-        assignable: state.assignable,
-        ownNow: state.ownNow,
+        ...(state.own !== undefined ? { own: state.own } : {}),
+        ...(state.current !== undefined ? { current: state.current } : {}),
       }
     },
     assign: async (_projectPath, key, session, own, kehikkoName) => {
       asked.push(`assign ${session} ${key}${own ? ' own' : ''} ${kehikkoName ?? ''}`.trimEnd())
-      state.unassigned = state.unassigned.filter((one) => one.id !== session)
-    },
-    ignore: async (_projectPath, session) => {
-      asked.push(`ignore ${session}`)
-      state.unassigned = state.unassigned.filter((one) => one.id !== session)
+      if (own) state.own = session
     },
     end: async (session) => {
       asked.push(`end ${session}`)
@@ -140,7 +135,6 @@ describe('opening the module on a place', () => {
     const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
     await flush()
     expect(shown(container)).toEqual(['whole@3:new'])
-    expect(container.querySelector('[data-chooser]')).toBeNull()
   })
 
   test('exactly one: it opens at once', async () => {
@@ -150,29 +144,22 @@ describe('opening the module on a place', () => {
     expect(shown(container)).toEqual(['whole@3:a'])
   })
 
-  test('more than one: the list, in the terminal’s place, and nothing opened until one is chosen', async () => {
-    const s = server({ [KEY()]: [row('a', { label: 'the first' }), row('b', { label: 'the second' })] })
-    const { container, getByText } = render(<Sessions theme="dark" at={at()} api={s.api} />)
-    await flush()
-    expect(container.querySelector('[data-chooser="ask"]')).not.toBeNull()
-    expect(all(container)).toEqual([])
-    expect(mounted.length).toBe(0)
-
-    fireEvent.click(getByText('the second'))
-    await flush()
-    expect(shown(container)).toEqual(['whole@3:b'])
-    expect(container.querySelector('[data-chooser]')).toBeNull()
-  })
-
-  test('the list answers to the keyboard as well', async () => {
-    const s = server({ [KEY()]: [row('a'), row('b')] })
+  test('more than one: one of them opens at once — its own — and nothing asks which', async () => {
+    const s = server({ [KEY()]: [row('a', { label: 'the first', lastActive: 9 }), row('b', { label: 'the second', lastActive: 1 })] })
+    s.state.own = 'b'
     const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
     await flush()
-    fireEvent.keyDown(container.querySelector('[data-chooser]') as HTMLElement, { key: '3' })
+    expect(shown(container)).toEqual(['whole@3:b'])
+    expect(container.querySelector('[role="listbox"]')).toBeNull()
+    /* With no own, the one last open there; with neither, the most recently active. */
+    cleanup()
+    mounted.length = 0
+    sessionStorage.clear()
+    s.state.own = null
+    const latest = render(<Sessions theme="dark" at={at()} api={s.api} />)
     await flush()
-    expect(shown(container)).toEqual(['whole@3:new'])
+    expect(shown(latest.container)).toEqual(['whole@3:a'])
   })
-
   test('with no project there is one sentence and no session — not a session somewhere else', async () => {
     const s = server()
     const { container } = render(<Sessions theme="dark" at={null} cover="no-project" api={s.api} />)
@@ -254,20 +241,15 @@ describe('a session from another computer', () => {
     const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
     await flush()
     expect(shown(container)).toEqual(['whole@3:new'])
-    expect(container.querySelector('[data-chooser]')).toBeNull()
   })
 
-  test('one here and one elsewhere: the one here opens, and the other is only a muted row in the list', async () => {
-    const s = server({ [KEY()]: [row('away', { label: 'started on the laptop', missing: true }), row('a', { label: 'here' })] })
-    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+  test('one here and one elsewhere: the one here opens, and the other is not offered', async () => {
+    const s = told({ [KEY()]: [row('away', { label: 'started on the laptop', missing: true }), row('a', { label: 'here' })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
     await flush()
     expect(shown(container)).toEqual(['whole@3:a'])
-    fireEvent.click(container.querySelector('[data-sessions]') as HTMLElement)
-    await flush()
-    const away = container.querySelector('[data-session="away"]') as HTMLElement
-    expect(away.textContent).toContain('not on this computer')
-    fireEvent.click(away)
-    await flush()
+    expect(lastHeader(s)[0]!.options!.map((one) => one.id)).toEqual(['a'])
+    expect(typeof pressOn(s, 'conversation', 'away')).toBe('string')
     expect(all(container)).toEqual(['whole@3:a'])
   })
 })
@@ -349,25 +331,26 @@ describe('moving between places', () => {
     expect(all(container).length).toBe(3)
   })
 
-  test('a place with several sessions is asked about once per page: what was chosen is what is there on return', async () => {
-    const s = server({ [KEY()]: [row('a', { label: 'the first' }), row('b', { label: 'the second' })] })
-    const { container, rerender, getByText } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+  test('a place with several sessions: what was chosen in the View menu is what is there on return', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'the first' }), row('b', { label: 'the second' })] })
+    s.state.own = 'b'
+    const { container, rerender } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
     await flush()
-    fireEvent.click(getByText('the first'))
+    expect(shown(container)).toEqual(['whole@3:b'])
+    expect(pressOn(s, 'conversation', 'a')).toBe(true)
     await flush()
-    rerender(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
+    rerender(<Sessions theme="dark" at={at(['methods'])} api={s.api} hosted={s.hosted} />)
     await flush()
-    rerender(<Sessions theme="dark" at={at()} api={s.api} />)
+    rerender(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
     await flush()
     expect(shown(container)).toEqual(['whole@3:a'])
-    expect(container.querySelector('[data-chooser]')).toBeNull()
   })
-
-  test('a page that reloads comes back to what it was showing; a page opened afresh asks', async () => {
-    const s = server({ [KEY()]: [row('a', { label: 'the first' }), row('b', { label: 'the second' })] })
-    const one = render(<Sessions theme="dark" at={at()} api={s.api} />)
+  test('a page that reloads comes back to what it was showing; a page opened afresh opens the place’s own', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'the first' }), row('b', { label: 'the second' })] })
+    s.state.own = 'a'
+    const one = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
     await flush()
-    fireEvent.click(one.getByText('the second'))
+    pressOn(s, 'conversation', 'b')
     await flush()
     one.unmount()
 
@@ -380,57 +363,21 @@ describe('moving between places', () => {
     sessionStorage.clear()
     const fresh = render(<Sessions theme="dark" at={at()} api={s.api} />)
     await flush()
-    expect(fresh.container.querySelector('[data-chooser="ask"]')).not.toBeNull()
-    expect(shown(fresh.container)).toEqual([])
+    expect(shown(fresh.container)).toEqual(['whole@3:a'])
   })
 })
 
-describe('the one control, and what it leads to', () => {
-  test('sits in a gutter beside the terminal with the session’s label: no row, and over none of what it prints', async () => {
+describe('what is drawn beside the terminal', () => {
+  test('with a conversation connected, nothing at all: no list, no corner control, no row', async () => {
     const s = server({ [KEY()]: [row('a', { label: 'tighten the methods section and everything after it' })] })
     const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
     await flush()
-    const control = container.querySelector('[data-sessions]') as HTMLElement
-    expect(control.textContent).toBe('tighten the methods section… ▾')
-    expect(control.className).not.toContain('absolute')
-    expect(control.className).toContain('w-5')
-    /* Nothing along the bottom while a session is running. */
+    expect(container.querySelector('[data-sessions]')).toBeNull()
+    expect(container.querySelector('[role="listbox"]')).toBeNull()
+    expect(bar(container)).toBeNull()
     expect(container.querySelector('[data-ended]')).toBeNull()
     expect(container.querySelector('[role="status"]')).toBeNull()
   })
-
-  test('the label follows what the server says the session is called', async () => {
-    const s = server()
-    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
-    await flush()
-    expect(container.querySelector('[data-sessions]')?.textContent).toBe('New session ▾')
-    act(() => view('whole@3:new').say({ session: 'x', label: 'what was first asked' }))
-    expect(container.querySelector('[data-sessions]')?.textContent).toBe('what was first asked ▾')
-  })
-
-  test('opens the list over the terminal without closing it; choosing another session swaps the view', async () => {
-    const s = server({ [KEY()]: [row('a', { label: 'the first' })] })
-    s.state.others = [row('z', { label: 'from elsewhere' })]
-    const { container, getByText } = render(<Sessions theme="dark" at={at()} api={s.api} />)
-    await flush()
-    fireEvent.click(container.querySelector('[data-sessions]') as HTMLElement)
-    await flush()
-    expect(container.querySelector('[data-chooser="sessions"]')).not.toBeNull()
-    expect(all(container)).toEqual(['whole@3:a'])
-    expect(unmounted).toEqual([])
-
-    fireEvent.keyDown(container.querySelector('[data-chooser]') as HTMLElement, { key: 'Escape' })
-    expect(shown(container)).toEqual(['whole@3:a'])
-
-    /* Attach an existing session: opening it here is what attaches it. */
-    fireEvent.click(container.querySelector('[data-sessions]') as HTMLElement)
-    await flush()
-    fireEvent.click(getByText(/Attach an existing session/))
-    fireEvent.click(getByText('from elsewhere'))
-    await flush()
-    expect(shown(container)).toEqual(['whole@3:z'])
-  })
-
   test('a session that ended keeps its last screen, with Resume beside the reason', async () => {
     const s = server({ [KEY()]: [row('a')] })
     const { container, getByText } = render(<Sessions theme="dark" at={at()} api={s.api} />)
@@ -481,11 +428,6 @@ describe('nothing stands between a place and its session', () => {
     rerender(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
     await flush()
     const watched = () => Object.fromEntries([...container.querySelectorAll('[data-terminal]')].map((one) => [one.getAttribute('data-terminal'), one.getAttribute('data-watched')]))
-    expect(watched()).toEqual({ 'whole@3:a': 'no', 'methods@3:b': 'yes' })
-    /* The list drawn over the terminal hides it and does not make it unwatched. */
-    fireEvent.click(container.querySelector('[data-sessions]') as HTMLElement)
-    await flush()
-    expect(container.querySelector('[data-chooser="sessions"]')).not.toBeNull()
     expect(watched()).toEqual({ 'whole@3:a': 'no', 'methods@3:b': 'yes' })
   })
 
@@ -602,7 +544,7 @@ describe('when the program is not installed', () => {
 /** A server whose feed the test drives, and a host that writes down what it is asked. */
 function told(start: Record<string, Row[]> = {}) {
   const s = server(start)
-  const feeds: { notices: boolean; heard: { state(stated: Stated): void; notice(notice: Notice): void; activity?(items: ActivityRow[]): void }; stopped: boolean }[] = []
+  const feeds: { notices: boolean; heard: { state(stated: Stated): void; notice(notice: Notice): void; activity?(items: ActivityRow[]): void; sessions?(event?: SessionsChanged): void }; stopped: boolean }[] = []
   s.api.feed = (notices, heard) => {
     const one = { notices, heard, stopped: false }
     feeds.push(one)
@@ -621,51 +563,49 @@ function told(start: Record<string, Row[]> = {}) {
   }
   return { ...s, feeds, emitted, headers, activities, hosted }
 }
+/** The header as last declared, and a press on it as the host would send it. */
+const lastHeader = (s: ReturnType<typeof told>) => s.headers.at(-1) as { kind: string; id: string; label: string; value?: string; confirm?: boolean; agents?: boolean; options?: { id: string; label: string }[] }[]
+const pressOn = (s: ReturnType<typeof told>, item: string, value?: string | boolean) => {
+  let answer: unknown
+  act(() => {
+    answer = s.hosted.presses.current?.({ item, ...(value === undefined ? {} : { value }) })
+  })
+  return answer
+}
+const bar = (container: HTMLElement) => container.querySelector('[data-no-conversation]')
+
 const NOTICE: Notice = { seq: 1, session: 'far', state: 'finished', label: 'draft the results', projectPath: P, epic: 'thesis', parts: ['Results'], kehikko: 'writing', at: 1 }
 const height = (container: HTMLElement) => [...(container.firstElementChild as HTMLElement).children].filter((one) => !(one as HTMLElement).className.includes('absolute')).length
 
 describe('what the session on screen is doing', () => {
-  test('is one glyph in the corner control, before the label, with the word as its title — and no row', async () => {
-    const s = told({ [KEY()]: [row('a', { label: 'tighten the methods' })] })
-    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+  test('is one glyph before its title in the View menu — and no row', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'tighten the methods', running: true })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
     await flush()
-    const control = () => container.querySelector('[data-sessions]') as HTMLElement
+    const option = () => lastHeader(s)[0]!.options![0]!.label
     const rows = height(container)
-    expect(control().textContent).toBe('tighten the methods ▾')
-    expect(control().getAttribute('data-state')).toBeNull()
-
+    expect(option()).toBe('tighten the methods')
     act(() => view('whole@3:a').say({ session: 'a', state: 'needs-you', since: Date.now() }))
-    expect(control().textContent).toBe('◆tighten the methods ▾')
-    expect(control().getAttribute('data-state')).toBe('needs-you')
-    expect(control().getAttribute('title')).toBe('Sessions for this place — this one: needs you')
-    expect(control().getAttribute('aria-label')).toBe('Sessions — tighten the methods (needs you)')
-    /* In a gutter of its own, and nothing was added beside it. */
-    expect(control().className).not.toContain('absolute')
-    expect(height(container)).toBe(rows)
-
-    act(() => view('whole@3:a').say({ session: 'a', state: 'working', since: Date.now() }))
-    expect(control().textContent).toBe('●tighten the methods ▾')
-    act(() => view('whole@3:a').say({ session: 'a', state: 'finished', since: Date.now() }))
-    expect(control().textContent).toBe('○tighten the methods ▾')
+    act(() => s.feeds[0]!.heard.state({ session: 'a', state: 'needs-you', since: Date.now() }))
+    expect(option()).toBe('◆ tighten the methods')
+    act(() => s.feeds[0]!.heard.state({ session: 'a', state: 'working', since: Date.now() }))
+    expect(option()).toBe('● tighten the methods')
+    act(() => s.feeds[0]!.heard.state({ session: 'a', state: 'finished', since: Date.now() }))
+    expect(option()).toBe('○ tighten the methods')
     /* Taken back: no mark, rather than a mark that says idle. */
-    act(() => view('whole@3:a').say({ session: 'a', state: null }))
-    expect(control().textContent).toBe('tighten the methods ▾')
+    act(() => s.feeds[0]!.heard.state({ session: 'a', state: null, since: Date.now() }))
+    expect(option()).toBe('tighten the methods')
     expect(height(container)).toBe(rows)
   })
-
-  test('the list shows what the feed has said since it was read, for sessions this page has no view of', async () => {
+  test('the View menu shows what the feed has said since it was read, for conversations this page has no view of', async () => {
     const s = told({ [KEY()]: [row('a', { label: 'one', running: true }), row('b', { label: 'two', running: true, state: 'working', since: 1 })] })
-    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    s.state.own = 'a'
+    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
     await flush()
-    expect(container.querySelector('[data-session="a"] [data-state]')).toBeNull()
-    expect(container.querySelector('[data-session="b"] [data-state]')?.getAttribute('data-state')).toBe('working')
-    act(() => s.feeds[0]!.heard.state({ session: 'a', state: 'needs-you', since: Date.now() }))
+    const labels = () => lastHeader(s)[0]!.options!.map((one) => one.label)
+    expect(labels()).toEqual(['one · own', '● two'])
     act(() => s.feeds[0]!.heard.state({ session: 'b', state: 'finished', since: Date.now() }))
-    expect(container.querySelector('[data-session="a"] [data-state]')?.getAttribute('data-state')).toBe('needs-you')
-    expect(container.querySelector('[data-session="b"] [data-state]')?.getAttribute('data-state')).toBe('finished')
-    act(() => s.feeds[0]!.heard.state({ session: 'b', state: null, since: Date.now() }))
-    expect(container.querySelector('[data-session="b"] [data-state]')).toBeNull()
-    expect(container.querySelector('[data-session="b"]')?.textContent).toContain('running')
+    expect(labels()).toEqual(['one · own', '○ two'])
   })
 })
 
@@ -795,336 +735,9 @@ describe('a notice for a person who is not looking', () => {
   })
 })
 
-describe('conversations that belong to no place, answered in the page', () => {
-  const OTHER: Assignable = { key: 'epic=paper;parts=;kehikko=key:f00dcafe', kehikko: 'reviews', label: 'paper · whole epic', own: { id: 'o1', title: 'reply to reviewer 2', lastActive: null } }
-  const lines = (container: HTMLElement) => container.querySelector('[data-unassigned]')
-
-  test('a line at any width, and each answer — here, another kehikko, not Kehikot — from the open list', async () => {
-    const s = told({ [KEY()]: [row('a', { label: 'one' })] })
-    s.state.unassigned = [row('u1', { label: 'kehikko modules issue triage' }), row('u2', { label: 'started in a terminal' }), row('u3')]
-    s.state.assignable = [OTHER]
-    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
-    await flush()
-    expect(lines(container)?.textContent).toContain('3 Claude Code sessions in this project aren’t assigned to a kehikko.')
-    expect(container.querySelector('[data-unassigned-list]')).toBeNull()
-    fireEvent.click([...lines(container)!.querySelectorAll('button')].find((one) => one.textContent === 'Answer')!)
-    const answers = (id: string) => container.querySelector(`[data-unassigned-row="${id}"]`) as HTMLElement
-    expect(answers('u3').textContent).toContain('Session u3')
-
-    fireEvent.click([...answers('u1').querySelectorAll('button')].find((one) => one.textContent === 'Not a Kehikot conversation')!)
-    await flush()
-    expect(s.asked).toContain('ignore u1')
-    expect(answers('u1')).toBeNull()
-
-    fireEvent.click([...answers('u2').querySelectorAll('button')].find((one) => one.textContent === 'Assign here (becomes this kehikko’s own)')!)
-    await flush()
-    expect(s.asked).toContain(`assign u2 ${KEY()} k3`)
-
-    fireEvent.change(answers('u3').querySelector('select')!, { target: { value: OTHER.key } })
-    await flush()
-    /* Picking a place files nothing: its choices come first. */
-    expect(s.asked).not.toContain(`assign u3 ${OTHER.key} reviews`)
-    fireEvent.click([...answers('u3').querySelectorAll('button')].find((one) => one.textContent === 'Assign here (keeps reply to reviewer 2 as this kehikko’s own)')!)
-    await flush()
-    expect(s.asked).toContain(`assign u3 ${OTHER.key} reviews`)
-    /* None left: no line, and the header's item is withdrawn. */
-    expect(lines(container)).toBeNull()
-    expect((s.headers.at(-1) as { id: string }[]).some((one) => one.id === 'unassigned')).toBe(false)
-  })
-
-  test('the header’s Not yet assigned item opens the same answers', async () => {
-    const s = told({ [KEY()]: [row('a', { label: 'one' })] })
-    s.state.unassigned = [row('u1', { label: 'started in a terminal' })]
-    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
-    await flush()
-    const item = (s.headers.at(-1) as { id: string; options: { id: string }[] }[]).find((one) => one.id === 'unassigned')!
-    expect(item.options.map((one) => one.id)).toEqual(['u1', 'answer'])
-    expect((item.options[0] as unknown as { label: string }).label).toBe('Assign to this kehikko: started in a terminal')
-    expect(headerItemsSchema.safeParse(s.headers.at(-1)).success).toBe(true)
-    let answer: unknown
-    act(() => {
-      answer = s.hosted.presses.current?.({ item: 'unassigned', value: 'answer' })
-    })
-    expect(answer).toBe(true)
-    await flush()
-    expect(container.querySelector('[data-unassigned-row="u1"]')).not.toBeNull()
-  })
-})
-
-describe('assigning says what the kehikko’s own conversation is, and lets you replace it or not', () => {
-  const OTHER: Assignable = { key: 'epic=paper;parts=;kehikko=key:f00dcafe', kehikko: 'reviews', label: 'paper · whole epic', own: { id: 'o1', title: 'reply to reviewer 2', lastActive: Date.now() - 3 * 60_000 } }
-  const NONE: Assignable = { key: 'epic=paper;parts=x;kehikko=key:f00dcafe', kehikko: 'reviews', label: 'paper · x', own: null }
-  const buttons = (el: HTMLElement) => [...el.querySelectorAll('button')].map((one) => one.textContent)
-  const open = async (s: ReturnType<typeof told>) => {
-    const view = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
-    await flush()
-    fireEvent.click([...view.container.querySelectorAll('[data-unassigned] button')].find((one) => one.textContent === 'Answer')!)
-    return view.container
-  }
-
-  test('here, with an own conversation: it is named, and there are two choices — keep, or replace', async () => {
-    const s = told({ [KEY()]: [row('a', { label: 'one' })] })
-    s.state.unassigned = [row('u1', { label: 'started in a terminal' })]
-    s.state.ownNow = { id: 'a', title: 'tighten the methods', lastActive: Date.now() - 2 * 3_600_000 }
-    const container = await open(s)
-    const here = container.querySelector('[data-unassigned-row="u1"]') as HTMLElement
-    expect(here.querySelector('[data-own-here]')?.textContent).toBe('This kehikko · Own conversation: tighten the methods · last active 2 h ago')
-    expect(buttons(here)).toContain('Assign here (keeps tighten the methods as this kehikko’s own)')
-    expect(buttons(here)).toContain('Assign and make it this kehikko’s own (replaces tighten the methods)')
-    expect(buttons(here)).not.toContain('Assign here')
-    fireEvent.click([...here.querySelectorAll('button')].find((one) => one.textContent?.startsWith('Assign and make it'))!)
-    await flush()
-    expect(s.asked).toContain(`assign u1 ${KEY()} own k3`)
-  })
-
-  test('here, keeping: assigns without own', async () => {
-    const s = told({ [KEY()]: [row('a')] })
-    s.state.unassigned = [row('u1')]
-    s.state.ownNow = { id: 'a', title: 'tighten the methods', lastActive: null }
-    const container = await open(s)
-    fireEvent.click([...container.querySelectorAll('button')].find((one) => one.textContent?.startsWith('Assign here (keeps'))!)
-    await flush()
-    expect(s.asked).toContain(`assign u1 ${KEY()} k3`)
-    expect(s.asked.some((one) => one.includes(' own '))).toBe(false)
-  })
-
-  test('here, with no own: said, and one choice that makes it the own', async () => {
-    const s = told({ [KEY()]: [] })
-    s.state.unassigned = [row('u1')]
-    const container = await open(s)
-    const here = container.querySelector('[data-unassigned-row="u1"]') as HTMLElement
-    expect(here.querySelector('[data-own-here]')?.textContent).toBe('This kehikko · No conversation of its own yet')
-    expect(buttons(here).filter((one) => one?.startsWith('Assign'))).toEqual(['Assign here (becomes this kehikko’s own)'])
-  })
-
-  test('another place: each choice in the list shows its own, and the picked one offers both ways', async () => {
-    const s = told({ [KEY()]: [row('a')] })
-    s.state.unassigned = [row('u1')]
-    s.state.assignable = [OTHER, NONE]
-    const container = await open(s)
-    const there = container.querySelector('[data-unassigned-row="u1"]') as HTMLElement
-    const options = [...there.querySelectorAll('option')].map((one) => one.textContent)
-    expect(options).toContain('reviews · paper · whole epic — own: reply to reviewer 2')
-    expect(options).toContain('reviews · paper · x — no own yet')
-    fireEvent.change(there.querySelector('select')!, { target: { value: OTHER.key } })
-    const block = there.querySelector('[data-assign-there]') as HTMLElement
-    expect(block.textContent).toContain('Own conversation: reply to reviewer 2 · last active 3 min ago')
-    expect(buttons(block)).toContain('Assign and make it this kehikko’s own (replaces reply to reviewer 2)')
-    fireEvent.click([...block.querySelectorAll('button')].find((one) => one.textContent?.startsWith('Assign and make it'))!)
-    await flush()
-    expect(s.asked).toContain(`assign u1 ${OTHER.key} own reviews`)
-  })
-
-  test('another place with no own: said, one choice', async () => {
-    const s = told({ [KEY()]: [row('a')] })
-    s.state.unassigned = [row('u1')]
-    s.state.assignable = [NONE]
-    const container = await open(s)
-    const there = container.querySelector('[data-unassigned-row="u1"]') as HTMLElement
-    fireEvent.change(there.querySelector('select')!, { target: { value: NONE.key } })
-    const block = there.querySelector('[data-assign-there]') as HTMLElement
-    expect(block.textContent).toContain('No conversation of its own yet')
-    expect(buttons(block).filter((one) => one?.startsWith('Assign'))).toEqual(['Assign here (becomes this kehikko’s own)'])
-  })
-
-  test('the header: one option per conversation; with an own it opens the page’s choice instead of assigning', async () => {
-    const s = told({ [KEY()]: [row('a')] })
-    s.state.unassigned = [row('u1', { label: 'started in a terminal' })]
-    s.state.ownNow = { id: 'a', title: 'tighten the methods', lastActive: null }
-    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
-    await flush()
-    const item = (s.headers.at(-1) as { id: string; options: { id: string; label: string }[] }[]).find((one) => one.id === 'unassigned')!
-    expect(item.options.map((one) => one.label)).toEqual(['Assign to this kehikko…: started in a terminal', 'Another kehikko, or not a Kehikot conversation…'])
-    expect(headerItemsSchema.safeParse(s.headers.at(-1)).success).toBe(true)
-    let pressed: unknown
-    act(() => {
-      pressed = s.hosted.presses.current?.({ item: 'unassigned', value: 'u1' })
-    })
-    expect(pressed).toBe(true)
-    await flush()
-    expect(s.asked.some((one) => one.startsWith('assign'))).toBe(false)
-    expect(container.querySelector('[data-unassigned-row="u1"]')).not.toBeNull()
-  })
-})
-
-describe('the sessions, declared for the container’s header', () => {
-  const last = (s: ReturnType<typeof told>) => s.headers.at(-1) as { kind: string; id: string; label: string; agents?: boolean; options: { id: string; label: string }[] }[]
-
-  test('a Go item: this place’s sessions with their marks, a new one, and the list', async () => {
-    const s = told({ [KEY()]: [row('a', { label: 'tighten the methods', running: true, state: 'needs-you', since: 1 }), row('b', { label: 'draft the results' }), row('gone', { label: 'elsewhere', missing: true })] })
-    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
-    await flush()
-    const items = last(s)
-    expect(items.length).toBe(1)
-    expect(items[0]).toMatchObject({ kind: 'go', id: 'sessions', label: 'Sessions' })
-    expect(items[0]!.options).toEqual([
-      { id: 'a', label: '◆ tighten the methods' },
-      { id: 'b', label: 'draft the results' },
-      { id: 'new', label: 'New session' },
-      { id: 'list', label: 'All sessions…' },
-    ])
-    /* Nothing says an agent may press it, so none may. */
-    expect(items[0]!.agents).toBeUndefined()
-    expect(headerItemsSchema.safeParse(items).success).toBe(true)
-    /* And it follows the state as it changes. */
-    act(() => s.feeds[0]!.heard.state({ session: 'a', state: 'finished', since: 2 }))
-    expect(last(s)[0]!.options[0]).toEqual({ id: 'a', label: '○ tighten the methods' })
-  })
-
-  test('a new session that comes to exist is in the menu without anybody opening the list', async () => {
-    const s = told()
-    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
-    await flush()
-    expect(last(s)[0]!.options.map((one) => one.id)).toEqual(['new', 'list'])
-    const reads = s.asked.length
-    /* The server's word that the program now has a record of it; by then the place lists it. */
-    s.held[KEY()] = [row('x', { label: 'what was first asked', running: true })]
-    act(() => view('whole@3:new').say({ session: 'x', exists: true }))
-    await flush()
-    expect(s.asked.length).toBe(reads + 1)
-    expect(last(s)[0]!.options.map((one) => one.id)).toEqual(['x', 'new', 'list'])
-    /* Said again, it is already there and nothing is read. */
-    act(() => view('whole@3:new').say({ session: 'x', exists: true }))
-    await flush()
-    expect(s.asked.length).toBe(reads + 1)
-  })
-
-  test('a long label is cut to what the protocol takes', async () => {
-    const s = told({ [KEY()]: [row('a', { label: 'x'.repeat(80) }), row('b', { label: 'two' })] })
-    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
-    await flush()
-    expect(last(s)[0]!.options[0]!.label.length).toBe(48)
-    expect(headerItemsSchema.safeParse(last(s)).success).toBe(true)
-  })
-
-  test('the corner control is there until a host has pressed a header item, and gone for good after', async () => {
-    const s = told({ [KEY()]: [row('a', { label: 'one' })] })
-    const { container, rerender } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} canvasEpic="thesis" />)
-    await flush()
-    expect(container.querySelector('[data-sessions]')).not.toBeNull()
-    s.hosted.drawn = true
-    rerender(<Sessions theme="dark" at={at()} api={s.api} hosted={{ ...s.hosted }} canvasEpic="thesis" />)
-    await flush()
-    expect(container.querySelector('[data-sessions]')).toBeNull()
-  })
-
-  test('a press opens that session, a new one, or the list — and refuses what is not this place’s', async () => {
-    const s = told({ [KEY()]: [row('a', { label: 'one' }), row('b', { label: 'two' })] })
-    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
-    await flush()
-    const press = (value: string | boolean, item = 'sessions') => {
-      let answer: unknown
-      act(() => {
-        answer = s.hosted.presses.current?.({ item, value })
-      })
-      return answer
-    }
-    expect(press('b')).toBe(true)
-    await flush()
-    expect(shown(container)).toEqual(['whole@3:b'])
-    expect(press('list')).toBe(true)
-    await flush()
-    expect(container.querySelector('[data-chooser]')?.getAttribute('data-chooser')).toBe('sessions')
-    expect(press('new')).toBe(true)
-    await flush()
-    expect(shown(container)).toEqual(['whole@3:new'])
-    expect(typeof press('zzz')).toBe('string')
-    expect(typeof press(true)).toBe('string')
-    expect(typeof press('a', 'other')).toBe('string')
-  })
-
-  test('with nothing to offer — no project, or the program missing — the header is withdrawn', async () => {
-    const s = told()
-    s.state.found = null
-    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
-    await flush()
-    expect(s.headers.at(-1)).toEqual([])
-    const none = told()
-    render(<Sessions theme="dark" at={null} cover="no-project" api={none.api} hosted={none.hosted} />)
-    await flush()
-    expect(none.headers.at(-1)).toEqual([])
-  })
-})
-
 /* ------------------------------------------------------------------ *
  * A place with no session in a project that has some (#6)
  * ------------------------------------------------------------------ */
-
-describe('a place with no session, in a project that has others', () => {
-  const others = [row('near', { label: 'the whole epic’s conversation', near: ['whole epic · writing'] }), row('far', { label: 'started in a plain terminal' })]
-
-  test('the list is drawn before anything is started — "New session" first — and nothing is mounted for nothing', async () => {
-    const s = server()
-    s.state.others = others
-    const { container } = render(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
-    await flush()
-    await flush()
-    const list = container.querySelector('[data-chooser]') as HTMLElement
-    expect(list.getAttribute('data-chooser')).toBe('offer')
-    expect([...list.querySelectorAll('[data-row]')].map((one) => one.getAttribute('data-row'))).toEqual(['new', 'other', 'other'])
-    expect(list.querySelector('[aria-selected="true"]')?.getAttribute('data-row')).toBe('new')
-    /* No empty session was started to be dealt with afterwards. */
-    expect(mounted.length).toBe(0)
-    expect(all(container)).toEqual([])
-    /* And no row or strip beside the list: it is all there is in the terminal's place. */
-    expect(container.querySelector('[data-sessions]')).toBeNull()
-    expect(container.querySelector('[data-ended]')).toBeNull()
-  })
-
-  test('Enter takes the new one, at once', async () => {
-    const s = server()
-    s.state.others = others
-    const { container } = render(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
-    await flush()
-    fireEvent.keyDown(container.querySelector('[data-chooser]') as HTMLElement, { key: 'Enter' })
-    await round()
-    expect(shown(container)).toEqual(['methods@3:new'])
-    expect(container.querySelector('[data-chooser]')).toBeNull()
-  })
-
-  test('choosing an existing one opens it here — which is what attaches it — and the next open of the place is direct', async () => {
-    const s = server()
-    s.state.others = others
-    const first = render(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
-    await flush()
-    fireEvent.click(first.getByText('the whole epic’s conversation'))
-    await flush()
-    expect(shown(first.container)).toEqual(['methods@3:near'])
-    const target = view('methods@3:near').target
-    expect(target.what === 'session' && target.session).toBe('near')
-    first.unmount()
-    mounted.length = 0
-    sessionStorage.clear()
-
-    /* The server attached it when it opened it (live.ts): the place has a session now, and is not asked again. */
-    s.held[KEY(['methods'])] = [row('near', { label: 'the whole epic’s conversation' })]
-    s.state.others = [others[1]!]
-    const again = render(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
-    await flush()
-    expect(again.container.querySelector('[data-chooser]')).toBeNull()
-    expect(shown(again.container)).toEqual(['methods@3:near'])
-  })
-
-  test('a project with no other session starts a new one as before, with no list', async () => {
-    const s = server()
-    const { container } = render(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
-    await flush()
-    expect(container.querySelector('[data-chooser]')).toBeNull()
-    expect(shown(container)).toEqual(['methods@3:new'])
-  })
-
-  test('walking on to another place leaves nothing behind: no session was started at the one that only asked', async () => {
-    const s = server()
-    s.state.others = others
-    const { container, rerender } = render(<Sessions theme="dark" at={at(['methods'])} api={s.api} />)
-    await flush()
-    rerender(<Sessions theme="dark" at={at(['results'])} api={s.api} />)
-    await flush()
-    expect(container.querySelector('[data-chooser]')?.getAttribute('data-chooser')).toBe('offer')
-    expect(mounted.length).toBe(0)
-    expect(unmounted.length).toBe(0)
-  })
-})
 
 /* ------------------------------------------------------------------ *
  * A session that is running somewhere this module did not start it (#5)
@@ -1166,9 +779,9 @@ describe('a session that is already running somewhere else', () => {
     expect(document.activeElement).toBe(question)
   })
 
-  test('"Open a copy anyway" opens it with the word for a copy, and the corner says it is one for as long as it is on screen', async () => {
-    const s = server({ [KEY()]: [row('a', { label: 'tighten the methods' })] })
-    const { container, getByText } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+  test('"Open a copy anyway" opens it with the word for a copy, and the View menu says it is one for as long as it is on screen', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'tighten the methods' })] })
+    const { container, getByText } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
     await flush()
     const before = view('whole@3:a').target
     expect(before.what === 'session' && before.copy).toBeFalsy()
@@ -1182,13 +795,10 @@ describe('a session that is already running somewhere else', () => {
     expect(container.querySelector('[data-elsewhere-question]')).toBeNull()
 
     act(() => view('whole@3:a').say({ opened: 'copy', session: 'a', label: 'tighten the methods', exists: true, copyOf: terminal }))
-    const control = container.querySelector('[data-sessions]') as HTMLElement
-    expect(control.textContent).toBe('tighten the methods · copy ▾')
-    expect(control.getAttribute('title')).toContain('A copy. This conversation is also open in another Claude Code process')
-    expect(control.getAttribute('title')).toContain('Remote Control stays with the other one until /remote-control is run here, and the two do not see each other’s turns.')
+    await flush()
+    expect(lastHeader(s)[0]!.options![0]!.label).toBe('tighten the methods · copy')
   })
-
-  test('"Leave it" starts nothing: the list is shown, and reading it again does not try the session again', async () => {
+  test('"Leave it" starts nothing: one sentence says so, a copy is still one press, and reading the list again does not try the session again', async () => {
     const s = server({ [KEY()]: [row('a', { label: 'tighten the methods', elsewhere: terminal })] })
     const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
     await flush()
@@ -1198,13 +808,12 @@ describe('a session that is already running somewhere else', () => {
     await flush()
     await flush()
     expect(container.querySelector('[data-elsewhere-question]')).toBeNull()
-    const list = container.querySelector('[data-chooser]') as HTMLElement
-    expect(list).not.toBeNull()
-    expect(list.querySelector('[data-session="a"]')?.textContent).toContain('open elsewhere')
+    const left = container.querySelector('[data-left-alone]') as HTMLElement
+    expect(left.textContent).toContain('“tighten the methods” stays open in the other Claude Code process. Nothing was started here.')
+    expect(left.textContent).toContain('Open a copy anyway')
     expect(mounted.length).toBe(0)
     expect(all(container)).toEqual([])
   })
-
   test('coming back to the place asks the program again: what was running is never remembered', async () => {
     const s = server({ [KEY()]: [row('a')] })
     const { container, rerender } = render(<Sessions theme="dark" at={at()} api={s.api} />)
@@ -1231,58 +840,31 @@ describe('a session that is already running somewhere else', () => {
     expect(mounted.length).toBe(0)
   })
 
-  test('running in the background: it is simply on screen, attached, and the corner says so without a row', async () => {
-    const s = server({ [KEY()]: [row('a', { label: 'a background job' })] })
-    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+  test('running in the background: it is simply on screen, attached, and the View menu says so without a row', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'a background job' })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
     await flush()
     act(() => view('whole@3:a').say({ opened: 'background', session: 'a', label: 'a background job', exists: true, background: job }))
+    await flush()
     expect(container.querySelector('[data-elsewhere-question]')).toBeNull()
     expect(shown(container)).toEqual(['whole@3:a'])
-    const control = container.querySelector('[data-sessions]') as HTMLElement
-    expect(control.textContent).toBe('a background job · background ▾')
-    expect(control.getAttribute('data-how')).toBe('background')
-    expect(control.getAttribute('title')).toContain('no second process was started')
+    expect(lastHeader(s)[0]!.options![0]!.label).toBe('a background job · background')
   })
-
-  test('resumed by a copy too old to be asked: the corner says it was not checked', async () => {
-    const s = server({ [KEY()]: [row('a', { label: 'an old install' })] })
-    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+  test('resumed by a copy too old to be asked: the View menu says it was not checked', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'an old install' })] })
+    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
     await flush()
     act(() => view('whole@3:a').say({ opened: 'resumed', session: 'a', label: 'an old install', exists: true, unchecked: 'too-old' }))
-    const control = container.querySelector('[data-sessions]') as HTMLElement
-    expect(control.textContent).toBe('an old install · unchecked ▾')
-    expect(control.getAttribute('title')).toContain('this Claude Code is too old to say')
+    await flush()
+    expect(lastHeader(s)[0]!.options![0]!.label).toBe('an old install · unchecked')
   })
-
   test('an ordinary session says none of it', async () => {
-    const s = server({ [KEY()]: [row('a', { label: 'only here' })] })
-    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    const s = told({ [KEY()]: [row('a', { label: 'only here' })] })
+    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
     await flush()
     act(() => view('whole@3:a').say({ opened: 'resumed', session: 'a', label: 'only here', exists: true }))
-    expect(container.querySelector('[data-sessions]')?.textContent).toBe('only here ▾')
-    expect(container.querySelector('[data-sessions]')?.hasAttribute('data-how')).toBe(false)
-  })
-})
-
-describe('whether the corner control is drawn, by what the host said (protocol 1.4.0)', () => {
-  test('true: none; false: drawn, even after an earlier press; null: as before, the press decides', () => {
-    expect(hostDrawsHeader(true, false)).toBe(true)
-    expect(hostDrawsHeader(false, true)).toBe(false)
-    expect(hostDrawsHeader(null, false)).toBe(false)
-    expect(hostDrawsHeader(null, true)).toBe(true)
-  })
-
-  test('with the host drawing the header, the Go item says which session is on screen, and no row is added', async () => {
-    const s = told({ [KEY()]: [row('a', { label: 'tighten the methods' })] })
-    s.hosted.drawn = true
-    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} canvasEpic="thesis" />)
     await flush()
-    act(() => view('whole@3:a').say({ session: 'a', state: 'needs-you', since: Date.now() }))
-    await flush()
-    expect(container.querySelector('[data-sessions]')).toBeNull()
-    const items = s.headers.at(-1) as { label: string }[]
-    expect(items[0]!.label).toBe('Sessions · ◆ tighten the methods')
-    expect(headerItemsSchema.safeParse(items).success).toBe(true)
+    expect(lastHeader(s)[0]!.options![0]!.label).toBe('only here')
   })
 })
 
@@ -1360,5 +942,234 @@ describe('a project folder renamed while its session runs', () => {
     expect(shown(container)).toEqual(['whole@3:b'])
     expect(container.querySelector('[data-terminal="whole@3:a"]')?.getAttribute('data-path')).toBe(P)
     expect(line(container)).toBeNull()
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * Connecting conversations: the bar, the View menu, /kehikot-here
+ * ------------------------------------------------------------------ */
+
+describe('the bar, when no conversation is connected to this kehikko', () => {
+  const WORDS = 'No conversation is connected to this kehikko. Type /kehikot-here in the Claude Code conversation you want here.'
+
+  test('is drawn above Claude Code — a new conversation, started all the same — and copies the command', async () => {
+    const s = told()
+    s.state.others = [row('elsewhere', { label: 'a conversation of another kehikko' })]
+    const copied: string[] = []
+    const was = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => void copied.push(text) } })
+    try {
+      const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+      await flush()
+      expect(bar(container)?.textContent).toContain(WORDS)
+      /* Claude Code's own UI, not a list: nothing from the rest of the project is offered. */
+      expect(shown(container)).toEqual(['whole@3:new'])
+      expect(container.textContent).not.toContain('a conversation of another kehikko')
+      /* Above the terminal, not an Inbox item. */
+      expect((container.firstElementChild as HTMLElement).firstElementChild).toBe(bar(container))
+      expect(s.activities.flat()).toEqual([])
+      const button = bar(container)!.querySelector('[data-copy-command]') as HTMLElement
+      expect(button.textContent).toBe('Copy /kehikot-here')
+      fireEvent.click(button)
+      await flush()
+      expect(copied).toEqual(['/kehikot-here'])
+      expect(button.textContent).toBe('Copied')
+      /* Nothing to choose from: the header declares nothing. */
+      expect(lastHeader(s)).toEqual([])
+    } finally {
+      if (was) Object.defineProperty(navigator, 'clipboard', was)
+      else delete (navigator as { clipboard?: unknown }).clipboard
+    }
+  })
+
+  test('is not drawn while a conversation is connected, nor while the program is missing', async () => {
+    const s = server({ [KEY()]: [row('a')] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    expect(bar(container)).toBeNull()
+    cleanup()
+    const missing = server()
+    missing.state.found = null
+    const other = render(<Sessions theme="dark" at={at()} api={missing.api} />)
+    await flush()
+    expect(bar(other.container)).toBeNull()
+  })
+
+  test('a conversation on another computer only is not one connected here: the bar says so', async () => {
+    const s = server({ [KEY()]: [row('away', { missing: true })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} />)
+    await flush()
+    expect(bar(container)).not.toBeNull()
+  })
+
+  test('goes once the new conversation is spoken to: started here, it is this kehikko’s from then on', async () => {
+    const s = told()
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    expect(bar(container)).not.toBeNull()
+    /* The server records it at its place when Claude Code has a record of it, and says so. */
+    s.held[KEY()] = [row('x', { label: 'what was first asked', running: true })]
+    s.state.own = 'x'
+    act(() => view('whole@3:new').say({ session: 'x', exists: true, typed: true }))
+    await flush()
+    expect(bar(container)).toBeNull()
+    /* The same view, not reopened: it only knows its id now. */
+    expect(shown(container)).toEqual(['whole@3:x'])
+    expect(mounted.length).toBe(1)
+    expect(unmounted).toEqual([])
+    expect(lastHeader(s)[0]).toMatchObject({ kind: 'switch', id: 'conversation', value: 'x', options: [{ id: 'x', label: 'what was first asked · own' }] })
+  })
+
+  test('/kehikot-here connecting another conversation: the bar goes and the container switches to it', async () => {
+    const s = told()
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    expect(shown(container)).toEqual(['whole@3:new'])
+    /* The server wrote the record, and the feed says where it went. */
+    s.held[KEY()] = [row('t', { label: 'started in my terminal' })]
+    s.state.own = 't'
+    s.state.current = 't'
+    act(() => s.feeds[0]!.heard.sessions?.({ project: P, key: KEY(), session: 't' }))
+    await flush()
+    expect(bar(container)).toBeNull()
+    expect(shown(container)).toEqual(['whole@3:t'])
+  })
+
+  test('/kehikot-here to another place, or another kehikko, moves nothing here', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'mine' })] })
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    s.held[KEY(['methods'])] = [row('t')]
+    act(() => s.feeds[0]!.heard.sessions?.({ project: P, key: KEY(['methods']), session: 't' }))
+    await flush()
+    expect(shown(container)).toEqual(['whole@3:a'])
+  })
+
+  test('/kehikot-here while another of this kehikko’s conversations is on screen: that one is put on screen', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'mine' })] })
+    s.state.own = 'a'
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    act(() => view('whole@3:a').say({ session: 'a', exists: true, typed: true }))
+    s.held[KEY()] = [row('a', { label: 'mine' }), row('t', { label: 'from the terminal' })]
+    s.state.current = 't'
+    act(() => s.feeds[0]!.heard.sessions?.({ project: P, key: KEY(), session: 't' }))
+    await flush()
+    expect(shown(container)).toEqual(['whole@3:t'])
+  })
+})
+
+describe('the View menu: this kehikko’s conversations', () => {
+  test('a switch over the conversations connected here and nothing else — the own first, marked, with when each was last active', async () => {
+    const now = Date.now()
+    const s = told({
+      [KEY()]: [row('a', { label: 'draft the results', lastActive: now - 5 * 60_000 }), row('b', { label: 'tighten the methods', lastActive: now - 2 * 3_600_000 }), row('gone', { missing: true })],
+      [KEY(['methods'])]: [row('m', { label: 'another place’s' })],
+    })
+    s.state.own = 'b'
+    s.state.others = [row('loose', { label: 'started in a terminal' })]
+    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    const items = lastHeader(s)
+    expect(items[0]).toEqual({
+      kind: 'switch',
+      id: 'conversation',
+      label: 'This kehikko’s conversations',
+      icon: 'list',
+      value: 'b',
+      options: [
+        { id: 'b', label: 'tighten the methods · 2 h ago · own' },
+        { id: 'a', label: 'draft the results · 5 min ago' },
+      ],
+    } as unknown as (typeof items)[number])
+    /* Viewing the own one: nothing to make own; disconnecting it is there. */
+    expect(items.map((one) => one.id)).toEqual(['conversation', 'disconnect'])
+    expect(headerItemsSchema.safeParse(items).success).toBe(true)
+    /* Person-only, every one of them. */
+    expect(items.some((one) => one.agents)).toBe(false)
+  })
+
+  test('choosing one resumes it in the container; what is not connected here is refused', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'one' }), row('b', { label: 'two' })] })
+    s.state.own = 'a'
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    expect(shown(container)).toEqual(['whole@3:a'])
+    expect(pressOn(s, 'conversation', 'b')).toBe(true)
+    await flush()
+    expect(shown(container)).toEqual(['whole@3:b'])
+    const target = view('whole@3:b').target
+    expect(target.what === 'session' && target.session).toBe('b')
+    expect(lastHeader(s)[0]!.value).toBe('b')
+    /* The one on screen again: taken, and nothing reopened. */
+    const before = view('whole@3:b')
+    expect(pressOn(s, 'conversation', 'b')).toBe(true)
+    await flush()
+    expect(view('whole@3:b')).toBe(before)
+    expect(typeof pressOn(s, 'conversation', 'zzz')).toBe('string')
+    expect(typeof pressOn(s, 'conversation', true)).toBe('string')
+    expect(typeof pressOn(s, 'sessions', 'a')).toBe('string')
+  })
+
+  test('"Make this the kehikko’s own" for one that is not, which rewrites the record', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'one' }), row('b', { label: 'two' })] })
+    s.state.own = 'a'
+    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    pressOn(s, 'conversation', 'b')
+    await flush()
+    const items = lastHeader(s)
+    expect(items.map((one) => one.id)).toEqual(['conversation', 'make-own', 'disconnect'])
+    expect(items[1]).toMatchObject({ kind: 'run', label: 'Make this the kehikko’s own' })
+    expect(pressOn(s, 'make-own')).toBe(true)
+    await flush()
+    expect(s.asked).toContain(`assign b ${KEY()} own k3`)
+    /* Read again: it is the own one now, and there is nothing left to make own. */
+    expect(lastHeader(s).map((one) => one.id)).toEqual(['conversation', 'disconnect'])
+    expect(lastHeader(s)[0]!.options!.find((one) => one.id === 'b')!.label).toBe('two · own')
+  })
+
+  test('"Disconnect from this kehikko" is a confirmed run no agent may press; it takes the one on screen off the record and opens what is left', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'one' }), row('b', { label: 'two' })] })
+    s.state.own = 'a'
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    pressOn(s, 'conversation', 'b')
+    await flush()
+    const item = lastHeader(s).find((one) => one.id === 'disconnect')!
+    expect(item).toMatchObject({ kind: 'run', label: 'Disconnect from this kehikko', confirm: true })
+    expect(item.agents).toBeUndefined()
+    expect(pressOn(s, 'disconnect')).toBe(true)
+    await flush()
+    expect(s.asked).toContain('detach b')
+    /* Not ended: only taken off. The place opens its own. */
+    expect(s.asked.some((one) => one.startsWith('end'))).toBe(false)
+    expect(shown(container)).toEqual(['whole@3:a'])
+    expect(lastHeader(s)[0]!.options!.map((one) => one.id)).toEqual(['a'])
+
+    /* The last one: Claude Code all the same, a new conversation, and the bar. */
+    pressOn(s, 'disconnect')
+    await flush()
+    expect(s.asked).toContain('detach a')
+    expect(shown(container)).toEqual(['whole@3:new'])
+    expect(bar(container)).not.toBeNull()
+    expect(lastHeader(s)).toEqual([])
+  })
+
+  test('fits the header at every width: every label within the protocol’s 48 characters, and what it says does not depend on the width', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'x'.repeat(120), lastActive: Date.now() - 3 * 86_400_000, running: true, state: 'needs-you', since: 1 }), row('b', { label: 'y'.repeat(60) })] })
+    s.state.own = 'a'
+    render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    pressOn(s, 'conversation', 'b')
+    await flush()
+    const items = lastHeader(s)
+    /* The host folds a module's menus into icons under 300 px and one "⋯" under 220, keeping every item: each
+       item has an icon it can be drawn as, and every label fits one line of the menu at 380, 280 and 200 px. */
+    expect(items.every((one) => typeof (one as { icon?: string }).icon === 'string')).toBe(true)
+    const labels = [...items.map((one) => one.label), ...items.flatMap((one) => (one.options ?? []).map((option) => option.label))]
+    expect(labels.every((label) => label.length <= 48)).toBe(true)
+    expect(items[0]!.options![0]!.label).toMatch(/^◆ x+… · 3 d ago · own$/)
+    expect(headerItemsSchema.safeParse(items).success).toBe(true)
   })
 })
