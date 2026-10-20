@@ -516,6 +516,8 @@ export function Sessions({
    * the notices raised for a person who is not looking. The server hands a
    * notice to one page, so what arrives here is said once.
    */
+  /* This page, by an id of its own: what it says it has on screen is filed under it, and dropped when its feed closes. */
+  const pageId = useRef(`page-${Math.random().toString(36).slice(2, 12)}${Date.now().toString(36)}`).current
   const told = useRef({ hosted, canvasEpic })
   told.current = { hosted, canvasEpic }
   const framed = hosted !== null
@@ -540,8 +542,27 @@ export function Sessions({
           /* The host's word, and worth reading: it is where it says nothing on the canvas shows these. */
           .catch((error: unknown) => console.info('The host did not carry a notice.', error))
       },
-    })
-  }, [api, framed])
+    }, undefined, pageId)
+  }, [api, framed, pageId])
+
+  /*
+   * What this page has on screen, said to the server: its place, and whether the open kehikko has
+   * a Claude container (a host that says nothing about containers is taken at its framing). What
+   * `/kehikot-here`, typed in a conversation, assigns to. Said again every half minute, since the
+   * server forgets a page whose feed closed.
+   */
+  const onScreen = containers === '' || containers.split(',').includes(ID)
+  const showingNow = framed && at
+    ? JSON.stringify({ projectPath: at.projectPath, key: at.key, kehikkoName: at.kehikkoName, partNames: at.parts.map((part) => at.partNames[part] ?? ''), onScreen })
+    : null
+  useEffect(() => {
+    if (!api.showing) return
+    const said = showingNow ? (JSON.parse(showingNow) as Parameters<NonNullable<Api['showing']>>[1]) : null
+    const tell = () => void api.showing?.(pageId, said).catch(() => {})
+    tell()
+    const every = setInterval(tell, 30_000)
+    return () => clearInterval(every)
+  }, [api, pageId, showingNow])
 
   const step = here && !view ? decide(here, null) : null
   const standingNow = view ? standings[view.n] : undefined

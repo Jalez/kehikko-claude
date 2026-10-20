@@ -399,6 +399,71 @@ Kehikot door:
 - **The kehikko gains or loses a module** while a session runs: one line
   offers *Restart* to load the new doors (disabled while it is working).
 
+### Assigning a conversation from inside it: `/kehikot-here`
+
+Typed by the person in any Claude Code conversation, `/kehikot-here` assigns THAT conversation to
+the kehikko they have on screen. `/kehikot-here own` also makes it that kehikko's own conversation;
+`/kehikot-here kehikko: <key>` names a kehikko when none, or several, are on screen.
+
+**Why a skill, and not the MCP door.** Claude Code never tells an MCP server which conversation is
+calling. A skill's text is different, and both of these were read in the 2.1.304 binary and then
+measured with a scratch config folder:
+
+- `${CLAUDE_SESSION_ID}` in a SKILL.md is replaced by the conversation's own id when the skill is
+  loaded — for a skill in `~/.claude/skills/` and for one in a plugin alike — and `$ARGUMENTS` by
+  what the person typed after it.
+- A line `` !`command` `` in it runs when the skill is loaded, before the model sees anything, and
+  its output takes its place. The command passes Claude Code's permission check: the skill's
+  `allowed-tools: Bash(curl:*)` covers a bare `curl`. (Reading the registration file with `sed`
+  in that line was refused: the file is outside the conversation's folders.)
+- `disable-model-invocation: true`: only the person's slash command loads it; the model cannot.
+
+So the skill (`plugin/skills/kehikot-here/SKILL.md`, one file) is one `curl` to
+`POST http://127.0.0.1:8010/api/here?session=<id>&say=<words>`, and the model repeats the answer,
+which always begins `Kehikot:`. When this module is on another port, the skill tells the model to
+run the same `curl` once with the address read from the registration file (the person approves it).
+
+**What the door believes.** `/api/here` takes no ticket — the conversation has none — so anything on
+this machine can call it, and the id is a claim. It is believed only for a conversation Claude Code
+itself lists as **running** (`claude agents --json`), and the project is the folder Claude Code
+reports for it, which must be a project the host holds. When the program cannot be asked (a copy too
+old to list), the conversation's record has to be in the Claude Code folder of exactly one project
+this server knows. An id nothing has seen is refused, and so is a folder the host does not hold. Its
+worst use is what *Assign here* does — filing one running conversation of that project under one of
+its places — and it is undone the same way. A model could run the same `curl` from inside a
+conversation; the door cannot tell its call from the skill's, and the answer says what was done.
+
+**Where it goes.** Never guessed. Each page of this module says what it has on screen
+(`POST /api/showing`, ticketed: its project, its place, and whether the open kehikko has a Claude
+container), and is forgotten when its feed closes. The target is the one place on screen in the
+conversation's project. With none or several, nothing is written and the kehikot are listed:
+
+> Kehikot: No kehikko with a Claude container is on screen in thesis, so nothing was assigned. Open the kehikko this conversation belongs to and type /kehikot-here again, or name one:
+>   /kehikot-here kehikko: k1a2b3c4  (writing)
+
+**What it says** when it assigns (and writes the conversation's token, and the Inbox's count and
+the lists are said again):
+
+> Kehikot: Assigned to writing · thesis (Methods). It’s now this kehikko’s own (it had none).
+>
+> Kehikot: Assigned to writing · thesis (Methods). “tighten the methods” stays this kehikko’s own conversation; type /kehikot-here own to make this one its own instead.
+>
+> Kehikot: Assigned to writing · thesis (Methods), as this kehikko’s own: it replaced “tighten the methods”.
+
+**Where the skill comes from.**
+
+- **A session this module starts** has it with nothing installed: `--plugin-dir <this
+  module>/plugin` on its command line, for that one process, beside `--mcp-config`. Measured on
+  2.1.304: the plugin's skill is listed as `kehikot:kehikot-here`, and the bare `/kehikot-here`
+  runs it. A copy whose help has no `--plugin-dir` is started without it.
+- **A conversation started outside Kehikot** needs it in `~/.claude/skills/kehikot-here/`. This
+  module never writes there. It declares the skill in its manifest (`declares.skills`, protocol
+  2.5.0: name, summary, and as version the first twelve hex digits of the text's sha256) and
+  serves the text at `GET /kehikot/skills/kehikot-here.md`; the host shows it and installs it on
+  the person's press.
+
+The *Not yet assigned* line says so: "… Answer here, or type /kehikot-here in that conversation."
+
 ## Where its data lives
 
 `<project>/.kehikot/claude/places.json`, and nowhere else:
@@ -550,6 +615,9 @@ itself honours) — the list of a project's sessions, their first prompt, and wh
 | `POST /api/end` | end a running session, because a person chose that one. Ticketed |
 | `POST /api/restart` | end a running session whose project's folder was renamed under it, so its views resume it in the new folder, because a person pressed that. Refused while it is working. Ticketed |
 | `POST /api/detach` | take a session off a place. Ticketed |
+| `POST /api/showing` | what a page has on screen: its project, its place, and whether its kehikko has a Claude container — what `/kehikot-here` assigns to. Ticketed; forgotten when the page's feed closes |
+| `POST /api/here?session&say` | `/kehikot-here`, from the skill: assign a conversation Claude Code lists as running to the place on screen in its project. No ticket (the conversation has none); answers plain text beginning `Kehikot:` |
+| `GET /kehikot/skills/kehikot-here.md` | the skill's SKILL.md, as `text/markdown` (protocol 2.5.0, `declares.skills`). Public: it holds nothing of anybody's |
 | `GET /api/feed` | server-sent events: each running session's state as it changes, the notices for a framed page to pass on, and the whole activity list (`activity`: on arrival and on every change) that the page hands the host as `activity.set` (protocol 1.5.0; `activity:report`). Sent only to a host whose greeting says it answers the method. Colours match the host's dots: needs you yellow, finished green, working grey. Ticketed (in the query: an `EventSource` sends no header) |
 | `POST /api/state?event&session` | a session's own program saying what it is doing. Not the page's: it must carry that session's secret, reads no body, and answers 204 or one 403 that does not say why |
 | `POST /mcp` | one tool, `sessions { projectPath, epic?, place? }`: the places of a project and their sessions, `missing: true` on one that is not on this computer, `state` and `since` on a running one that has said what it is doing, and `runningElsewhere` on one Claude Code runs in a process this module did not start. With `place: { epic, parts, kehikko }` it answers in words what opening the module there does — for a place with no session: *this place has no session yet*, and the project's sessions in the order they are offered (`readOnlyHint: true`). The door asks to be registered as `kehikko-claude` (`mcp.as`) |
@@ -559,8 +627,8 @@ itself honours) — the list of a project's sessions, their first prompt, and wh
 An agent host that reads `mcp.as` (protocol 1.3.0) names the server `kehikko-claude`, so the tool is
 `mcp__kehikko-claude__sessions`; the id alone would have derived `claude`.
 
-There is no door that starts a session, types into one or installs anything, and no MCP tool that
-does. A session is started by the socket's first frame, from this module's own page.
+There is no door that starts a session, types into one or installs anything — a skill included —
+and no MCP tool that does. A session is started by the socket's first frame, from this module's own page.
 
 What the socket will start is narrower than Terminal's shell: this one program, in a folder that
 exists, on a session id this module minted just now or Claude Code already holds for that folder on
@@ -615,6 +683,8 @@ already running elsewhere and how one of those is opened without starting anothe
 | `live.ts` | the running sessions and what each is doing, the headless emulators, the socket and its fence, the notices, and the two things ended without anybody choosing |
 | `tell.sh` | what a session's program runs to say what it is doing: one request to this server, and nothing else |
 | `doors.ts` | the HTTP doors and the MCP tool |
+| `here.ts` | `/kehikot-here`: which conversation is believed, which place it goes to, and what is said |
+| `skills.ts`, `plugin/` | the skills offered (`declares.skills`), and the plugin folder a session started here is given |
 | `src/view/places.ts` | what the page does when the canvas names a place. Pure |
 | `src/view/chooser.tsx` | the list |
 | `src/view/elsewhere.tsx` | the question, when a session is open in another process |

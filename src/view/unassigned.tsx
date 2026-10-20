@@ -59,7 +59,9 @@ export function assignChoices(own: OwnConversation | null | undefined): { own: b
 }
 
 export function unassignedLine(n: number): string {
-  return n === 1 ? 'A Claude Code session in this project isn’t assigned to a kehikko.' : `${n} Claude Code sessions in this project aren’t assigned to a kehikko.`
+  const said = n === 1 ? 'A Claude Code session in this project isn’t assigned to a kehikko.' : `${n} Claude Code sessions in this project aren’t assigned to a kehikko.`
+  /* The other way to answer, from inside the conversation itself (see here.ts). */
+  return `${said} Answer here, or type /kehikot-here in that conversation.`
 }
 
 export function Unassigned({

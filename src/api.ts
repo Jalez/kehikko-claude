@@ -34,6 +34,11 @@ export interface Api {
   doors?(session: string): Promise<{ added: string[]; removed: string[] } | null>
   /** Install Claude Code's SessionStart hook that reports sessions started outside Kehikot; says the file written. */
   enableHook?(): Promise<{ file: string; already: boolean }>
+  /**
+   * Say what this page has on screen — its place, and whether the open kehikko has a Claude
+   * container — or `null` for nothing. What `/kehikot-here` typed in a conversation assigns to.
+   */
+  showing?(page: string, at: { projectPath: string; key: string; kehikkoName: string; partNames: string[]; onScreen: boolean } | null): Promise<void>
   /** Take a session off a place. The session itself is kept. */
   detach(projectPath: string, key: string, session: string): Promise<void>
   /**
@@ -43,7 +48,7 @@ export interface Api {
    * list (on arrival and on every change). Returns the function that
    * stops following.
    */
-  feed?(notices: boolean, heard: { state(stated: Stated): void; notice(notice: Notice): void; activity?(items: ActivityRow[]): void; sessions?(): void }, project?: string | null): () => void
+  feed?(notices: boolean, heard: { state(stated: Stated): void; notice(notice: Notice): void; activity?(items: ActivityRow[]): void; sessions?(): void }, project?: string | null, page?: string): () => void
 }
 
 export const api: Api = {
@@ -72,10 +77,13 @@ export const api: Api = {
     const said = answered(await ask<{ ok: true; file: string; already: boolean }>('./api/hook', { body: {} }))
     return { file: said.file, already: said.already }
   },
+  async showing(page, at) {
+    answered(await ask('./api/showing', { body: at ? { page, ...at } : { page } }))
+  },
   async detach(projectPath, key, session) {
     answered(await ask('./api/detach', { body: { projectPath, key, session } }))
   },
-  feed(notices, heard, project) {
+  feed(notices, heard, project, page) {
     return follow<Stated | Notice | { items: ActivityRow[] }>(
       './api/feed',
       (event, name) => name === 'notice'
@@ -87,7 +95,7 @@ export const api: Api = {
               : heard.state(event as Stated),
       /* An EventSource sends no header, so the ticket rides the query (see `stream` in doors.ts). */
       /* The activity list is of the project the page is framed in only: a host files it under that one. */
-      { query: { ticket: ticket() ?? '', notices: notices ? '1' : '0', ...(project ? { project } : {}) }, events: ['notice', 'activity', 'sessions'] },
+      { query: { ticket: ticket() ?? '', notices: notices ? '1' : '0', ...(project ? { project } : {}), ...(page ? { page } : {}) }, events: ['notice', 'activity', 'sessions'] },
     )
   },
 }

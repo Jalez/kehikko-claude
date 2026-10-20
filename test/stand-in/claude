@@ -49,6 +49,7 @@
 # STANDIN_NOAGENTS=1 makes it one from before `agents --json` and `attach`:
 # neither is in its help, and asking for either is an error.
 # STANDIN_NOMCP=1 makes it one without `--mcp-config` in its help.
+# STANDIN_NOPLUGINS=1 makes it one without `--plugin-dir` in its help.
 #
 # Given `--mcp-config <file>` (last on its command line, as the module passes
 # it) it says so in its `args:` line, and the typed line
@@ -64,6 +65,7 @@ if [ "$1" = "--help" ]; then
     echo "  --session-id <uuid>      Use a specific session ID for the conversation"
     [ -z "$STANDIN_MUTE" ] && echo "  --settings <file-or-json>  Path to a settings JSON file or a JSON string to load additional settings from"
     [ -z "$STANDIN_NOMCP" ] && echo "  --mcp-config <configs...>  Load MCP servers from JSON files or strings (space-separated)"
+    [ -z "$STANDIN_NOPLUGINS" ] && echo "  --plugin-dir <path>      Load a plugin from a directory or .zip for this session only"
     if [ -z "$STANDIN_NOAGENTS" ]; then
       echo "Commands:"
       echo "  agents [options]         Manage background agents"
@@ -128,9 +130,11 @@ if [ "$1" = "attach" ]; then
 fi
 
 mcpconfig=""
+plugindir=""
 prev=""
 for arg in "$@"; do
   [ "$prev" = "--mcp-config" ] && mcpconfig="$arg"
+  [ "$prev" = "--plugin-dir" ] && plugindir="$arg"
   prev="$arg"
 done
 
@@ -172,7 +176,7 @@ if [ -n "$attached" ]; then
   # Ctrl+Z leaves the view and the session runs on, as measured.
   trap 'echo "stand-in claude: left the view; the session keeps running"; exit 0' TSTP
 else
-  echo "args: $1 $2${settings:+ --settings (${#settings} characters)}${mcpconfig:+ --mcp-config $mcpconfig}"
+  echo "args: $1 $2${settings:+ --settings (${#settings} characters)}${plugindir:+ --plugin-dir $plugindir}${mcpconfig:+ --mcp-config $mcpconfig}"
   # Running, and said to be: what `agents --json` lists, for as long as this process lives.
   mkdir -p "$running"
   printf '{"pid":%s,"cwd":"%s","kind":"interactive","startedAt":%s000,"sessionId":"%s","name":"stand-in","status":"idle"}' "$$" "$(pwd -P)" "$(date +%s)" "$id" > "$running/$$.json"

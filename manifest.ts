@@ -68,6 +68,11 @@ export const PREFERRED_PORT = 8010
  *   place. No tool starts, stops, installs or types into anything: an agent
  *   that could type into a person's session would be the inversion of what
  *   this module is for.
+ * - **`skills`** (protocol 2.5.0): `/kehikot-here`, which a person types in a Claude Code
+ *   conversation to assign it to the kehikko on screen (see skills.ts and `here.ts`). Offered, not
+ *   installed: a host shows it and installs it on the person's press. Added to this manifest
+ *   where it is served (`MANIFEST` in doors.ts), because the version is read from a file and this
+ *   one is imported by the page too.
  */
 export const MANIFEST: Manifest = manifestSchema.parse({
   kind: MANIFEST_KIND,
