@@ -30,6 +30,14 @@ export const UNASSIGNED = 'unassigned'
 /** The Not-yet-assigned menu's last option: opens the answers in the page (another kehikko, or not a Kehikot conversation). */
 export const ANSWER = 'answer'
 
+/**
+ * The Not-yet-assigned options' lead, which the protocol holds to 48 characters in all. With an
+ * own conversation a press opens the keep-or-replace choice in the page; with none it assigns,
+ * and the conversation becomes the own (the page says so before and after).
+ */
+export const ASSIGN_BECOMES = 'Assign to this kehikko'
+export const ASSIGN_CHOOSE = 'Assign to this kehikko…'
+
 const cut = (text: string, most: number) => (text.length > most ? `${text.slice(0, most - 1).trimEnd()}…` : text)
 
 export interface OwnSaid {
@@ -49,6 +57,8 @@ export function ownHeader(o: {
   viewing: string | null
   title: (id: string) => string
   unassigned: readonly { id: string; label: string }[]
+  /** Whether this place already has an own conversation: then a press opens the page's two-way choice instead of assigning. */
+  hasOwn?: boolean
   working: boolean
 }): OwnSaid {
   const items: HeaderItemInput[] = []
@@ -73,7 +83,7 @@ export function ownHeader(o: {
       id: UNASSIGNED,
       label: `Not yet assigned (${o.unassigned.length})`,
       options: [
-        ...o.unassigned.slice(0, 40).map((one) => ({ id: one.id, label: cut(`Assign to this kehikko: ${one.label || one.id.slice(0, 8)}`, 64) })),
+        ...o.unassigned.slice(0, 40).map((one) => ({ id: one.id, label: cut(`${o.hasOwn ? ASSIGN_CHOOSE : ASSIGN_BECOMES}: ${one.label || one.id.slice(0, 8)}`, 48) })),
         { id: ANSWER, label: 'Another kehikko, or not a Kehikot conversation…' },
       ],
     })

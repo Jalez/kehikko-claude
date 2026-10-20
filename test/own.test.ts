@@ -144,6 +144,15 @@ describe('the frame says which conversation is the kehikko’s own', () => {
     ])
   })
 
+  test('where the place has an own conversation, the header option says the choice is made in the page', () => {
+    const said = ownHeader({ own: A, viewing: A, title, unassigned: [{ id: C, label: 'started in a terminal' }], hasOwn: true, working: false })
+    const item = said.items.find((one) => one.id === UNASSIGNED) as { options: { id: string; label: string }[] }
+    expect(item.options.map((one) => one.label)).toEqual(['Assign to this kehikko…: started in a terminal', 'Another kehikko, or not a Kehikot conversation…'])
+    /* One item and one option per conversation: nothing the header's width rules have to fit twice. */
+    expect(said.items.length).toBe(1)
+    expect(item.options.every((one) => one.label.length <= 48)).toBe(true)
+  })
+
   test('the header item is the same at every width: what it says does not depend on how the host lays it out', () => {
     /* The host folds a module's menus into icons under 300 px and one "⋯" under 220, and a folded
        menu keeps every item; nothing here is width-dependent, and the page says it in a line of its own. */
@@ -189,11 +198,11 @@ describe('not a Kehikot conversation', () => {
     const p = dir()
     const OTHER = { epic: 'paper', parts: [], kehikko: { key: 'f00dcafe' }, kehikkoName: 'reviews' }
     born(p, METHODS, A, null, { lastActive: 1_000 })
-    born(p, RESULTS, B, null, { lastActive: 3_000 })
-    born(p, OTHER, C, null, { lastActive: 2_000 })
+    born(p, RESULTS, B, null, { label: 'draft results', lastActive: 3_000 })
+    born(p, OTHER, C, null, { label: 'reply to reviewer 2', lastActive: 2_000 })
     expect(assignable(read(p), placeKey(METHODS))).toEqual([
-      { key: placeKey(RESULTS), kehikko: 'writing', label: 'thesis · results' },
-      { key: placeKey(OTHER), kehikko: 'reviews', label: 'paper · whole epic' },
+      { key: placeKey(RESULTS), kehikko: 'writing', label: 'thesis · results', own: { id: B, title: 'draft results', lastActive: 3_000 } },
+      { key: placeKey(OTHER), kehikko: 'reviews', label: 'paper · whole epic', own: { id: C, title: 'reply to reviewer 2', lastActive: 2_000 } },
     ])
   })
 })
