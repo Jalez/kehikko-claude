@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react'
 import type { ActivityItem, HeaderItemInput } from 'kehikot-module-protocol'
 
-import { BACK_OWN, MAKE_OWN, UNASSIGNED, ownHeader } from './view/own.ts'
+import { ANSWER, BACK_OWN, MAKE_OWN, UNASSIGNED, ownHeader } from './view/own.ts'
+import { Unassigned } from './view/unassigned.tsx'
 import { held, probeServer, type PressAnswer } from 'kehikot-module-protocol/client'
 import { Cover, coverFor, useFocus, useHost, useServerStanding, type CoverState } from 'kehikot-module-protocol/client/react'
 
@@ -278,6 +279,8 @@ export function Sessions({
   const [refusal, setRefusal] = useState<string | null>(null)
   /** The person opened the list over a running terminal. */
   const [asking, setAsking] = useState(false)
+  /** Whether the answers for the project's unassigned conversations are open (`view/unassigned.tsx`). */
+  const [answering, setAnswering] = useState(false)
   /**
    * The session this place would open is open in another process, and nothing
    * was started: who has it, and whether the person has said to leave it.
@@ -612,6 +615,11 @@ export function Sessions({
     unassigned: (here?.unassigned ?? []).map((one) => ({ id: one.id, label: one.label })),
     working,
   })
+  /* Nothing left to answer: the answers close, so the next one to arrive is a line again. */
+  const waitingCount = here?.unassigned?.length ?? 0
+  useEffect(() => {
+    if (waitingCount === 0) setAnswering(false)
+  }, [waitingCount])
   const items = useMemo<HeaderItemInput[]>(() => {
     if (!offered) return []
     const worded = (row: (typeof offered)[number]) => {
@@ -648,6 +656,11 @@ export function Sessions({
         return true
       }
       if (item === UNASSIGNED) {
+        if (value === ANSWER) {
+          if (!here?.unassigned?.length) return 'No conversation is waiting to be assigned any more.'
+          setAnswering(true)
+          return true
+        }
         if (typeof value !== 'string' || !at || !api.assign || !here?.unassigned?.some((one) => one.id === value)) return 'That conversation is not waiting to be assigned any more.'
         void api.assign(at.projectPath, at.key, value, false, at.kehikkoName).finally(() => setAgain((n) => n + 1))
         return true
@@ -672,6 +685,36 @@ export function Sessions({
 
       {!cover && at && refusal && !view && (
         <Cover state="refused" name={NAME} detail={refusal} onRetry={() => setAgain((n) => n + 1)} />
+      )}
+
+      {/* The project's conversations that belong to no place, and the answers to each: a line of
+          their own at any width, which the Inbox's item reveals. */}
+      {!cover && at && here && !installing && (
+        <Unassigned
+          rows={(here.unassigned ?? []).map((one) => ({ id: one.id, label: one.label }))}
+          hereSaid={[at.kehikkoName, at.epic ?? 'no epic'].filter(Boolean).join(' · ')}
+          elsewhere={here.assignable ?? []}
+          open={answering}
+          onOpen={setAnswering}
+          onAssign={async (session, key) => {
+            if (!api.assign) return
+            const there = key === null ? null : (here.assignable ?? []).find((one) => one.key === key)
+            if (key !== null && !there) return
+            try {
+              await api.assign(at.projectPath, there ? there.key : at.key, session, false, there ? there.kehikko : at.kehikkoName)
+            } finally {
+              setAgain((n) => n + 1)
+            }
+          }}
+          onIgnore={async (session) => {
+            if (!api.ignore) return
+            try {
+              await api.ignore(at.projectPath, session)
+            } finally {
+              setAgain((n) => n + 1)
+            }
+          }}
+        />
       )}
 
       {wanting && here && (

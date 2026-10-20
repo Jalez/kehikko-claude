@@ -28,6 +28,8 @@ export interface Api {
    * place, or — `own` — make the one on screen this place's own. Rewrites the record.
    */
   assign?(projectPath: string, key: string, session: string, own: boolean, kehikkoName?: string): Promise<void>
+  /** A person's say that a conversation belonging nowhere is not a Kehikot one: never listed or counted again. */
+  ignore?(projectPath: string, session: string): Promise<void>
   /** Which doors a running session would be given now that it was not; null when not known. */
   doors?(session: string): Promise<{ added: string[]; removed: string[] } | null>
   /** Install Claude Code's SessionStart hook that reports sessions started outside Kehikot; says the file written. */
@@ -59,6 +61,9 @@ export const api: Api = {
   },
   async assign(projectPath, key, session, own, kehikkoName) {
     answered(await ask('./api/assign', { body: { projectPath, key, session, own, ...(kehikkoName ? { names: { kehikko: kehikkoName } } : {}) } }))
+  },
+  async ignore(projectPath, session) {
+    answered(await ask('./api/ignore', { body: { projectPath, session } }))
   },
   async doors(session) {
     return answered(await ask<{ ok: true; changed: { added: string[]; removed: string[] } | null }>('./api/doors', { query: { session }, ticket: true })).changed
