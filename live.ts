@@ -11,6 +11,7 @@ import { typedByPerson } from './input.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, sortedParts, type Kehikko } from './place.ts'
 import { PROGRAM, headOf, home, sessionName, type Active, type Program, type Running, type State } from './program.ts'
 import { assign, attach, born, byToken, follow, homeOf, note, projectRoot, readPlaces, recordedIds, sighted, tokenFor, unassigned, type NamedPlace, type PlaceEntry, type Places } from './record.ts'
+import { PLUGIN_DIR } from './skills.ts'
 import { freshToken, hostDoors, removeConfig, writeConfig, type DoorsAsked, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
 
@@ -869,6 +870,21 @@ export interface Unviewed {
   since: number
 }
 
+/** One page's place, as it said it (see `Runs.show`). */
+export interface Showing {
+  /** The project, resolved. */
+  projectPath: string
+  /** The place's key, and the place in words. */
+  key: string
+  place: NamedPlace
+  /** Whether the open kehikko has a Claude container: false when the page is framed but its kehikko holds none. */
+  onScreen: boolean
+  since: number
+}
+
+/** How many pages' places are kept at once: a bound on what anything on loopback with the ticket can grow. */
+const SHOWING_PAGES = 32
+
 /** A place as `places.json` holds it, as the rest of this file names one. */
 export function placeOf(entry: PlaceEntry): NamedPlace {
   const kehikko = kehikkoOf(entry.kehikko)
@@ -916,6 +932,8 @@ export interface RunsOptions {
   log?: (line: string) => void
   /** Asks the host for a session's doors (`hostDoors`); a test stands one in. */
   doors?: (asked: DoorsAsked) => Promise<SessionDoor[] | null>
+  /** The plugin folder a session is given with `--plugin-dir`; this module's own (`PLUGIN_DIR`) by default. */
+  plugins?: string
   /** Where `--mcp-config` files are written; this user's temporary folder by default. */
   configBase?: string
 }
@@ -959,6 +977,8 @@ export class Runs {
   private readonly projects = new Set<string>()
   /** The background sessions of those projects' places that no run here is a view of, by session (see `Unviewed`). */
   private readonly unviewed = new Map<string, Unviewed>()
+  /** What each framed page has open, by the page's own id (see `show`). */
+  private readonly showing = new Map<string, Showing>()
   /** Where each project's places' sessions were followed to, kept while the record and what is running are unchanged. */
   private readonly heads = new Map<string, { stamp: string; heads: Map<string, string> }>()
 
@@ -1264,6 +1284,44 @@ export class Runs {
   }
 
   /**
+   * What a framed page has open, as it says (`POST /api/showing`): its project, the place it
+   * stands on, and whether a Claude container is on the open kehikko. Kept until the page says
+   * otherwise or its feed closes (`unshow`); what `/kehikot-here` takes as "on screen".
+   */
+  show(page: string, showing: Omit<Showing, 'since'> | null): void {
+    if (!showing) {
+      this.showing.delete(page)
+      return
+    }
+    while (this.showing.size >= SHOWING_PAGES && !this.showing.has(page)) this.showing.delete(this.showing.keys().next().value!)
+    this.showing.set(page, { ...showing, since: this.now() })
+  }
+
+  unshow(page: string): void {
+    this.showing.delete(page)
+  }
+
+  /** The places a page has on screen in this project (resolved), with a Claude container there: the latest first, one per place. */
+  showingIn(projectPath: string): Showing[] {
+    const seen = new Set<string>()
+    return [...this.showing.values()]
+      .filter((one) => one.onScreen && one.projectPath === projectPath)
+      .sort((a, b) => b.since - a.since)
+      .filter((one) => (seen.has(one.key) ? false : (seen.add(one.key), true)))
+  }
+
+  /** Every page following this project reads its list again: the record changed under it (a conversation was assigned). */
+  told(projectPath: string): void {
+    this.changed()
+    for (const follower of this.followers) if (!follower.project || follower.project === projectPath) follower.sessions?.(projectPath)
+  }
+
+  /** The projects this server has been told of (by a page, an open or a report), resolved. */
+  knownProjects(): string[] {
+    return [...this.projects]
+  }
+
+  /**
    * The place a token's conversation belongs to, as the record says — what a
    * Kehikot door is told (`/api/kehikot/place`). A conversation running here
    * that the program has not recorded yet belongs to the place it was started
@@ -1480,6 +1538,8 @@ export class Runs {
       : [
           ...(settled ? this.program.resume(settled, name || undefined) : this.program.fresh(id, name || undefined)),
           ...(tells ? this.program.reports(tellLine) : []),
+          /* `/kehikot-here`, for this one process: nothing is written into the person's config. */
+          ...((await this.program.supports(found.file)).plugins ? ['--plugin-dir', this.options.plugins ?? PLUGIN_DIR] : []),
           /* Last: the flag takes every word after it until the next flag. */
           ...(config ? ['--mcp-config', config] : []),
         ]

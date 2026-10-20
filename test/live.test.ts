@@ -11,6 +11,8 @@ import { PROGRAM, readActive, type Active, type Program, type Recorded } from '.
 import { assign, attach, ignore, readPlaces, sessionsAt, type NamedPlace } from '../record.ts'
 import type { DoorsAsked, SessionDoor } from '../doorConfig.ts'
 import { existsSync, readFileSync, statSync } from 'node:fs'
+import { PLUGIN_DIR } from '../skills.ts'
+import { CONFIG } from './setup.ts'
 
 /**
  * The fence, and the runs behind it, without a socket or a real pty.
@@ -181,7 +183,7 @@ class Watcher implements Viewer {
 /** Long enough for the emulator's write queue and the promises behind an open to have run. */
 const settle = () => new Promise((done) => setTimeout(done, 25))
 
-function world(options: { found?: string | null; able?: boolean; tells?: boolean; lists?: boolean; names?: boolean; configures?: boolean; doors?: (asked: DoorsAsked) => Promise<SessionDoor[] | null>; configBase?: string; asking?: 'fails'; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number; watchEvery?: number | null } = {}) {
+function world(options: { found?: string | null; able?: boolean; tells?: boolean; lists?: boolean; names?: boolean; configures?: boolean; plugins?: boolean; doors?: (asked: DoorsAsked) => Promise<SessionDoor[] | null>; configBase?: string; asking?: 'fails'; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number; watchEvery?: number | null } = {}) {
   const logged: string[] = []
   const ptys: FakePty[] = []
   /* What the stand-in program holds a record for, by folder. */
@@ -196,7 +198,7 @@ function world(options: { found?: string | null; able?: boolean; tells?: boolean
   const program: Program = {
     ...PROGRAM,
     find: () => ({ file: found, looked: ['/fake/bin'], usual: [] }),
-    supports: async () => ({ ok: options.able ?? true, missing: options.able === false ? '--session-id' : null, tells: options.tells ?? false, lists: options.lists ?? true, names: options.names ?? false, configures: options.configures ?? false }),
+    supports: async () => ({ ok: options.able ?? true, missing: options.able === false ? '--session-id' : null, tells: options.tells ?? false, lists: options.lists ?? true, names: options.names ?? false, configures: options.configures ?? false, plugins: options.plugins ?? false }),
     /* What the stand-in program says is running, asked every time: a test changes `elsewhere` between two opens. */
     active: async () => {
       asked.count += 1
@@ -2347,6 +2349,22 @@ describe('a conversation’s place, on every Kehikot door (protocol 2.4.0)', () 
     expect(read.ok && read.value.sessions[A]?.home).toBe(placeKey(KEYED))
     expect(read.ok && read.value.places[placeKey(OTHER)]?.sessions).toEqual([A])
     expect(read.ok && read.value.places[placeKey(OTHER)]?.own).toBeUndefined()
+  })
+
+  test('a session started here is given /kehikot-here for that one process, before its doors, and nothing is written for it', async () => {
+    const dir = project()
+    const w = world({ plugins: true, configures: true, doors: doors([]), configBase: project() })
+    await w.runs.open(ask(dir, null, KEYED), new Watcher())
+    const args = w.ptys[0]!.args
+    expect(args.slice(0, 2)).toEqual(['--session-id', B])
+    expect(args.slice(-4, -2)).toEqual(['--plugin-dir', PLUGIN_DIR])
+    expect(args.at(-2)).toBe('--mcp-config')
+    expect(existsSync(join(PLUGIN_DIR, 'skills', 'kehikot-here', 'SKILL.md'))).toBe(true)
+    expect(existsSync(join(CONFIG, 'skills'))).toBe(false)
+    /* A copy without the flag is started without it. */
+    const old = world({ plugins: false })
+    await old.runs.open(ask(project(), null, KEYED), new Watcher())
+    expect(old.ptys[0]!.args).toEqual(['--session-id', B])
   })
 
   test('a copy that cannot take --mcp-config, or no host, starts exactly as before', async () => {

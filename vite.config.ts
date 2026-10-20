@@ -8,6 +8,7 @@ import { defineConfig, type Plugin } from 'vite'
 import { BUILD, MANIFEST, TICKET, answer, stream } from './doors.ts'
 import { serveSessions } from './live.ts'
 import { ID, PREFERRED_PORT } from './manifest.ts'
+import { isSkillPath } from './skills.ts'
 
 /**
  * The port this process actually ended up on, which is not knowable here:
@@ -49,7 +50,8 @@ function sockets(): Plugin {
  * - `serves()` first: it claims the port and keeps the registration true.
  * - `doors()` serves the manifest, the page at `/app` (generated, with the
  *   ticket and this process's build printed into it), and `/healthz`, `/mcp`
- *   and `/api/*` through `answer` in doors.ts — `/api/feed` as a stream.
+ *   and `/api/*` through `answer` in doors.ts — `/api/feed` as a stream — and each offered
+ *   skill's SKILL.md at `/kehikot/skills/<name>.md` (skills.ts).
  * - Loopback, explicitly, and `cors: false` written rather than omitted: the
  *   thing behind the ticket runs a program as the person, and the absence of
  *   a permissive header is what keeps a page in another tab from reading it.
@@ -60,7 +62,7 @@ export default defineConfig({
   plugins: [
     serves({ id: ID, prefer: PREFERRED_PORT }),
     sockets(),
-    doors({ manifest: MANIFEST, answer, stream, build: BUILD, page: { title: 'Claude', ticket: TICKET }, maxBodyBytes: 64 * 1024 }),
+    doors({ manifest: MANIFEST, answer, stream, build: BUILD, page: { title: 'Claude', ticket: TICKET }, maxBodyBytes: 64 * 1024, ours: (path) => path === '/healthz' || path === '/mcp' || path.startsWith('/api/') || isSkillPath(path) }),
     react(),
     tailwindcss(),
   ],

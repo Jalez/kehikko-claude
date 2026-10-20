@@ -1,12 +1,14 @@
-import { PROJECT_ID, doorContext } from 'kehikot-module-protocol'
+import { PROJECT_ID, doorContext, manifestSchema, type Manifest } from 'kehikot-module-protocol'
 import { establishBuild, hostHasProject, refuseTicket, sameTicket, type Reply, type Stream } from 'kehikot-module-protocol/serve'
 
 import { TICKET, elsewhereOf, sameProject, theRuns, type Elsewhere, type Run, type Runs } from './live.ts'
-import { ID, MANIFEST, VERSION } from './manifest.ts'
+import { ID, MANIFEST as DECLARED, VERSION } from './manifest.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, readPlaceKey, type Place } from './place.ts'
 import { PROGRAM, headOf, home, type Program, type Recorded, type Running, type State } from './program.ts'
 import { PLACE_TOKEN, WHERE, assign, detach, follow, homeOf, ignore, ownOf, projectRoot, readPlaces, recordedIds, rekey, sessionsAt, unassigned, type Places } from './record.ts'
 import { enable, enabled, hookCommand, settingsFile } from './hook.ts'
+import { here } from './here.ts'
+import { skillAt, skillDeclarations } from './skills.ts'
 
 /**
  * The HTTP doors, as one function: `answer` takes a request and returns a
@@ -48,6 +50,9 @@ import { enable, enabled, hookCommand, settingsFile } from './hook.ts'
  */
 
 export { TICKET }
+
+/** The manifest as served: the one in manifest.ts with the skills this module offers (skills.ts). */
+export const MANIFEST: Manifest = manifestSchema.parse({ ...DECLARED, declares: { ...DECLARED.declares, skills: skillDeclarations() } })
 
 /** Whether the host holds a folder as a project: the protocol's question, here so a test can stand a host in. */
 export const hostCheck = { has: (folder: string) => hostHasProject(folder) }
@@ -627,6 +632,14 @@ export async function answer(
     return mcp(body as Rpc)
   }
 
+  /* The skills this module offers (protocol 2.5.0): each one's SKILL.md, as text. Public: it is
+     what a host shows a person before they install it, and holds nothing of anybody's. */
+  const skill = skillAt(path)
+  if (skill) {
+    if (method !== 'GET') return bad('this door takes GET', 405)
+    return { status: 200, body: null, raw: { bytes: skill.text, type: 'text/markdown; charset=utf-8' } }
+  }
+
   if (!path.startsWith('/api/')) return null
 
   /* A session's program saying what it is doing. Before the page's ticket is
@@ -658,6 +671,23 @@ export async function answer(
     const root = projectRoot(cwd)
     if (!root.ok || !(await hostCheck.has(root.value))) return ok({ ok: true, listed: false })
     return ok({ ok: true, listed: theRuns().sighted(root.value, id, 'hook') })
+  }
+
+  /* `/kehikot-here`, typed by a person in a Claude Code conversation (see here.ts): the skill
+     posts the conversation's own id. A program's door, with no ticket, so the id is a claim, and
+     it is believed only for a conversation Claude Code lists as running in a project the host
+     holds. The answer is plain text, which the skill repeats word for word. */
+  if (path === '/api/here') {
+    if (method !== 'POST') return bad('this door takes POST', 405)
+    const runs = theRuns()
+    const said = await here((query.get('session') ?? '').slice(0, 64), query.get('say') ?? '', {
+      program: PROGRAM,
+      showingIn: (project) => runs.showingIn(project),
+      knownProjects: () => runs.knownProjects(),
+      hostHas: (folder) => hostCheck.has(folder),
+      told: (project) => runs.told(project),
+    })
+    return { status: 200, body: null, raw: { bytes: `${said}\n`, type: 'text/plain; charset=utf-8' } }
   }
 
   /* Every other door under /api, the read included: see "Reads carry the ticket too". */
@@ -734,6 +764,33 @@ export async function answer(
     return done.ok ? ok(done) : bad(done.error, 409)
   }
 
+  /* What this page has on screen: its project, its place, and whether its kehikko has a Claude
+     container — what `/kehikot-here` assigns to. Said by the page on every change, and forgotten
+     when its feed closes. */
+  if (path === '/api/showing' && method === 'POST') {
+    const page = typeof body?.page === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(body.page) ? body.page : null
+    if (!page) return bad('that is not a page')
+    const key = typeof body?.key === 'string' ? body.key : ''
+    const place = readPlaceKey(key)
+    const root = place ? projectRoot(typeof body?.projectPath === 'string' ? body.projectPath : null) : null
+    if (!place || !root?.ok) {
+      theRuns().show(page, null)
+      return ok({ ok: true, showing: false })
+    }
+    const names = Array.isArray(body?.partNames) ? body.partNames.slice(0, place.parts.length).map((one) => (typeof one === 'string' ? one.slice(0, 120) : '')) : []
+    theRuns().show(page, {
+      projectPath: root.value,
+      key,
+      place: {
+        ...place,
+        ...(typeof body?.kehikkoName === 'string' ? { kehikkoName: body.kehikkoName.slice(0, 120) } : {}),
+        ...(names.length === place.parts.length && names.every(Boolean) ? { partNames: names } : {}),
+      },
+      onScreen: body?.onScreen === true,
+    })
+    return ok({ ok: true, showing: true })
+  }
+
   /* Which doors a running session would be given now that it was not: the line offering a restart. */
   if (path === '/api/doors' && method === 'GET') {
     const id = query.get('session') ?? ''
@@ -776,7 +833,8 @@ export const stream: Stream = (method, path, query, emit, ticket) => {
   /* The project the page is framed in: its activity list is that project's sessions only. */
   const asked = query.get('project')
   const project = asked ? projectRoot(asked) : null
-  const close = theRuns().subscribe({
+  const page = query.get('page')
+  const stop = theRuns().subscribe({
     notices: query.get('notices') === '1',
     project: project?.ok ? project.value : null,
     state: (stated) => emit(stated),
@@ -784,7 +842,11 @@ export const stream: Stream = (method, path, query, emit, ticket) => {
     activity: (items) => emit({ items }, 'activity'),
     sessions: (project) => emit({ project }, 'sessions'),
   })
+  /* A page that stops following has nothing on screen any more, as far as `/kehikot-here` knows. */
+  const close = () => {
+    stop()
+    if (page) theRuns().unshow(page)
+  }
   return { close }
 }
 
-export { MANIFEST }

@@ -57,8 +57,8 @@ import { delimiter, join } from 'node:path'
  * ## Every command line this module ever runs, and it is the whole list
  *
  *     claude --help                                   once per binary: which flags and commands it has
- *     claude --session-id <uuid> [--name <place>] [--settings <json>]  a new session
- *     claude --resume <uuid> [--name <place>] [--settings <json>]      a session nothing else is running
+ *     claude --session-id <uuid> [--name <place>] [--settings <json>] [--plugin-dir <plugin>] [--mcp-config <file>]  a new session
+ *     claude --resume <uuid> [--name <place>] [--settings <json>] [--plugin-dir <plugin>] [--mcp-config <file>]      a session nothing else is running
  *     claude agents --json                            before every resume and every list: what is running. Reads; starts nothing
  *     claude attach <handle>                          a view of a session the program runs in the background
  *
@@ -101,6 +101,8 @@ export interface Able {
   names?: boolean
   /** Whether this copy takes MCP servers for one process (`--mcp-config`): how a session is given its place. */
   configures?: boolean
+  /** Whether this copy loads a plugin for one process (`--plugin-dir`): how a session is given `/kehikot-here`. */
+  plugins?: boolean
 }
 
 /**
@@ -379,6 +381,17 @@ const NAMES = '--name <'
  */
 const CONFIGURES = '--mcp-config <'
 
+/**
+ * The flag a session is given this module's skills with, for that one process (see skills.ts).
+ * From the help of 2.1.304:
+ *
+ *     --plugin-dir <path>   Load a plugin from a directory or .zip for this session only
+ *
+ * Measured on 2.1.304 with a scratch config: the plugin's skill is listed as
+ * `kehikot:kehikot-here`, typing `/kehikot-here` runs it, and nothing is written for it.
+ */
+const PLUGINS = '--plugin-dir <'
+
 const able = new Map<string, Able>()
 
 /**
@@ -430,10 +443,10 @@ async function supports(file: string): Promise<Able> {
   /* Nothing was learned, so nothing extra is passed either: a flag this copy
      turned out not to have would stop it from starting at all. */
   const said: Able = !stdout
-    ? { ok: true, missing: null, tells: false, lists: false, names: false, configures: false }
+    ? { ok: true, missing: null, tells: false, lists: false, names: false, configures: false, plugins: false }
     : (() => {
         const missing = NEEDS.find((flag) => !stdout.includes(flag)) ?? null
-        return { ok: missing === null, missing, tells: stdout.includes(TELLS), lists: LISTS.every((command) => command.test(stdout)), names: stdout.includes(NAMES), configures: stdout.includes(CONFIGURES) }
+        return { ok: missing === null, missing, tells: stdout.includes(TELLS), lists: LISTS.every((command) => command.test(stdout)), names: stdout.includes(NAMES), configures: stdout.includes(CONFIGURES), plugins: stdout.includes(PLUGINS) }
       })()
   able.set(stamp, said)
   return said

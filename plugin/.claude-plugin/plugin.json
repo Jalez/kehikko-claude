@@ -1,0 +1,5 @@
+{
+  "name": "kehikot",
+  "version": "0.1.0",
+  "description": "Kehikot's skills for a Claude Code session started from Kehikot's Claude container, loaded for that one process (--plugin-dir)."
+}
