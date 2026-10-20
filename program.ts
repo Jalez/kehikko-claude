@@ -99,6 +99,8 @@ export interface Able {
   lists: boolean
   /** Whether this copy takes a display name for a session (`--name`). */
   names?: boolean
+  /** Whether this copy takes MCP servers for one process (`--mcp-config`): how a session is given its place. */
+  configures?: boolean
 }
 
 /**
@@ -365,6 +367,18 @@ const LISTS = [/^\s*agents\b/m, /^\s*attach\b/m]
  */
 const NAMES = '--name <'
 
+/**
+ * The flag a session is given its Kehikot doors with, each carrying the
+ * session's place token. From the help of 2.1.304:
+ *
+ *     --mcp-config <configs...>   Load MCP servers from JSON files or strings (space-separated)
+ *
+ * Measured on 2.1.304 with a scratch config: a server in the file under a
+ * name the person's own config also has REPLACES theirs for this process, and
+ * their other servers are kept (no `--strict-mcp-config`).
+ */
+const CONFIGURES = '--mcp-config <'
+
 const able = new Map<string, Able>()
 
 /**
@@ -416,10 +430,10 @@ async function supports(file: string): Promise<Able> {
   /* Nothing was learned, so nothing extra is passed either: a flag this copy
      turned out not to have would stop it from starting at all. */
   const said: Able = !stdout
-    ? { ok: true, missing: null, tells: false, lists: false, names: false }
+    ? { ok: true, missing: null, tells: false, lists: false, names: false, configures: false }
     : (() => {
         const missing = NEEDS.find((flag) => !stdout.includes(flag)) ?? null
-        return { ok: missing === null, missing, tells: stdout.includes(TELLS), lists: LISTS.every((command) => command.test(stdout)), names: stdout.includes(NAMES) }
+        return { ok: missing === null, missing, tells: stdout.includes(TELLS), lists: LISTS.every((command) => command.test(stdout)), names: stdout.includes(NAMES), configures: stdout.includes(CONFIGURES) }
       })()
   able.set(stamp, said)
   return said

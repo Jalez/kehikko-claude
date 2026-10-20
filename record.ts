@@ -6,6 +6,9 @@ import { KEHIKOT_DIR, kehikotDir, moduleDir, moduleFile, within } from 'kehikot-
 import { ID } from './manifest.ts'
 import { isKehikkoKey, placeKey, readPlaceKey, sortedParts, type Place } from './place.ts'
 
+/** A place token's spelling (protocol 2.4.0, `PLACE_TOKEN`). Written out here until the protocol pin moves. */
+export const PLACE_TOKEN = /^[A-Za-z0-9_-]{22,64}$/
+
 /**
  * Which session belongs to which place, kept inside the project it is about:
  * `<project>/.kehikot/claude/places.json`.
@@ -131,6 +134,13 @@ export interface PlaceEntry {
    * many others the place lists. One of `sessions`, or absent.
    */
   current?: string
+  /**
+   * The conversation that is this place's OWN: the one its frame names as
+   * its own and goes back to. Set when the first conversation is started here,
+   * and by a person's "Make this the kehikko's own". Viewing another one here
+   * does not change it. One of `sessions`, or absent.
+   */
+  own?: string
 }
 
 export interface SessionEntry {
@@ -138,6 +148,27 @@ export interface SessionEntry {
   added: string
   label: string
   lastActive: string | null
+  /**
+   * The place this conversation BELONGS to (a `placeKey`): what an agent in it
+   * is told its place is (`my_place`). Written when it is started at a place,
+   * when a person assigns or attaches it to one, and by "Make this the
+   * kehikko's own" — never by merely viewing it somewhere. Absent: not yet
+   * assigned.
+   */
+  home?: string
+  /**
+   * The token its sessions carry on every Kehikot door (protocol 2.4.0,
+   * `PLACE_PARAM`): what a door hands back to find this record. Random, kept
+   * with the conversation, carried on when Claude Code continues it under a
+   * new id.
+   */
+  token?: string
+  /**
+   * How this module learnt of a conversation it did not start: Claude Code's
+   * SessionStart hook (`hook`), or `claude agents --json` (`agents`). With no
+   * `home`, it is listed as not yet assigned.
+   */
+  seen?: { via: 'hook' | 'agents'; at: string }
 }
 
 export interface Places {
@@ -210,6 +241,8 @@ export function attach(
       sessions: was?.sessions.includes(id) ? was.sessions : [...(was?.sessions ?? []), id],
       /* What was opened here last is what opens here next. */
       current: id,
+      /* Viewing a conversation here does not make it the place's own: that is a person's say (`assign`). */
+      ...(was?.own ? { own: was.own } : {}),
     }
     describe(places, id, about, now)
   })
@@ -282,7 +315,10 @@ export function rekey(
         kehikko: moving && had ? had.kehikko : moving ? beside({ key: kehikko.key }, kehikko.name, kehikko.id) : entry.kehikko,
         sessions: [...new Set([...(first?.sessions ?? []), ...(second?.sessions ?? [])])],
         ...((first?.current ?? second?.current) ? { current: (first?.current ?? second?.current)! } : {}),
+        ...((first?.own ?? second?.own) ? { own: (first?.own ?? second?.own)! } : {}),
       }
+      /* A conversation that belonged to the moved entry belongs to it under its new key. */
+      if (moving) for (const session of Object.values(places.sessions)) if (session.home === key) session.home = to
     }
     places.places = next
     return true
@@ -317,11 +353,142 @@ export function follow(projectPath: string | null | undefined, from: string, to:
       moved = true
       entry.sessions = [...new Set(entry.sessions.map((one) => (one === from ? to : one)))]
       if (entry.current === from) entry.current = to
+      if (entry.own === from) entry.own = to
     }
     if (!moved) return false
     const was = Object.hasOwn(places.sessions, from) ? places.sessions[from] : undefined
     describe(places, to, { label: about.label || was?.label, lastActive: about.lastActive })
+    /* The conversation goes on under `to`: where it belongs and its token go with it. */
+    const now = places.sessions[to]!
+    if (was?.home && !now.home) now.home = was.home
+    if (was?.token && !now.token) now.token = was.token
+    /* One token, one conversation: the step behind it gives it up. */
+    if (was?.token && now.token === was.token) delete was.token
   })
+}
+
+/* ------------------------------------------------------------------------ *
+ * Where a conversation belongs, and a place's own
+ * ------------------------------------------------------------------------ */
+
+/**
+ * The place a conversation belongs to, as the record says — or null. A file
+ * written before `home` existed says it too, when it can be read as a fact:
+ * the one place that lists the conversation, or, of several, the one place
+ * that has it as its last open. Anything else is not assigned: never guessed.
+ */
+export function homeOf(places: Places, id: string): string | null {
+  const said = Object.hasOwn(places.sessions, id) ? places.sessions[id]?.home : undefined
+  if (said && Object.hasOwn(places.places, said)) return said
+  const listing = Object.entries(places.places).filter(([, entry]) => entry.sessions.includes(id))
+  if (listing.length === 1) return listing[0]![0]
+  const current = listing.filter(([, entry]) => entry.current === id)
+  return current.length === 1 ? current[0]![0] : null
+}
+
+/** A place's own conversation: the one it says, or — in a file from before `own` — its last open. */
+export function ownOf(places: Places, key: string): string | null {
+  const entry = Object.hasOwn(places.places, key) ? places.places[key] : undefined
+  return entry?.own ?? entry?.current ?? null
+}
+
+/** The conversation a token was given to, and where it belongs. Null for a token the record does not hold. */
+export function byToken(places: Places, token: string): { id: string; home: string | null } | null {
+  if (!PLACE_TOKEN.test(token)) return null
+  for (const [id, entry] of Object.entries(places.sessions)) if (entry.token === token) return { id, home: homeOf(places, id) }
+  return null
+}
+
+/** The conversations the record has seen and that belong nowhere: started outside, reported, not yet assigned. */
+export function unassigned(places: Places): string[] {
+  return Object.entries(places.sessions)
+    .filter(([id, entry]) => entry.seen && !homeOf(places, id))
+    .map(([id]) => id)
+}
+
+/**
+ * A conversation STARTED at a place: it belongs there from the first moment,
+ * it is the place's own when the place had none, and it keeps its token.
+ */
+export function born(
+  projectPath: string | null | undefined,
+  place: NamedPlace,
+  id: string,
+  token: string | null,
+  about: { label?: string; lastActive?: number } = {},
+  now = Date.now(),
+): Result<Places> {
+  return change(projectPath, (places) => {
+    listAt(places, place, id)
+    const key = placeKey(place)
+    describe(places, id, about, now)
+    const entry = places.sessions[id]!
+    if (!entry.home) entry.home = key
+    if (token && PLACE_TOKEN.test(token)) entry.token = token
+    if (!places.places[key]!.own) places.places[key]!.own = id
+  })
+}
+
+/**
+ * A person's say: this conversation belongs to this place — by assigning one
+ * that belonged nowhere, or by "Make this the kehikko's own". `own: true`
+ * also makes it the place's own conversation. Written as asked; the place it
+ * belonged to before keeps it in its list.
+ */
+export function assign(
+  projectPath: string | null | undefined,
+  place: NamedPlace,
+  id: string,
+  options: { own?: boolean; label?: string; lastActive?: number } = {},
+  now = Date.now(),
+): Result<Places> {
+  return change(projectPath, (places) => {
+    listAt(places, place, id)
+    const key = placeKey(place)
+    describe(places, id, { label: options.label, lastActive: options.lastActive }, now)
+    places.sessions[id]!.home = key
+    if (options.own || !places.places[key]!.own) places.places[key]!.own = id
+  })
+}
+
+/** A conversation this module did not start, reported by Claude Code: listed as not yet assigned until somebody says. */
+export function sighted(projectPath: string | null | undefined, id: string, via: 'hook' | 'agents', now = Date.now()): Result<Places> {
+  const read = readPlaces(projectPath)
+  if (!read.ok) return read
+  const had = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id] : undefined
+  if (had?.seen || homeOf(read.value, id)) return read
+  return change(projectPath, (places) => {
+    describe(places, id, {}, now)
+    places.sessions[id]!.seen = { via, at: new Date(now).toISOString() }
+  })
+}
+
+/** Give a recorded conversation its token, when it has none. The token it has, either way. */
+export function tokenFor(projectPath: string | null | undefined, id: string, fresh: () => string): string | null {
+  const read = readPlaces(projectPath)
+  if (!read.ok) return null
+  const had = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id]?.token : undefined
+  if (had) return had
+  if (!Object.hasOwn(read.value.sessions, id)) return null
+  const token = fresh()
+  const written = change(projectPath, (places) => {
+    places.sessions[id]!.token = token
+  })
+  return written.ok ? token : null
+}
+
+/** The place's entry with `id` in its list, made when there is none: what `attach` does, without the `current`. */
+function listAt(places: Places, place: NamedPlace, id: string): void {
+  const key = placeKey(place)
+  const was = Object.hasOwn(places.places, key) ? places.places[key] : undefined
+  places.places[key] = {
+    epic: place.epic,
+    parts: sortedParts(place.parts),
+    kehikko: beside(place.kehikko, place.kehikkoName ?? was?.kehikko?.name ?? '', place.kehikkoId ?? was?.kehikko?.id),
+    sessions: was?.sessions.includes(id) ? was.sessions : [...(was?.sessions ?? []), id],
+    current: id,
+    ...(was?.own ? { own: was.own } : {}),
+  }
 }
 
 /** Take a session off a place. The session itself, and its entry here, are kept. */
@@ -332,6 +499,10 @@ export function detach(projectPath: string | null | undefined, key: string, id: 
     const entry = places.places[key]!
     entry.sessions = entry.sessions.filter((one) => one !== id)
     if (entry.current === id) delete entry.current
+    if (entry.own === id) delete entry.own
+    /* Taken off the place it belongs to: it belongs nowhere until somebody says. */
+    const session = Object.hasOwn(places.sessions, id) ? places.sessions[id] : undefined
+    if (session?.home === key) delete session.home
   })
 }
 
@@ -360,6 +531,9 @@ function describe(places: Places, id: string, about: { label?: string; lastActiv
     added: was?.added ?? new Date(now).toISOString(),
     label: about.label || was?.label || '',
     lastActive: about.lastActive ? new Date(about.lastActive).toISOString() : (was?.lastActive ?? null),
+    ...(was?.home ? { home: was.home } : {}),
+    ...(was?.token ? { token: was.token } : {}),
+    ...(was?.seen ? { seen: was.seen } : {}),
   }
 }
 
@@ -433,7 +607,7 @@ function tidy(raw: unknown): Places {
     for (const [key, value] of Object.entries(places)) {
       const place = readPlaceKey(key)
       if (!place || typeof value !== 'object' || value === null) continue
-      const entry = value as { kehikko?: { id?: unknown; name?: unknown } | null; sessions?: unknown; current?: unknown }
+      const entry = value as { kehikko?: { id?: unknown; name?: unknown } | null; sessions?: unknown; current?: unknown; own?: unknown }
       const seen = entry.kehikko?.id
       const listed: string[] = Array.isArray(entry.sessions) ? [...new Set(entry.sessions.filter((one): one is string => typeof one === 'string' && one.length > 0 && one.length <= 128))] : []
       out.places[key] = {
@@ -443,17 +617,22 @@ function tidy(raw: unknown): Places {
         kehikko: beside(place.kehikko, typeof entry.kehikko?.name === 'string' ? entry.kehikko.name : '', typeof seen === 'number' ? seen : undefined),
         sessions: listed,
         ...(typeof entry.current === 'string' && listed.includes(entry.current) ? { current: entry.current } : {}),
+        ...(typeof entry.own === 'string' && listed.includes(entry.own) ? { own: entry.own } : {}),
       }
     }
   }
   if (typeof sessions === 'object' && sessions !== null) {
     for (const [id, value] of Object.entries(sessions)) {
       if (!id || id.length > 128 || typeof value !== 'object' || value === null) continue
-      const entry = value as { added?: unknown; label?: unknown; lastActive?: unknown }
+      const entry = value as { added?: unknown; label?: unknown; lastActive?: unknown; home?: unknown; token?: unknown; seen?: { via?: unknown; at?: unknown } }
+      const via = entry.seen?.via
       out.sessions[id] = {
         added: typeof entry.added === 'string' ? entry.added : '',
         label: typeof entry.label === 'string' ? entry.label.slice(0, 200) : '',
         lastActive: typeof entry.lastActive === 'string' ? entry.lastActive : null,
+        ...(typeof entry.home === 'string' && readPlaceKey(entry.home) ? { home: entry.home } : {}),
+        ...(typeof entry.token === 'string' && PLACE_TOKEN.test(entry.token) ? { token: entry.token } : {}),
+        ...((via === 'hook' || via === 'agents') && typeof entry.seen?.at === 'string' ? { seen: { via, at: entry.seen.at } } : {}),
       }
     }
   }

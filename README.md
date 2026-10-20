@@ -358,6 +358,39 @@ switch kehikko. A line filed under the session's epic is the most that exists.
   `program.ts`).
 - It never reads the screen to decide anything, and never reads what a hook is handed.
 
+## Each conversation knows its own place
+
+A person runs several conversations, each about its own epic, and switches the
+epic on screen while they work. Every conversation is recorded under the place
+it belongs to (`home` in `places.json`), and its sessions are told so on every
+Kehikot door:
+
+- **Started or resumed here.** The conversation gets a token (kept in its
+  record, carried on when Claude Code continues it under a new id). The
+  module issues it to the host (`POST /host/place`, protocol 2.4.0) and gets
+  back every Kehikot MCP door of the place's kehikko — the host's own and each
+  module's — with `?kehikot-place=<token>` on the URL, under the names the
+  person's agent config already uses. They go to Claude Code for that one
+  process with `--mcp-config <file>`: a 0600 file in a 0700 folder of this
+  user's temporary directory, removed when the process ends, never on the
+  command line. `--strict-mcp-config` is never passed: the person's other
+  servers stay, and a door of the same name replaces theirs (measured on
+  2.1.304). A door asks the host, the host asks this module
+  (`GET /api/kehikot/place`), and the answer is the record as it is now.
+- **Its place's own.** A place has one conversation of its own (`own`): the
+  first started there, or the one a person made its own. Viewing another one
+  here changes nothing in the record; the frame's header says
+  "Viewing … — not this kehikko's own (…)" with *Make this the kehikko's own*
+  (rewrites the record) and *Back to its own*.
+- **Started outside Kehikot.** With the SessionStart hook installed (the
+  *Report them* press in the list, which adds one entry to Claude Code's
+  `settings.json` — see `hook.ts`), a session started in a terminal is listed
+  in its project at once as *Not yet assigned*, and asks in the Inbox; so is
+  one `claude agents --json` reports running in the project with no record.
+  *Assign to this kehikko* in the header records it.
+- **The kehikko gains or loses a module** while a session runs: one line
+  offers *Restart* to load the new doors (disabled while it is working).
+
 ## Where its data lives
 
 `<project>/.kehikot/claude/places.json`, and nowhere else:

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react'
 import type { ActivityItem, HeaderItemInput } from 'kehikot-module-protocol'
+
+import { BACK_OWN, MAKE_OWN, UNASSIGNED, ownHeader } from './view/own.ts'
 import { held, probeServer, type PressAnswer } from 'kehikot-module-protocol/client'
 import { Cover, coverFor, useFocus, useHost, useServerStanding, type CoverState } from 'kehikot-module-protocol/client/react'
 
@@ -166,7 +168,9 @@ export function App() {
     () => (where === 'hosted' ? { emit: (extension, payload) => request('events.emit', { extension, payload }), activity, answers, header, presses, drawn: hostDraws } : null),
     [where, request, header, activity, answers, hostDraws],
   )
-  return <Sessions theme={host.theme} at={at} cover={cover} hosted={hosted} canvasEpic={epic} />
+  /* The modules on this kehikko, as one steady string: a change is what offers "Restart to load …". */
+  const containers = host.containers.map((one) => one.module).sort().join(',')
+  return <Sessions theme={host.theme} at={at} cover={cover} hosted={hosted} canvasEpic={epic} containers={containers} />
 }
 
 /**
@@ -246,6 +250,7 @@ export function Sessions({
   settleMs = SETTLE_MS,
   hosted = null,
   canvasEpic = null,
+  containers = '',
 }: {
   theme: 'light' | 'dark'
   /** The place the canvas is about, or null when there is nothing to open. */
@@ -259,6 +264,8 @@ export function Sessions({
   hosted?: Hosted | null
   /** The epic the canvas is on, which is not always the epic of the session a notice is about. */
   canvasEpic?: string | null
+  /** The modules on this kehikko, sorted and joined: when it changes, a running session may lack a door. */
+  containers?: string
 }) {
   const [views, setViews] = useState<View[]>([])
   /** Which view each place shows, by `placeId`. */
@@ -516,6 +523,8 @@ export function Sessions({
       /* The server writes the whole list and says it again on every change and on arrival; this only
          passes it on. The client drops an identical one and sends nothing to a host without the method. */
       activity: (items) => told.current.hosted?.activity?.(items),
+      /* A session was reported started somewhere in this project: the list is read again. */
+      sessions: () => setAgain((n) => n + 1),
       notice: (notice) => {
         /* One report: a host that holds the activity list makes the notice from it. Sending this
            one too would give the person every notice twice. Only a host that did not say it
@@ -549,6 +558,32 @@ export function Sessions({
   /* The session on screen runs in a folder its project has left: the line saying so, until dismissed. */
   const movedTo = view && at && moves[view.n] && dismissed[view.n] !== moves[view.n] ? at.projectPath : null
   const working = doing?.state === 'working'
+  /* The kehikko gained or lost a module since the session on screen was started: its doors are not
+     the kehikko's any more. Asked when the containers change, and said in one line with a restart. */
+  const [doorsNow, setDoorsNow] = useState<{ session: string; added: string[]; removed: string[] } | null>(null)
+  const viewed = view?.session ?? null
+  const seenContainers = useRef(containers)
+  useEffect(() => {
+    if (seenContainers.current === containers) return
+    seenContainers.current = containers
+    if (!viewed || !api.doors) return
+    let live = true
+    void api
+      .doors(viewed)
+      .then((changed) => {
+        if (live) setDoorsNow(changed && (changed.added.length || changed.removed.length) ? { session: viewed, ...changed } : null)
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [containers, viewed, api])
+  const doorsLine = doorsNow && doorsNow.session === viewed ? doorsNow : null
+  const restartForDoors = () => {
+    if (!viewed || !api.restart || working) return
+    setDoorsNow(null)
+    void api.restart(viewed, 'doors').catch(() => {})
+  }
   const restartHere = () => {
     const session = view?.session
     if (!session || !api.restart || working) return
@@ -567,6 +602,16 @@ export function Sessions({
     const text = `Sessions · ${mark ? `${mark.glyph} ` : ''}${label}${how ? ` · ${how.word}` : ''}`
     return text.length > 56 ? `${text.slice(0, 55).trimEnd()}…` : text
   })()
+  /* Which conversation is this place's own, and whether the one on screen is it. */
+  const titleOf = (session: string) => labels[session] || [...(here?.sessions ?? []), ...(here?.unassigned ?? [])].find((one) => one.id === session)?.label || ''
+  const ownSaid = ownHeader({
+    own: here ? here.own : undefined,
+    usual: here_label,
+    viewing: view?.session ?? null,
+    title: titleOf,
+    unassigned: (here?.unassigned ?? []).map((one) => ({ id: one.id, label: one.label })),
+    working,
+  })
   const items = useMemo<HeaderItemInput[]>(() => {
     if (!offered) return []
     const worded = (row: (typeof offered)[number]) => {
@@ -578,17 +623,35 @@ export function Sessions({
         kind: 'go',
         id: 'sessions',
         /* The corner control's job when the host draws the header and ours is gone: which session is on screen. */
-        label: here_label,
+        label: ownSaid.label ?? here_label,
         options: [...offered.map((row) => ({ id: row.id, label: worded(row) })), { id: 'new', label: 'New session' }, { id: 'list', label: 'All sessions…' }],
       },
+      ...ownSaid.items,
     ]
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [JSON.stringify(offered?.map((row) => [row.id, row.label, row.state ?? ''])), labels, here_label])
+  }, [JSON.stringify(offered?.map((row) => [row.id, row.label, row.state ?? ''])), labels, here_label, JSON.stringify(ownSaid)])
   useEffect(() => {
     hosted?.header(items)
   }, [hosted, items])
   if (hosted) {
     hosted.presses.current = ({ item, value }) => {
+      if (item === MAKE_OWN) {
+        const session = view?.session
+        if (!session || !at || !api.assign) return 'There is no conversation on screen to make this kehikko’s own.'
+        void api.assign(at.projectPath, at.key, session, true, at.kehikkoName).finally(() => setAgain((n) => n + 1))
+        return true
+      }
+      if (item === BACK_OWN) {
+        const own = here?.own
+        if (!own) return 'This kehikko has no conversation of its own.'
+        open(own)
+        return true
+      }
+      if (item === UNASSIGNED) {
+        if (typeof value !== 'string' || !at || !api.assign || !here?.unassigned?.some((one) => one.id === value)) return 'That conversation is not waiting to be assigned any more.'
+        void api.assign(at.projectPath, at.key, value, false, at.kehikkoName).finally(() => setAgain((n) => n + 1))
+        return true
+      }
       if (item !== 'sessions' || typeof value !== 'string') return 'That is not something here to go to.'
       if (value === 'list') {
         setAsking(true)
@@ -646,6 +709,7 @@ export function Sessions({
             onOpen={open}
             onClose={view ? () => setAsking(false) : undefined}
             onEnd={(session) => void api.end(session).finally(() => setTimeout(() => setAgain((n) => n + 1), 150))}
+            onEnableHook={api.enableHook ? () => void api.enableHook!().finally(() => setAgain((n) => n + 1)) : undefined}
             onDetach={(session) => {
               if (!at) return
               if (remembered.at(projectOf(at)).read(at.key) === session) remembered.at(projectOf(at)).keep(at.key, null)
@@ -793,6 +857,26 @@ export function Sessions({
               Dismiss
             </Button>
           </span>
+        </div>
+      )}
+
+      {/* The kehikko's modules changed while this session ran: its tools are the old ones until it restarts. */}
+      {terminal && view && doorsLine && !ended && !cover && (
+        <div className="flex items-center justify-between gap-2 border-t px-2 py-1" role="status" data-doors>
+          <span className="text-muted-foreground min-w-0 text-[11px]">
+            {doorsLine.added.length ? `Restart to load ${doorsLine.added.join(', ')}’s tools.` : ''}
+            {doorsLine.removed.length ? ` ${doorsLine.removed.join(', ')} left this kehikko; its tools stay until a restart.` : ''}
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 shrink-0 px-2 text-xs"
+            disabled={working}
+            title={working ? 'It is working. Restart it when it is idle.' : 'Ends this session and resumes it with the doors of this kehikko now'}
+            onClick={restartForDoors}
+          >
+            Restart
+          </Button>
         </div>
       )}
 

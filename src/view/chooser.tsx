@@ -87,6 +87,7 @@ export function Chooser({
   onEnd,
   onDetach,
   onClose,
+  onEnableHook,
 }: {
   mode: 'ask' | 'sessions' | 'offer'
   listing: Listing
@@ -98,6 +99,8 @@ export function Chooser({
   onEnd: (session: string) => void
   onDetach: (session: string) => void
   onClose?: () => void
+  /** Install the SessionStart hook that reports sessions started outside Kehikot; absent hides the offer. */
+  onEnableHook?: () => void
 }) {
   const [others, setOthers] = useState(false)
   /* Where the keyboard starts: the first row that can be opened. A session that is not on this
@@ -278,6 +281,19 @@ export function Chooser({
           </div>
         )
       })}
+      {onEnableHook && listing.hook === false ? (
+        <p className="text-muted-foreground flex flex-wrap items-center gap-2 px-2 pt-2" data-hook="off">
+          Sessions started outside Kehikot are not reported here.
+          <button
+            type="button"
+            className="hover:bg-background rounded border px-1.5"
+            title="Adds one SessionStart hook to your Claude Code settings (settings.json in ~/.claude, or CLAUDE_CONFIG_DIR): it tells this module a session started, and in which folder. Nothing else in the file changes."
+            onClick={onEnableHook}
+          >
+            Report them
+          </button>
+        </p>
+      ) : null}
     </div>
   )
 }
