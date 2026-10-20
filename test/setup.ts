@@ -23,6 +23,8 @@ process.env.HOME = HOME
 process.env.CLAUDE_CONFIG_DIR = CONFIG
 process.env.KEHIKOT_MODULES_DIR = join(SCRATCH, 'modules')
 process.env.PATH = '/usr/bin:/bin'
+/* No host: a test that wants one stands one in. Port 9 refuses at once. */
+process.env.KEHIKOT_ORIGINS = 'http://127.0.0.1:9'
 delete process.env.KEHIKOT_CLAUDE_INSTALL_LINE
 delete process.env.KEHIKOT_CLAUDE_QUIET_MS
 

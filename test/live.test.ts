@@ -8,7 +8,9 @@ import { listing, type Listing } from '../doors.ts'
 import { CLOSED, Runs, activityRows, sameProject, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
 import { placeKey } from '../place.ts'
 import { PROGRAM, readActive, type Active, type Program, type Recorded } from '../program.ts'
-import { attach, readPlaces, sessionsAt, type NamedPlace } from '../record.ts'
+import { assign, attach, readPlaces, sessionsAt, type NamedPlace } from '../record.ts'
+import type { DoorsAsked, SessionDoor } from '../doorConfig.ts'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 
 /**
  * The fence, and the runs behind it, without a socket or a real pty.
@@ -179,7 +181,7 @@ class Watcher implements Viewer {
 /** Long enough for the emulator's write queue and the promises behind an open to have run. */
 const settle = () => new Promise((done) => setTimeout(done, 25))
 
-function world(options: { found?: string | null; able?: boolean; tells?: boolean; lists?: boolean; names?: boolean; asking?: 'fails'; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number; watchEvery?: number | null } = {}) {
+function world(options: { found?: string | null; able?: boolean; tells?: boolean; lists?: boolean; names?: boolean; configures?: boolean; doors?: (asked: DoorsAsked) => Promise<SessionDoor[] | null>; configBase?: string; asking?: 'fails'; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number; watchEvery?: number | null } = {}) {
   const logged: string[] = []
   const ptys: FakePty[] = []
   /* What the stand-in program holds a record for, by folder. */
@@ -194,7 +196,7 @@ function world(options: { found?: string | null; able?: boolean; tells?: boolean
   const program: Program = {
     ...PROGRAM,
     find: () => ({ file: found, looked: ['/fake/bin'], usual: [] }),
-    supports: async () => ({ ok: options.able ?? true, missing: options.able === false ? '--session-id' : null, tells: options.tells ?? false, lists: options.lists ?? true, names: options.names ?? false }),
+    supports: async () => ({ ok: options.able ?? true, missing: options.able === false ? '--session-id' : null, tells: options.tells ?? false, lists: options.lists ?? true, names: options.names ?? false, configures: options.configures ?? false }),
     /* What the stand-in program says is running, asked every time: a test changes `elsewhere` between two opens. */
     active: async () => {
       asked.count += 1
@@ -222,6 +224,8 @@ function world(options: { found?: string | null; able?: boolean; tells?: boolean
     watchEvery: options.watchEvery ?? null,
     log: (line) => logged.push(line),
     now: () => clock,
+    ...(options.doors ? { doors: options.doors } : {}),
+    ...(options.configBase ? { configBase: options.configBase } : {}),
     screen: headless,
     spawn: (file, args, opts) => {
       const pty = new FakePty(file, args, opts)
@@ -348,7 +352,7 @@ describe('opening a session', () => {
     await w.runs.open(ask(dir, A, keyed), new Watcher())
     const read = readPlaces(dir)
     expect(read.ok && read.value.places).toEqual({
-      'epic=thesis;parts=methods;kehikko=key:4072c9e5': { epic: 'thesis', parts: ['methods'], kehikko: { key: '4072c9e5', id: 3, name: 'writing' }, sessions: [A], current: A },
+      'epic=thesis;parts=methods;kehikko=key:4072c9e5': { epic: 'thesis', parts: ['methods'], kehikko: { key: '4072c9e5', id: 3, name: 'writing' }, sessions: [A], current: A, own: A },
     })
     /* The host renumbers it: the same place, the same session, and only the note changes. */
     w.ptys[0]!.ends(0)
@@ -2274,5 +2278,118 @@ describe('the background sessions of a project’s places that nobody has a view
     const after = w.asked.count
     await new Promise((done) => setTimeout(done, 30))
     expect(w.asked.count).toBe(after)
+  })
+})
+
+describe('a conversation’s place, on every Kehikot door (protocol 2.4.0)', () => {
+  const KEYED = { epic: 'thesis', parts: ['methods'], kehikko: { key: 'k1a2b3c4' }, kehikkoName: 'writing' }
+  const doors = (asked: DoorsAsked[]) => async (one: DoorsAsked): Promise<SessionDoor[]> => {
+    asked.push(one)
+    return [
+      { module: 'kehikko', name: 'kehikko', url: `http://127.0.0.1:4180/mcp?kehikot-place=${one.token}`, transport: 'http' },
+      { module: 'kehikot.notes', name: 'notes', url: `http://127.0.0.1:4600/mcp?kehikot-place=${one.token}`, transport: 'http' },
+    ]
+  }
+
+  test('a new session is given its doors in a 0600 file, last on its command line, and the token names its place', async () => {
+    const dir = project()
+    const base = project()
+    const asked: DoorsAsked[] = []
+    const w = world({ configures: true, doors: doors(asked), configBase: base })
+    const run = (await w.runs.open(ask(dir, null, KEYED), new Watcher())) as Run
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toMatchObject({ projectPath: dir, kehikko: 'k1a2b3c4' })
+    const args = w.ptys[0]!.args
+    expect(args.slice(0, 2)).toEqual(['--session-id', B])
+    expect(args.at(-2)).toBe('--mcp-config')
+    const file = args.at(-1)!
+    expect(statSync(file).mode & 0o777).toBe(0o600)
+    expect(statSync(join(file, '..')).mode & 0o777).toBe(0o700)
+    const config = JSON.parse(readFileSync(file, 'utf8'))
+    expect(Object.keys(config.mcpServers)).toEqual(['kehikko', 'notes'])
+    expect(config.mcpServers.kehikko.url).toContain(`kehikot-place=${run.token}`)
+    /* The token is not on the command line. */
+    expect(args.join(' ')).not.toContain(run.token!)
+    /* Before Claude Code has recorded it, the place it was started at. */
+    expect(w.runs.placeOf(run.token!, dir)).toEqual({ conversation: B, epic: 'thesis', parts: ['methods'], kehikko: 'k1a2b3c4' })
+    /* Once it exists it is born here: its home, this place's own, and its token. */
+    w.records(dir, B, 'tighten the methods')
+    w.later(5_000)
+    w.ptys[0]!.says('…\r\n')
+    await settle()
+    const read = readPlaces(dir)
+    expect(read.ok && read.value.sessions[B]).toMatchObject({ home: placeKey(KEYED), token: run.token })
+    expect(read.ok && read.value.places[placeKey(KEYED)]?.own).toBe(B)
+    w.ptys[0]!.ends(0)
+    await settle()
+    expect(existsSync(file)).toBe(false)
+    /* With nothing running, the record answers. */
+    expect(w.runs.placeOf(run.token!, dir)).toEqual({ conversation: B, epic: 'thesis', parts: ['methods'], kehikko: 'k1a2b3c4' })
+    expect(w.runs.placeOf('x'.repeat(40), dir)).toBeNull()
+  })
+
+  test('a resumed conversation keeps its token, and is answered from where it BELONGS, not where it was opened', async () => {
+    const dir = project()
+    const OTHER = { ...KEYED, parts: ['results'] }
+    const asked: DoorsAsked[] = []
+    const w = world({ configures: true, doors: doors(asked), configBase: project() })
+    w.records(dir, A, 'from methods')
+    assign(dir, KEYED, A, { own: true })
+    await w.runs.open(ask(dir, A, KEYED), new Watcher())
+    const first = asked[0]!.token
+    w.ptys[0]!.ends(0)
+    await settle()
+    /* Opened at another place: listed there, and still belonging to the first. */
+    const run = (await w.runs.open(ask(dir, A, OTHER), new Watcher())) as Run
+    expect(run.token).toBe(first)
+    expect(w.runs.placeOf(first, dir)).toMatchObject({ conversation: A, parts: ['methods'] })
+    const read = readPlaces(dir)
+    expect(read.ok && read.value.sessions[A]?.home).toBe(placeKey(KEYED))
+    expect(read.ok && read.value.places[placeKey(OTHER)]?.sessions).toEqual([A])
+    expect(read.ok && read.value.places[placeKey(OTHER)]?.own).toBeUndefined()
+  })
+
+  test('a copy that cannot take --mcp-config, or no host, starts exactly as before', async () => {
+    const dir = project()
+    const w = world({ configures: false })
+    await w.runs.open(ask(dir, null, KEYED), new Watcher())
+    expect(w.ptys[0]!.args).toEqual(['--session-id', B])
+    const none = world({ configures: true, doors: async () => null })
+    await none.runs.open(ask(project(), null, KEYED), new Watcher())
+    expect(none.ptys[0]!.args).toEqual(['--session-id', B])
+    expect(none.logged.join('\n')).toContain('no host gave this session its doors')
+  })
+
+  test('a module added to the kehikko is a door the running session lacks', async () => {
+    const dir = project()
+    let notes = false
+    const w = world({
+      configures: true,
+      configBase: project(),
+      doors: async (one) => [
+        { module: 'kehikko', name: 'kehikko', url: `http://127.0.0.1:4180/mcp?kehikot-place=${one.token}`, transport: 'http' },
+        ...(notes ? [{ module: 'kehikot.notes', name: 'notes', url: `http://127.0.0.1:4600/mcp?kehikot-place=${one.token}`, transport: 'http' as const }] : []),
+      ],
+    })
+    await w.runs.open(ask(dir, null, KEYED), new Watcher())
+    expect(await w.runs.doorsChanged(B)).toEqual({ added: [], removed: [] })
+    notes = true
+    expect(await w.runs.doorsChanged(B)).toEqual({ added: ['notes'], removed: [] })
+    /* Restarted for its doors: allowed in its own folder, refused while working. */
+    expect(w.runs.restartIn(B, 'doors')).toBe(true)
+  })
+
+  test('a session reported started outside is listed as not yet assigned, and asks in the Inbox', async () => {
+    const dir = project()
+    const w = world()
+    expect(w.runs.sighted(dir, A, 'hook')).toBe(true)
+    /* Twice is once. */
+    expect(w.runs.sighted(dir, A, 'hook')).toBe(false)
+    const rows = w.runs.activity(dir)
+    expect(rows[0]).toMatchObject({ id: `unassigned:${A}`, state: 'attention', project: dir })
+    expect(activityItemsSchema.safeParse(rows.map(({ project: _p, ...one }) => one)).success).toBe(true)
+    /* Assigned: it belongs here, and asks no more. */
+    assign(dir, KEYED, A)
+    expect(w.runs.activity(dir).some((one) => one.id === `unassigned:${A}`)).toBe(false)
   })
 })

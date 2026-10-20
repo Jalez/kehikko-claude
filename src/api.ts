@@ -22,7 +22,16 @@ export interface Api {
    * Resume a running session in its project's new folder, because a person pressed that after the
    * folder was renamed: the server ends it and its views open it again. Refused while it is working.
    */
-  restart?(session: string): Promise<void>
+  restart?(session: string, why?: 'moved' | 'doors'): Promise<void>
+  /**
+   * A person's say about where a conversation belongs: assign one that belongs nowhere to this
+   * place, or — `own` — make the one on screen this place's own. Rewrites the record.
+   */
+  assign?(projectPath: string, key: string, session: string, own: boolean, kehikkoName?: string): Promise<void>
+  /** Which doors a running session would be given now that it was not; null when not known. */
+  doors?(session: string): Promise<{ added: string[]; removed: string[] } | null>
+  /** Install Claude Code's SessionStart hook that reports sessions started outside Kehikot; says the file written. */
+  enableHook?(): Promise<{ file: string; already: boolean }>
   /** Take a session off a place. The session itself is kept. */
   detach(projectPath: string, key: string, session: string): Promise<void>
   /**
@@ -32,7 +41,7 @@ export interface Api {
    * list (on arrival and on every change). Returns the function that
    * stops following.
    */
-  feed?(notices: boolean, heard: { state(stated: Stated): void; notice(notice: Notice): void; activity?(items: ActivityRow[]): void }, project?: string | null): () => void
+  feed?(notices: boolean, heard: { state(stated: Stated): void; notice(notice: Notice): void; activity?(items: ActivityRow[]): void; sessions?(): void }, project?: string | null): () => void
 }
 
 export const api: Api = {
@@ -45,8 +54,18 @@ export const api: Api = {
   async end(session) {
     answered(await ask('./api/end', { body: { session } }))
   },
-  async restart(session) {
-    answered(await ask('./api/restart', { body: { session } }))
+  async restart(session, why = 'moved') {
+    answered(await ask('./api/restart', { body: { session, why } }))
+  },
+  async assign(projectPath, key, session, own, kehikkoName) {
+    answered(await ask('./api/assign', { body: { projectPath, key, session, own, ...(kehikkoName ? { names: { kehikko: kehikkoName } } : {}) } }))
+  },
+  async doors(session) {
+    return answered(await ask<{ ok: true; changed: { added: string[]; removed: string[] } | null }>('./api/doors', { query: { session }, ticket: true })).changed
+  },
+  async enableHook() {
+    const said = answered(await ask<{ ok: true; file: string; already: boolean }>('./api/hook', { body: {} }))
+    return { file: said.file, already: said.already }
   },
   async detach(projectPath, key, session) {
     answered(await ask('./api/detach', { body: { projectPath, key, session } }))
@@ -58,10 +77,12 @@ export const api: Api = {
           ? heard.notice(event as Notice)
           : name === 'activity'
             ? heard.activity?.((event as { items: ActivityRow[] }).items)
-            : heard.state(event as Stated),
+            : name === 'sessions'
+              ? heard.sessions?.()
+              : heard.state(event as Stated),
       /* An EventSource sends no header, so the ticket rides the query (see `stream` in doors.ts). */
       /* The activity list is of the project the page is framed in only: a host files it under that one. */
-      { query: { ticket: ticket() ?? '', notices: notices ? '1' : '0', ...(project ? { project } : {}) }, events: ['notice', 'activity'] },
+      { query: { ticket: ticket() ?? '', notices: notices ? '1' : '0', ...(project ? { project } : {}) }, events: ['notice', 'activity', 'sessions'] },
     )
   },
 }

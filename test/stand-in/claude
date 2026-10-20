@@ -48,6 +48,14 @@
 # STANDIN_MUTE=1 makes it one that takes a session id and has no --settings.
 # STANDIN_NOAGENTS=1 makes it one from before `agents --json` and `attach`:
 # neither is in its help, and asking for either is an error.
+# STANDIN_NOMCP=1 makes it one without `--mcp-config` in its help.
+#
+# Given `--mcp-config <file>` (last on its command line, as the module passes
+# it) it says so in its `args:` line, and the typed line
+#   /mcp <server> <tool> [json arguments]
+# calls that server's tool the way Claude Code would: `initialize` (keeping the
+# `Mcp-Session-Id` it is given), then `tools/call`, at the server's URL from the
+# file — so a test sees which place the door answered about.
 
 if [ "$1" = "--help" ]; then
   echo "Usage: claude [options] [command] [prompt]"
@@ -55,6 +63,7 @@ if [ "$1" = "--help" ]; then
     echo "  -r, --resume [value]     Resume a conversation by session ID"
     echo "  --session-id <uuid>      Use a specific session ID for the conversation"
     [ -z "$STANDIN_MUTE" ] && echo "  --settings <file-or-json>  Path to a settings JSON file or a JSON string to load additional settings from"
+    [ -z "$STANDIN_NOMCP" ] && echo "  --mcp-config <configs...>  Load MCP servers from JSON files or strings (space-separated)"
     if [ -z "$STANDIN_NOAGENTS" ]; then
       echo "Commands:"
       echo "  agents [options]         Manage background agents"
@@ -118,6 +127,13 @@ if [ "$1" = "attach" ]; then
   set -- --attached "$(cat "$jobs/$2/session")"
 fi
 
+mcpconfig=""
+prev=""
+for arg in "$@"; do
+  [ "$prev" = "--mcp-config" ] && mcpconfig="$arg"
+  prev="$arg"
+done
+
 folder=$(pwd -P | sed 's/[^a-zA-Z0-9]/-/g')
 dir="$config/projects/$folder"
 mode="$1"
@@ -156,7 +172,7 @@ if [ -n "$attached" ]; then
   # Ctrl+Z leaves the view and the session runs on, as measured.
   trap 'echo "stand-in claude: left the view; the session keeps running"; exit 0' TSTP
 else
-  echo "args: $1 $2${settings:+ --settings (${#settings} characters)}"
+  echo "args: $1 $2${settings:+ --settings (${#settings} characters)}${mcpconfig:+ --mcp-config $mcpconfig}"
   # Running, and said to be: what `agents --json` lists, for as long as this process lives.
   mkdir -p "$running"
   printf '{"pid":%s,"cwd":"%s","kind":"interactive","startedAt":%s000,"sessionId":"%s","name":"stand-in","status":"idle"}' "$$" "$(pwd -P)" "$(date +%s)" "$id" > "$running/$$.json"
@@ -174,6 +190,17 @@ while printf '> ' && IFS= read -r line; do
   [ "$line" = "/exit" ] && { quiet; echo "bye"; exit 0; }
   [ "$line" = "/interrupt" ] && { quiet; echo "interrupted"; continue; }
   [ -z "$line" ] && continue
+  case "$line" in
+    "/mcp "*)
+      set -- $line
+      server="$2"; tool="$3"; shift 3; args="${*:-{\}}"
+      url=$(sed -n 's/.*"'"$server"'":{"type":"[a-z]*","url":"\([^"]*\)".*/\1/p' "$mcpconfig" 2>/dev/null)
+      [ -n "$url" ] || url="$STANDIN_MCP_URL"
+      sid=$(curl -s -D - -o /dev/null -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' --data '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"claude-code","title":"Claude Code","version":"stand-in"}}}' "$url" | tr -d '\r' | sed -n 's/^[Mm]cp-[Ss]ession-[Ii]d: //p')
+      curl -s -H 'content-type: application/json' ${sid:+-H "mcp-session-id: $sid"} --data '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"'"$tool"'","arguments":'"$args"'}}' "$url"
+      echo
+      continue ;;
+  esac
   mkdir -p "$dir"
   safe=$(printf '%s' "$line" | sed 's/\\/\\\\/g; s/"/\\"/g')
   printf '{"type":"user","isSidechain":false,"sessionId":"%s","cwd":"%s","message":{"role":"user","content":"%s"}}\n' "$id" "$(pwd -P)" "$safe" >> "$record"

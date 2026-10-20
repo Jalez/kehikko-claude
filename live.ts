@@ -10,7 +10,9 @@ import { mintTicket, sameTicket } from 'kehikot-module-protocol/serve'
 import { typedByPerson } from './input.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, sortedParts, type Kehikko } from './place.ts'
 import { PROGRAM, headOf, home, sessionName, type Active, type Program, type Running, type State } from './program.ts'
-import { attach, follow, note, projectRoot, readPlaces, recordedIds, type NamedPlace, type PlaceEntry, type Places } from './record.ts'
+import { assign, attach, born, byToken, follow, homeOf, note, projectRoot, readPlaces, recordedIds, sighted, tokenFor, unassigned, type NamedPlace, type PlaceEntry, type Places } from './record.ts'
+import { freshToken, hostDoors, removeConfig, writeConfig, type DoorsAsked, type SessionDoor } from './doorConfig.ts'
+import { readPlaceKey } from './place.ts'
 
 /**
  * The sessions that are running, and the socket a page watches one through.
@@ -566,6 +568,25 @@ export interface Run {
    */
   looking: Set<Viewer>
   ended: boolean
+  /**
+   * The conversation's place token (protocol 2.4.0), on every Kehikot door it
+   * was given; null for a copy that cannot be given doors, and for a view of a
+   * background session, which was started elsewhere.
+   */
+  token: string | null
+  /** The doors it was started with, by module id: what "Restart to load …" compares against. */
+  doors: SessionDoor[]
+  /** Its `--mcp-config` file, removed when the process ends. */
+  config: string | null
+}
+
+/** A conversation's place, as this module's record says it: what `/api/kehikot/place` answers. */
+export interface RecordedPlace {
+  conversation: string
+  epic: string | null
+  parts: string[]
+  /** The kehikko's key; null for a place with none, or filed under an older host's row number. */
+  kehikko: string | null
 }
 
 export type Refusal = { code: number; why: string; elsewhere?: Elsewhere }
@@ -820,6 +841,8 @@ export interface Follower {
   notice(notice: Notice): void
   /** The whole activity list, when it changes and once on arrival. */
   activity?(rows: ActivityRow[]): void
+  /** A project's list of sessions changed under the page: one was reported started, not yet assigned. */
+  sessions?(project: string): void
 }
 
 export interface RunsOptions {
@@ -842,6 +865,10 @@ export interface RunsOptions {
   watchEvery?: number | null
   now?: () => number
   log?: (line: string) => void
+  /** Asks the host for a session's doors (`hostDoors`); a test stands one in. */
+  doors?: (asked: DoorsAsked) => Promise<SessionDoor[] | null>
+  /** Where `--mcp-config` files are written; this user's temporary folder by default. */
+  configBase?: string
 }
 
 /**
@@ -1165,19 +1192,83 @@ export class Runs {
   }
 
   /**
+   * A conversation this module did not start was reported in a project — by
+   * Claude Code's SessionStart hook or `agents --json`. Recorded as not yet
+   * assigned (one this module runs, or one that belongs somewhere, is left as
+   * it is), and every page following that project reads its list again.
+   */
+  sighted(projectPath: string, id: string, via: 'hook' | 'agents'): boolean {
+    if (!this.program.isId(id)) return false
+    if ([...this.runs.values()].some((run) => run.id === id || run.settled === id)) return false
+    const root = projectRoot(projectPath)
+    if (!root.ok) return false
+    const before = readPlaces(root.value)
+    const written = sighted(root.value, id, via)
+    if (!written.ok) return false
+    const was = before.ok ? JSON.stringify(before.value.sessions[id] ?? null) : ''
+    if (JSON.stringify(written.value.sessions[id] ?? null) === was) return false
+    this.log(`claude: ${id} was reported started in ${root.value} (${via}); it is listed there as not yet assigned`)
+    this.projects.add(root.value)
+    this.changed()
+    for (const follower of this.followers) if (!follower.project || follower.project === root.value) follower.sessions?.(root.value)
+    return true
+  }
+
+  /**
+   * The place a token's conversation belongs to, as the record says — what a
+   * Kehikot door is told (`/api/kehikot/place`). A conversation running here
+   * that the program has not recorded yet belongs to the place it was started
+   * at. Null for a token nothing here gave out.
+   */
+  placeOf(token: string, projectPath: string | null): RecordedPlace | null {
+    const run = [...this.runs.values()].find((one) => one.token === token && !one.ended)
+    const root = projectRoot(run?.projectPath ?? projectPath)
+    const read = root.ok ? readPlaces(root.value) : null
+    const recorded = read?.ok ? read.value : null
+    const said = (conversation: string, key: string | null): RecordedPlace | null => {
+      const place = key ? readPlaceKey(key) : null
+      if (!place) return null
+      return { conversation, epic: place.epic, parts: place.parts, kehikko: place.kehikko && 'key' in place.kehikko ? place.kehikko.key : null }
+    }
+    if (run) {
+      const conversation = run.settled ?? run.id
+      const home = recorded && run.settled ? homeOf(recorded, run.settled) : null
+      return said(conversation, home ?? (run.place ? placeKey(run.place) : run.settled ? null : run.key))
+    }
+    const found = recorded ? byToken(recorded, token) : null
+    return found ? said(found.id, found.home) : null
+  }
+
+  /**
+   * Which doors a running session would be given now that it was not, and
+   * which it has that its kehikko no longer holds — by name, for the line that
+   * offers a restart. Null when it was given none, or the host does not answer.
+   */
+  async doorsChanged(id: string): Promise<{ added: string[]; removed: string[] } | null> {
+    const run = this.find(id)
+    if (!run?.token || !run.config) return null
+    const kehikko = run.at?.kehikko && 'key' in run.at.kehikko ? run.at.kehikko.key : null
+    const now = await (this.options.doors ?? hostDoors)({ projectPath: run.projectPath, projectId: run.projectId, token: run.token, kehikko }).catch(() => null)
+    if (!now) return null
+    const had = new Set(run.doors.map((door) => door.name))
+    const has = new Set(now.map((door) => door.name))
+    return { added: [...has].filter((name) => !had.has(name)), removed: [...had].filter((name) => !has.has(name)) }
+  }
+
+  /**
    * End a session whose project's folder was renamed under it, so that it is resumed in the new
    * folder: only on a person's press, and never while it is working. Its viewers are closed with
    * `CLOSED.moved` and open it again, which resumes the same session with the new folder as its
    * working directory. A sentence when it is not done.
    */
-  restartIn(id: string): true | string {
+  restartIn(id: string, why: 'moved' | 'doors' = 'moved'): true | string {
     const run = this.find(id)
     if (!run) return 'That session is not running.'
-    if (run.cwd === run.projectPath) return 'That session already runs in its project’s folder.'
+    if (why === 'moved' && run.cwd === run.projectPath) return 'That session already runs in its project’s folder.'
     if (run.joined) return 'That is a view of a session running in the background: it runs where it was started.'
     if (run.state === 'working') return 'It is working. Restart it when it is idle.'
     run.restarting = true
-    this.log(`claude: ${run.settled ?? run.id} is ended by a person to be resumed in ${run.projectPath}`)
+    this.log(`claude: ${run.settled ?? run.id} is ended by a person to be resumed ${why === 'doors' ? 'with the doors of its kehikko now' : `in ${run.projectPath}`}`)
     kill(run.pty)
     return true
   }
@@ -1314,9 +1405,35 @@ export class Runs {
     const tells = !joined && port !== null && (await this.program.supports(found.file)).tells
     const secret = tells ? randomBytes(24).toString('hex') : null
     const name = (await this.program.supports(found.file)).names ? placeName(projectPath, asked.place) : ''
+    /* The conversation's place, on every Kehikot door it is given (see `doorConfig.ts`). A copy
+       that cannot take `--mcp-config` — or no host answering — starts exactly as before. */
+    const projectId = asked.projectId ?? projectIdAt(projectPath)
+    let token: string | null = null
+    let doors: SessionDoor[] = []
+    let config: string | null = null
+    if (!joined && (await this.program.supports(found.file)).configures) {
+      token = (settled ? tokenFor(projectPath, settled, freshToken) : null) ?? freshToken()
+      const kehikko = asked.place.kehikko && 'key' in asked.place.kehikko ? asked.place.kehikko.key : null
+      const got = await (this.options.doors ?? hostDoors)({ projectPath, projectId, token, kehikko }).catch(() => null)
+      if (got?.length) {
+        try {
+          config = writeConfig(got, this.options.configBase)
+          doors = got
+        } catch (error) {
+          this.log(`claude: the session's doors could not be written — ${error instanceof Error ? error.message : String(error)}`)
+        }
+      } else {
+        this.log('claude: no host gave this session its doors; it starts with the agent’s own configuration')
+      }
+    }
     const args = joined
       ? this.program.attach(joined.handle!)
-      : [...(settled ? this.program.resume(settled, name || undefined) : this.program.fresh(id, name || undefined)), ...(tells ? this.program.reports(tellLine) : [])]
+      : [
+          ...(settled ? this.program.resume(settled, name || undefined) : this.program.fresh(id, name || undefined)),
+          ...(tells ? this.program.reports(tellLine) : []),
+          /* Last: the flag takes every word after it until the next flag. */
+          ...(config ? ['--mcp-config', config] : []),
+        ]
     let pty: Pty
     let screen: Screen
     try {
@@ -1334,6 +1451,7 @@ export class Runs {
         },
       })
     } catch (error) {
+      removeConfig(config)
       const why = error instanceof Error ? error.message : String(error)
       this.log(`claude: could not start ${found.file} in ${projectPath} — ${why}`)
       return { code: CLOSED.failed, why: `${this.program.name} could not be started on this machine.` }
@@ -1345,7 +1463,7 @@ export class Runs {
       settled,
       projectPath,
       cwd: projectPath,
-      projectId: asked.projectId ?? projectIdAt(projectPath),
+      projectId,
       restarting: false,
       place: asked.place,
       at: asked.place,
@@ -1374,6 +1492,9 @@ export class Runs {
       joining: new Map(),
       looking: new Set(),
       ended: false,
+      token,
+      doors,
+      config,
     }
     this.runs.set(id, run)
     /* A view of it now says it: the row listed for it while nobody had one goes. */
@@ -1402,7 +1523,14 @@ export class Runs {
     run.at = place
     this.changed()
     if (!run.settled) return
-    const written = attach(run.projectPath, place, run.settled, { label: run.label, lastActive: this.now() })
+    /* Opened here: listed here, and the last opened here. It does not become this place's — that
+       is a person's say ("Make this the kehikko's own") — unless it belonged nowhere, when a person
+       picking it at this place is the say. */
+    const read = readPlaces(run.projectPath)
+    const homeless = read.ok && !homeOf(read.value, run.settled)
+    const written = homeless
+      ? assign(run.projectPath, place, run.settled, { label: run.label, lastActive: this.now() })
+      : attach(run.projectPath, place, run.settled, { label: run.label, lastActive: this.now() })
     if (!written.ok) this.log(`claude: ${written.error}`)
   }
 
@@ -1427,6 +1555,7 @@ export class Runs {
     })
     run.pty.onExit(({ exitCode }) => {
       run.ended = true
+      removeConfig(run.config)
       if (run.idle) clearTimeout(run.idle)
       this.runs.delete(run.id)
       /* Gone: no state to show for it, and nothing held about it is still true. */
@@ -1450,7 +1579,8 @@ export class Runs {
     const known = (await this.program.sessions(run.projectPath, [run.settled])).find((one) => one.id === run.settled)
     const label = known?.label ?? ''
     if (run.place) {
-      const written = attach(run.projectPath, run.place, run.settled, { label, lastActive: known?.lastActive })
+      /* Started here: it belongs here from its first moment, with its token. */
+      const written = born(run.projectPath, run.place, run.settled, run.token, { label, lastActive: known?.lastActive })
       if (!written.ok) this.log(`claude: ${written.error}`)
       run.place = null
     } else {
@@ -1624,6 +1754,11 @@ export class Runs {
   }
 
   /** The activity list, whole, to every follower — but only when it differs from the last one. */
+  /** The record changed under the lists (a person assigned a conversation): the activity lists are said again. */
+  recorded(): void {
+    this.changed()
+  }
+
   private changed(): void {
     for (const follower of this.followers) {
       const rows = this.activity(follower.project ?? null)
@@ -1636,7 +1771,26 @@ export class Runs {
 
   /** The activity list as it stands — one project's, or every project's (for a test, and for a page that has just arrived). */
   activity(project: string | null = null): ActivityRow[] {
-    return activityRows(this.runs.values(), project, this.unviewed.values())
+    const rows = activityRows(this.runs.values(), project, this.unviewed.values())
+    /* A conversation reported started that belongs to no place yet needs the person: one row each,
+       so the Inbox asks, and the container's header has the press that answers. */
+    const asking: ActivityRow[] = []
+    for (const root of project !== null ? [project] : this.projects) {
+      const read = readPlaces(root)
+      if (!read.ok) continue
+      for (const id of unassigned(read.value)) {
+        const kept = read.value.sessions[id]
+        asking.push({
+          id: `unassigned:${id}`,
+          state: 'attention',
+          label: clip(`A Claude Code session belongs to no kehikko yet${kept?.label ? `: ${kept.label}` : ''}`, ACTIVITY_LABEL),
+          since: Date.parse(kept?.seen?.at ?? '') || this.now(),
+          detail: 'Started outside Kehikot. Assign it from the Claude container’s header: Not yet assigned.',
+          project: root,
+        })
+      }
+    }
+    return [...asking, ...rows].slice(0, ACTIVITY_ITEMS)
   }
 
   /**
@@ -1861,6 +2015,9 @@ export class Runs {
       joining: new Map(),
       looking: new Set(),
       ended: false,
+      token: null,
+      doors: [],
+      config: null,
     }
     this.runs.set(INSTALL, run)
     this.log(`claude: installing, on a press in the page — ${line}`)
@@ -1884,7 +2041,11 @@ export class Runs {
 
   /** End everything: this process is stopping, and nothing it started may outlive it. */
   endAll(): void {
-    for (const run of this.runs.values()) kill(run.pty)
+    for (const run of this.runs.values()) {
+      kill(run.pty)
+      /* This process is going: the session's doors file goes now, not when the pty says it exited. */
+      removeConfig(run.config)
+    }
   }
 }
 

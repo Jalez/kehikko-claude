@@ -1,11 +1,12 @@
 import { PROJECT_ID, doorContext } from 'kehikot-module-protocol'
-import { establishBuild, refuseTicket, sameTicket, type Reply, type Stream } from 'kehikot-module-protocol/serve'
+import { establishBuild, hostHasProject, refuseTicket, sameTicket, type Reply, type Stream } from 'kehikot-module-protocol/serve'
 
 import { TICKET, elsewhereOf, sameProject, theRuns, type Elsewhere, type Run, type Runs } from './live.ts'
 import { ID, MANIFEST, VERSION } from './manifest.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, readPlaceKey, type Place } from './place.ts'
 import { PROGRAM, headOf, home, type Program, type Recorded, type Running, type State } from './program.ts'
-import { WHERE, detach, follow, projectRoot, readPlaces, recordedIds, rekey, sessionsAt, type Places } from './record.ts'
+import { PLACE_TOKEN, WHERE, assign, detach, follow, homeOf, ownOf, projectRoot, readPlaces, recordedIds, rekey, sessionsAt, unassigned, type Places } from './record.ts'
+import { enable, enabled, hookCommand, settingsFile } from './hook.ts'
 
 /**
  * The HTTP doors, as one function: `answer` takes a request and returns a
@@ -47,6 +48,9 @@ import { WHERE, detach, follow, projectRoot, readPlaces, recordedIds, rekey, ses
  */
 
 export { TICKET }
+
+/** Whether the host holds a folder as a project: the protocol's question, here so a test can stand a host in. */
+export const hostCheck = { has: (folder: string) => hostHasProject(folder) }
 
 /** What this process is built from, said in the manifest, at `/healthz`, in the page and on every answer. */
 export const BUILD = establishBuild({ version: VERSION, dir: import.meta.dirname })
@@ -131,6 +135,17 @@ export interface Listing {
   sessions: Row[]
   /** The one last open here, which opens directly. Null, or absent, when the place has none. */
   current?: string | null
+  /** This place's OWN conversation: the one its frame names as its own. Null when it has none. */
+  own?: string | null
+  /** Where each listed conversation belongs, by id, when it belongs to another place: that place in a few words. */
+  homes?: Record<string, string>
+  /**
+   * The project's conversations that belong to no place: reported started by Claude Code's hook,
+   * or running (`agents --json`) in this folder with no record. Each can be assigned here.
+   */
+  unassigned?: Row[]
+  /** Whether sessions started outside Kehikot are reported here (the SessionStart hook is installed). */
+  hook?: boolean
   /**
    * The project's other sessions: they belong to no place, or to another.
    * The ones another place of this epic holds first (`near`), then the rest,
@@ -250,6 +265,17 @@ export async function listing(
   /* What has been carried on elsewhere is not offered beside where it went. */
   const held = all.filter((one) => !(one.next ?? []).some((next) => known.has(next)))
 
+  /* A session running in this folder that nothing here started and no place holds is a fact
+     about this project too: listed as not yet assigned, never guessed into a place. */
+  if (running.known) {
+    for (const one of running.active) {
+      if (one.cwd !== root.value || live.some((run) => run.id === one.session || run.settled === one.session)) continue
+      if (!homeOf(read.value, one.session)) runs.sighted(root.value, one.session, 'agents')
+    }
+    const again = readPlaces(root.value)
+    if (again.ok) read = again
+  }
+
   const row = (id: string): Row => {
     const run = live.find((one) => one.id === id || one.settled === id)
     const kept = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id] : undefined
@@ -295,6 +321,18 @@ export async function listing(
       const entry = Object.hasOwn(read.value.places, key) ? read.value.places[key] : undefined
       return entry?.current && here.includes(entry.current) ? entry.current : null
     })(),
+    own: (() => {
+      const own = ownOf(read.value, key)
+      return own && here.includes(own) ? own : null
+    })(),
+    homes: Object.fromEntries(
+      here.flatMap((id) => {
+        const home = homeOf(read.value, id)
+        return home && home !== key && Object.hasOwn(read.value.places, home) ? [[id, placeSaid(read.value.places[home]!)]] : []
+      }),
+    ),
+    unassigned: unassigned(read.value).filter((id) => !here.includes(id)).map(row),
+    hook: enabled(),
     others: ordered(held, here, key, read.value).map(({ one, near }) => ({ ...row(one.id), ...(near.length ? { near } : {}) })),
     running: live.map((run) => ({
       id: run.settled ?? run.id,
@@ -536,6 +574,27 @@ export async function answer(
     return took ? { status: 204, body: null } : bad('that is not a running session’s own report', 403)
   }
 
+  /* What this module's record says about a place token (protocol 2.4.0): asked by the host, for
+     a Kehikot door a session called with it. A program's door, like `/api/state`: the token is a
+     pointer to a record, and grants nothing. */
+  if (path === '/api/kehikot/place' && method === 'GET') {
+    const token = query.get('kehikot-place') ?? ''
+    if (!PLACE_TOKEN.test(token)) return ok({ ok: true, place: null })
+    return ok({ ok: true, place: theRuns().placeOf(token, query.get('project')) })
+  }
+
+  /* Claude Code's SessionStart hook, through `started.sh`: a session started somewhere, in a
+     folder. Listed at once in that project as not yet assigned — when the host holds the folder
+     as a project. A program's door; nothing it says assigns anything. */
+  if (path === '/api/sessions/started' && method === 'POST') {
+    const id = typeof body?.session_id === 'string' ? body.session_id : ''
+    const cwd = typeof body?.cwd === 'string' && body.cwd.length <= 4096 ? body.cwd : ''
+    if (!PROGRAM.isId(id) || !cwd) return bad('that is not a session start')
+    const root = projectRoot(cwd)
+    if (!root.ok || !(await hostCheck.has(root.value))) return ok({ ok: true, listed: false })
+    return ok({ ok: true, listed: theRuns().sighted(root.value, id, 'hook') })
+  }
+
   /* Every other door under /api, the read included: see "Reads carry the ticket too". */
   const refused = refuseTicket(ticket, TICKET)
   if (refused) return refused
@@ -573,8 +632,38 @@ export async function answer(
   if (path === '/api/restart' && method === 'POST') {
     const id = typeof body?.session === 'string' ? body.session : ''
     if (!PROGRAM.isId(id)) return bad('that is not a session id')
-    const done = theRuns().restartIn(id)
+    const done = theRuns().restartIn(id, body?.why === 'doors' ? 'doors' : 'moved')
     return done === true ? ok({ ok: true }) : bad(done, 409)
+  }
+
+  /* A person's say about where a conversation belongs: "Assign to this kehikko" for one that
+     belongs nowhere, "Make this the kehikko's own" for one being viewed here (`own`). */
+  if (path === '/api/assign' && method === 'POST') {
+    const id = typeof body?.session === 'string' ? body.session : ''
+    const key = typeof body?.key === 'string' ? body.key : ''
+    const place = readPlaceKey(key)
+    if (!PROGRAM.isId(id)) return bad('that is not a session id')
+    if (!place) return bad('that is not a place')
+    const names = (typeof body?.names === 'object' && body.names !== null ? body.names : {}) as { kehikko?: unknown }
+    const written = assign(typeof body?.projectPath === 'string' ? body.projectPath : null, { ...place, ...(typeof names.kehikko === 'string' ? { kehikkoName: names.kehikko.slice(0, 120) } : {}) }, id, { own: body?.own === true })
+    if (written.ok) theRuns().recorded()
+    return written.ok ? ok({ ok: true }) : bad(written.error)
+  }
+
+  /* Whether sessions started outside Kehikot are reported, and the press that makes them so. */
+  if (path === '/api/hook' && method === 'GET') {
+    return ok({ ok: true, enabled: enabled(), file: settingsFile(), command: hookCommand() })
+  }
+  if (path === '/api/hook' && method === 'POST') {
+    const done = enable()
+    return done.ok ? ok(done) : bad(done.error, 409)
+  }
+
+  /* Which doors a running session would be given now that it was not: the line offering a restart. */
+  if (path === '/api/doors' && method === 'GET') {
+    const id = query.get('session') ?? ''
+    if (!PROGRAM.isId(id)) return bad('that is not a session id')
+    return ok({ ok: true, changed: await theRuns().doorsChanged(id) })
   }
 
   /* Take a session off a place. The session is kept, and so is its transcript:
@@ -618,6 +707,7 @@ export const stream: Stream = (method, path, query, emit, ticket) => {
     state: (stated) => emit(stated),
     notice: (notice) => emit(notice, 'notice'),
     activity: (items) => emit({ items }, 'activity'),
+    sessions: (project) => emit({ project }, 'sessions'),
   })
   return { close }
 }
