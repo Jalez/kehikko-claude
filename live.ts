@@ -8,9 +8,9 @@ import { PROJECT_ID, projectFile, readProjectFile } from 'kehikot-module-protoco
 import { mintTicket, sameTicket } from 'kehikot-module-protocol/serve'
 
 import { typedByPerson } from './input.ts'
-import { isKehikkoKey, placeKey, sortedParts, type Kehikko } from './place.ts'
+import { isKehikkoKey, kehikkoOf, placeKey, sortedParts, type Kehikko } from './place.ts'
 import { PROGRAM, headOf, home, sessionName, type Active, type Program, type Running, type State } from './program.ts'
-import { attach, follow, note, projectRoot, type NamedPlace } from './record.ts'
+import { attach, follow, note, projectRoot, readPlaces, recordedIds, type NamedPlace, type PlaceEntry, type Places } from './record.ts'
 
 /**
  * The sessions that are running, and the socket a page watches one through.
@@ -236,7 +236,8 @@ const REST_EVERY = 60_000
 const STALE_WORK = 2 * 60_000
 /**
  * How often the program is asked what the background sessions this module
- * has a view of are doing, while it has any (see `watch`). A view of a
+ * has a view of are doing, while it has any, and those of every watched
+ * project's places while a page follows along (see `watch`, `Unviewed`). A view of a
  * background session is `claude attach`: its process was started elsewhere
  * and runs no hooks of this module's, so nothing is told — it is asked.
  * Measured at a tenth of a second per asking.
@@ -719,7 +720,7 @@ const clip = (text: string, most: number): string => (text.length <= most ? text
  * the protocol refuses a long one; a place with more than 16 parts leaves them out and
  * keeps the epic and the kehikko.
  */
-export function activityRows(runs: Iterable<Run>, project: string | null = null): ActivityRow[] {
+export function activityRows(runs: Iterable<Run>, project: string | null = null, unviewed: Iterable<Unviewed> = []): ActivityRow[] {
   const rows: ActivityRow[] = []
   for (const run of runs) {
     if (run.what !== 'session' || run.ended || !run.state) continue
@@ -749,8 +750,64 @@ export function activityRows(runs: Iterable<Run>, project: string | null = null)
       project: run.projectPath,
     })
   }
+  /* The background sessions of the project's places that no run here is a view of (`Unviewed`).
+     One row per session: a run holding the same session is the one that says it. */
+  const said = new Set(rows.map((row) => row.id))
+  for (const one of unviewed) {
+    if (!one.state || said.has(one.session)) continue
+    if (project !== null && one.projectPath !== project) continue
+    said.add(one.session)
+    const parts = one.at.parts
+    const place: NonNullable<ActivityRow['place']> = {}
+    if (one.at.epic) place.epic = one.at.epic
+    if (parts.length > 0 && parts.length <= PLACE_PARTS) place.parts = [...parts]
+    if (one.at.kehikko && 'key' in one.at.kehikko) place.kehikko = one.at.kehikko.key
+    rows.push({
+      id: one.session,
+      state: ACTIVITY_STATE[one.state],
+      label: clip(one.label.replace(/\s+/g, ' ').trim() || 'Claude session', ACTIVITY_LABEL),
+      ...(Object.keys(place).length > 0 ? { place } : {}),
+      since: one.since,
+      detail: clip(one.state === 'needs-you' ? 'waiting for you: a permission or an answer' : one.state === 'finished' ? 'turn ended' : 'working', ACTIVITY_DETAIL),
+      project: one.projectPath,
+    })
+  }
   rows.sort((a, b) => ACTIVITY_ORDER[a.state] - ACTIVITY_ORDER[b.state] || b.since - a.since || a.id.localeCompare(b.id))
   return rows.slice(0, ACTIVITY_ITEMS)
+}
+
+/**
+ * A background session that belongs to one of a project's places and that no run here is a view
+ * of: one the person started with `claude --bg`, or a place's conversation that Claude Code carried
+ * on in a background session, in an epic nobody has a Claude view of right now. Its process is not
+ * this module's and runs none of its hooks, so what it is doing is what the program says
+ * (`agents --json`, its `state`), asked on the same clock as the views (`watch`).
+ *
+ * Built afresh on every asking from two things and nothing else: what the program says is running,
+ * and the project's `places.json` — each place's sessions followed to where the conversation is now
+ * (`headOf`). Never written anywhere.
+ */
+export interface Unviewed {
+  /** The session the background process holds. */
+  session: string
+  /** The project (resolved) whose place holds it. */
+  projectPath: string
+  /** The place it belongs to: the one whose `current` it is, else the first that lists it. */
+  at: NamedPlace
+  label: string
+  state: State | null
+  since: number
+}
+
+/** A place as `places.json` holds it, as the rest of this file names one. */
+export function placeOf(entry: PlaceEntry): NamedPlace {
+  const kehikko = kehikkoOf(entry.kehikko)
+  return {
+    epic: entry.epic,
+    parts: [...entry.parts],
+    kehikko,
+    ...(entry.kehikko?.name ? { kehikkoName: entry.kehikko.name } : {}),
+  }
 }
 
 /** Something following along: every change of state, and — when it asked for them — notices. */
@@ -818,6 +875,16 @@ export class Runs {
   private watchBusy = false
   /** How many askings in a row have failed: the wait doubles with each, and only the first is logged. */
   private watchFailed = 0
+  /**
+   * The projects (resolved) whose places' background sessions are watched: every project a page or
+   * an open has named since this server started. A project is named by the page framed in it, so
+   * the background sessions of every epic and part of it are watched, not only those with a view.
+   */
+  private readonly projects = new Set<string>()
+  /** The background sessions of those projects' places that no run here is a view of, by session (see `Unviewed`). */
+  private readonly unviewed = new Map<string, Unviewed>()
+  /** Where each project's places' sessions were followed to, kept while the record and what is running are unchanged. */
+  private readonly heads = new Map<string, { stamp: string; heads: Map<string, string> }>()
 
   constructor(private readonly options: RunsOptions) {
     this.program = options.program ?? PROGRAM
@@ -843,9 +910,37 @@ export class Runs {
     return [...this.runs.values()].filter((run) => run.what === 'session' && !run.ended && run.joined !== null)
   }
 
+  /**
+   * Whether there is anything to ask about: a view of a background session, or a project whose
+   * places' background sessions are listed — the latter only while a page follows along, since
+   * nothing else reads that list.
+   */
+  private due(): boolean {
+    return this.views().length > 0 || (this.projects.size > 0 && this.followers.size > 0)
+  }
+
+  /**
+   * Watch the background sessions of this project's places from now on (see `Unviewed`): what
+   * every epic and part of it has running in the background is listed, whether or not anybody has
+   * a view of it here. Asked at once when it is new, and then on the clock.
+   */
+  know(projectPath: string): void {
+    if (this.projects.has(projectPath)) return
+    this.projects.add(projectPath)
+    this.kick()
+  }
+
+  /** Ask now, if something is to be asked about and the clock runs, and then keep the clock. */
+  private kick(): void {
+    if (this.watchEvery === null || this.watchBusy || !this.due()) return
+    if (this.watchTimer) clearTimeout(this.watchTimer)
+    this.watchTimer = null
+    void this.watch().finally(() => this.keepWatching())
+  }
+
   /** Have the next asking due, if there is a view to ask about and none is due or under way. */
   private keepWatching(): void {
-    if (this.watchEvery === null || this.watchTimer || this.watchBusy || this.views().length === 0) return
+    if (this.watchEvery === null || this.watchTimer || this.watchBusy || !this.due()) return
     const wait = this.watchFailed === 0 ? this.watchEvery : Math.min(WATCH_MOST, this.watchEvery * 2 ** Math.min(this.watchFailed, 10))
     this.watchTimer = setTimeout(() => {
       this.watchTimer = null
@@ -867,7 +962,7 @@ export class Runs {
    * A session the program no longer lists has no state that still holds.
    */
   async watch(): Promise<void> {
-    if (this.watchBusy || this.views().length === 0) return
+    if (this.watchBusy || (this.views().length === 0 && this.projects.size === 0)) return
     this.watchBusy = true
     try {
       const running = await this.running()
@@ -882,9 +977,116 @@ export class Runs {
         const listed = running.active.find((one) => one.kind === 'background' && one.session === run.joined!.session)
         this.become(run, listed?.state ?? null)
       }
+      await this.see(running)
     } finally {
       this.watchBusy = false
     }
+  }
+
+  /**
+   * The background sessions of every watched project's places that no run here is a view of, from
+   * what the program says is running and each project's `places.json` — and nothing else. A place's
+   * session is followed to where its conversation is now (`headOf`), since Claude Code carries a
+   * conversation on under a new id. A session listed under several places is said once, under the
+   * place whose `current` it is, else the first place that lists it. A change of state is said to
+   * every follower, and a turn that ended or stopped for the person is noticed as a view's is; one
+   * first seen in a state is listed and not noticed, since when it got there is not known.
+   */
+  private async see(running: Extract<Running, { known: true }>): Promise<void> {
+    const background = new Map(running.active.filter((one) => one.kind === 'background').map((one) => [one.session, one]))
+    const mine = new Set<string>()
+    for (const run of this.runs.values()) {
+      if (run.what !== 'session' || run.ended) continue
+      mine.add(run.id)
+      if (run.settled) mine.add(run.settled)
+      if (run.joined) mine.add(run.joined.session)
+    }
+    const next = new Map<string, Unviewed>()
+    if (background.size > 0) {
+      for (const projectPath of this.projects) {
+        const read = readPlaces(projectPath)
+        if (!read.ok) continue
+        const places = read.value
+        const entries = Object.entries(places.places).sort(([a], [b]) => a.localeCompare(b))
+        if (entries.length === 0) continue
+        const heads = await this.headsOf(projectPath, places, running)
+        /* The place whose current session it is first, then every other place that lists it. */
+        const claims: [PlaceEntry, string][] = [
+          ...entries.flatMap(([, entry]) => (entry.current ? [[entry, entry.current] as [PlaceEntry, string]] : [])),
+          ...entries.flatMap(([, entry]) => entry.sessions.map((id) => [entry, id] as [PlaceEntry, string])),
+        ]
+        for (const [entry, id] of claims) {
+          const head = heads.get(id) ?? id
+          const listed = background.get(head)
+          if (!listed || mine.has(head) || next.has(head)) continue
+          const was = this.unviewed.get(head)
+          const state = listed.state ?? null
+          next.set(head, {
+            session: head,
+            projectPath,
+            at: placeOf(entry),
+            label: listed.name || places.sessions[head]?.label || places.sessions[id]?.label || '',
+            state,
+            since: was && was.state === state ? was.since : this.now(),
+          })
+        }
+      }
+    }
+    const before = new Map(this.unviewed)
+    const gone = [...before.values()].filter((one) => !next.has(one.session))
+    const moved = [...next.values()].filter((one) => (before.has(one.session) ? before.get(one.session)!.state !== one.state : one.state !== null))
+    this.unviewed.clear()
+    for (const [id, one] of next) this.unviewed.set(id, one)
+    for (const one of gone) if (!mine.has(one.session)) this.announce({ session: one.session, state: null, since: this.now() })
+    for (const one of moved) {
+      this.announce({ session: one.session, state: one.state, since: one.since })
+      if (before.has(one.session)) this.noticeOf(one)
+    }
+    /* Said only where the list differs from what a follower was last handed (`changed`). */
+    this.changed()
+  }
+
+  /**
+   * Where each session `places` names is now (`headOf`): asked of the program's records once, and
+   * kept until the record or what is running changes — a conversation is carried on only by a
+   * process starting on it, which changes what is running.
+   */
+  private async headsOf(projectPath: string, places: Places, running: Extract<Running, { known: true }>): Promise<Map<string, string>> {
+    const ids = recordedIds(places)
+    const live = new Set<string>(running.active.map((one) => one.session))
+    for (const run of this.runs.values()) if (run.settled) live.add(run.settled)
+    const stamp = JSON.stringify([ids, [...live].sort()])
+    const kept = this.heads.get(projectPath)
+    if (kept?.stamp === stamp) return kept.heads
+    const held = new Map((await this.program.sessions(projectPath, ids)).map((one) => [one.id, one]))
+    const heads = new Map(ids.map((id) => [id, headOf(id, held, live)]))
+    this.heads.set(projectPath, { stamp, heads })
+    return heads
+  }
+
+  /** Say a session's state to every page following: one this module has no run for. */
+  private announce(stated: Stated): void {
+    for (const follower of this.followers) follower.state(stated)
+  }
+
+  /** A background session nobody has a view of came to need the person, or finished its turn: noticed once. */
+  private noticeOf(one: Unviewed): void {
+    if (one.state !== 'needs-you' && one.state !== 'finished') return
+    const at = one.at
+    this.noticed += 1
+    this.raise({
+      seq: this.noticed,
+      session: one.session,
+      state: one.state,
+      label: one.label,
+      projectPath: one.projectPath,
+      epic: at.epic,
+      parts: at.parts.map((id, index) => at.partNames?.[index] || id),
+      kehikko: at.kehikkoName ?? '',
+      partIds: [...at.parts],
+      kehikkoKey: at.kehikko && 'key' in at.kehikko ? at.kehikko.key : null,
+      at: this.now(),
+    })
   }
 
   /** The run a session id names — by the id it was opened under or the one it settled as. */
@@ -918,6 +1120,7 @@ export class Runs {
     const root = projectRoot(asked.projectPath)
     if (!root.ok) return { code: CLOSED.refused, why: root.error }
     const projectPath = root.value
+    this.know(projectPath)
 
     const running = asked.session ? this.find(asked.session) : null
     if (running) {
@@ -1173,6 +1376,8 @@ export class Runs {
       ended: false,
     }
     this.runs.set(id, run)
+    /* A view of it now says it: the row listed for it while nobody had one goes. */
+    if (settled && this.unviewed.delete(settled)) this.changed()
     /* What the program said the background session is doing when it was asked, a moment ago; asked again on a clock from here (`watch`). */
     if (joined?.state) run.state = joined.state
     this.keepWatching()
@@ -1431,7 +1636,7 @@ export class Runs {
 
   /** The activity list as it stands — one project's, or every project's (for a test, and for a page that has just arrived). */
   activity(project: string | null = null): ActivityRow[] {
-    return activityRows(this.runs.values(), project)
+    return activityRows(this.runs.values(), project, this.unviewed.values())
   }
 
   /**
@@ -1461,17 +1666,24 @@ export class Runs {
     for (const run of this.sessions()) {
       if (run.state) follower.state({ session: run.settled ?? run.id, state: run.state, since: run.stateSince })
     }
+    for (const one of this.unviewed.values()) {
+      if (one.state) follower.state({ session: one.session, state: one.state, since: one.since })
+    }
     const hand = () => {
       if (!this.followers.has(follower)) return
       for (const notice of this.held.splice(0)) {
         const run = this.find(notice.session)
-        if (run && run.state === notice.state && run.looking.size === 0) follower.notice(notice)
+        if (run ? run.state === notice.state && run.looking.size === 0 : this.unviewed.get(notice.session)?.state === notice.state) follower.notice(notice)
       }
     }
     if (follower.notices && this.held.length) {
       if (this.heldWait > 0) setTimeout(hand, this.heldWait).unref?.()
       else hand()
     }
+    /* The background sessions of the places were not asked about while nobody followed. */
+    if (follower.project) this.know(follower.project)
+    if (this.followers.size === 1) this.kick()
+    else this.keepWatching()
     return () => {
       this.followers.delete(follower)
       this.activityIs.delete(follower)

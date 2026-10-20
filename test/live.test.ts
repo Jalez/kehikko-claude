@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
+import { activityItemsSchema } from 'kehikot-module-protocol'
 import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,7 +8,7 @@ import { listing, type Listing } from '../doors.ts'
 import { CLOSED, Runs, activityRows, sameProject, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
 import { placeKey } from '../place.ts'
 import { PROGRAM, readActive, type Active, type Program, type Recorded } from '../program.ts'
-import { readPlaces, sessionsAt, type NamedPlace } from '../record.ts'
+import { attach, readPlaces, sessionsAt, type NamedPlace } from '../record.ts'
 
 /**
  * The fence, and the runs behind it, without a socket or a real pty.
@@ -2103,5 +2104,175 @@ describe('a project whose folder is renamed while its session runs', () => {
     expect(w.ptys[1]!.args).toEqual(['--resume', A])
     expect(w.ptys[1]!.options.cwd).toBe(to)
     expect((back as Run).cwd).toBe(to)
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * The background sessions of every place in the project, with no view of them here (#89)
+ * ------------------------------------------------------------------ */
+
+describe('the background sessions of a project’s places that nobody has a view of', () => {
+  const C = '33333333-3333-4333-8333-333333333333'
+  const D = '44444444-4444-4444-8444-444444444444'
+  const E = '55555555-5555-4555-8555-555555555555'
+  const RESULTS: NamedPlace = { epic: 'thesis', parts: ['results'], kehikko: { key: '4072c9e5' }, kehikkoName: 'writing' }
+  const SLIDES: NamedPlace = { epic: 'defence', parts: [], kehikko: { key: '4072c9e5' }, kehikkoName: 'writing' }
+  const bg = (session: string, state: unknown, name = `named ${session.slice(0, 4)}`): Active =>
+    readActive({ pid: 4000 + Number(session[0]), id: session.slice(0, 8), cwd: '/somewhere/else', kind: 'background', startedAt: 900_000, sessionId: session, name, status: 'idle', state })!
+  const placed = (dir: string, place: NamedPlace, id: string) => {
+    const written = attach(dir, place, id)
+    if (!written.ok) throw new Error(written.error)
+  }
+  /** A project with two epics, each with a place whose session runs in the background, and a page following it. */
+  const setUp = (options: Parameters<typeof world>[0] = {}) => {
+    const dir = project()
+    const w = world(options)
+    w.records(dir, A, 'methods work')
+    w.records(dir, C, 'slides work')
+    placed(dir, RESULTS, A)
+    placed(dir, SLIDES, C)
+    w.elsewhere.push(bg(A, 'working'), bg(C, 'blocked'))
+    w.runs.know(dir)
+    return { dir, w }
+  }
+
+  test('every epic’s background session is listed, under its place, with no view of any of them', async () => {
+    const { dir, w } = setUp()
+    await w.runs.watch()
+    expect(w.runs.activity()).toEqual([
+      { id: C, state: 'attention', label: 'named 3333', place: { epic: 'defence', kehikko: '4072c9e5' }, since: expect.any(Number), detail: 'waiting for you: a permission or an answer', project: dir },
+      { id: A, state: 'working', label: 'named 1111', place: { epic: 'thesis', parts: ['results'], kehikko: '4072c9e5' }, since: expect.any(Number), detail: 'working', project: dir },
+    ])
+    expect(activityItemsSchema.safeParse(w.runs.activity()).success).toBe(true)
+    /* One project's list is that project's; another's has none of them. */
+    expect(w.runs.activity(dir).length).toBe(2)
+    expect(w.runs.activity(project())).toEqual([])
+  })
+
+  test('a place’s conversation carried on in a background session under a new id is listed by that id', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, D)
+    w.records(dir, A, 'the old id', [D])
+    placed(dir, RESULTS, A)
+    w.elsewhere.push(bg(D, 'done'))
+    w.runs.know(dir)
+    await w.runs.watch()
+    expect(w.runs.activity()).toMatchObject([{ id: D, state: 'done', detail: 'turn ended', place: { epic: 'thesis', parts: ['results'] } }])
+  })
+
+  test('a session listed at several places is one row, under the place whose current session it is', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A)
+    placed(dir, SLIDES, A)
+    placed(dir, RESULTS, A)
+    placed(dir, RESULTS, E)
+    /* The last attach made E current at RESULTS: A is current only at SLIDES. */
+    w.elsewhere.push(bg(A, 'working'))
+    w.runs.know(dir)
+    await w.runs.watch()
+    expect(w.runs.activity()).toMatchObject([{ id: A, place: { epic: 'defence' } }])
+    expect(w.runs.activity().length).toBe(1)
+  })
+
+  test('what is not a place’s is not listed: another project’s, an unrecorded one, and an interactive process', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A)
+    placed(dir, RESULTS, A)
+    w.elsewhere.push({ ...bg(A, null), kind: 'interactive', called: 'interactive', handle: null, state: null }, bg(E, 'working'))
+    w.runs.know(dir)
+    await w.runs.watch()
+    expect(w.runs.activity()).toEqual([])
+  })
+
+  test('a view of it is the one row while it is open, and the session is listed again when the view closes', async () => {
+    const { dir, w } = setUp({ tells: true, port: 9590 })
+    await w.runs.watch()
+    const run = await w.runs.open(ask(dir, A, RESULTS), new Watcher())
+    if (!isRun(run)) throw new Error('not opened')
+    await settle()
+    expect(run.joined?.session).toBe(A)
+    expect(w.runs.activity().filter((row) => row.id === A).length).toBe(1)
+    await w.runs.watch()
+    expect(w.runs.activity().filter((row) => row.id === A).length).toBe(1)
+    w.ptys[0]!.ends(0)
+    await settle()
+    await w.runs.watch()
+    expect(w.runs.activity().map((row) => row.id).sort()).toEqual([A, C])
+  })
+
+  test('a change of state is said to the pages and noticed; one first seen in a state is not noticed', async () => {
+    const { w } = setUp()
+    const feed = follower()
+    w.runs.subscribe(feed.one)
+    await w.runs.watch()
+    expect(feed.got).toEqual([])
+    expect(feed.states).toEqual(expect.arrayContaining([expect.objectContaining({ session: A, state: 'working' }), expect.objectContaining({ session: C, state: 'needs-you' })]))
+
+    w.later(5_000)
+    w.elsewhere.length = 0
+    w.elsewhere.push(bg(A, 'done'), bg(C, 'blocked'))
+    await w.runs.watch()
+    expect(feed.got).toMatchObject([{ session: A, state: 'finished', epic: 'thesis', parts: ['results'], kehikko: 'writing', kehikkoKey: '4072c9e5' }])
+    expect(feed.states.at(-1)).toMatchObject({ session: A, state: 'finished' })
+    expect(w.runs.activity().find((row) => row.id === A)).toMatchObject({ state: 'done', since: 1_005_000 })
+
+    /* Asked again with nothing changed: nothing said again. */
+    const said = feed.states.length
+    await w.runs.watch()
+    expect(feed.states.length).toBe(said)
+    expect(feed.got.length).toBe(1)
+  })
+
+  test('a session that stops running leaves the list, and the pages are told it has no state', async () => {
+    const { w } = setUp()
+    const feed = follower()
+    w.runs.subscribe(feed.one)
+    await w.runs.watch()
+    w.elsewhere.length = 0
+    w.elsewhere.push(bg(C, 'blocked'))
+    await w.runs.watch()
+    expect(w.runs.activity().map((row) => row.id)).toEqual([C])
+    expect(feed.states.at(-1)).toMatchObject({ session: A, state: null })
+  })
+
+  test('a failed asking changes nothing', async () => {
+    const { w } = setUp()
+    await w.runs.watch()
+    w.failing.now = true
+    await w.runs.watch()
+    expect(w.runs.activity().length).toBe(2)
+  })
+
+  test('the place a page lists makes its project watched', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A)
+    placed(dir, RESULTS, A)
+    w.elsewhere.push(bg(A, 'working'))
+    await w.runs.watch()
+    expect(w.runs.activity()).toEqual([])
+    await listing(dir, placeKey(HERE), w.runs, w.program)
+    await w.runs.watch()
+    expect(w.runs.activity()).toMatchObject([{ id: A, state: 'working' }])
+  })
+
+  test('asked on a clock while a page follows, and not while none does', async () => {
+    const { w } = setUp({ watchEvery: 5 })
+    await new Promise((done) => setTimeout(done, 30))
+    expect(w.runs.watching).toBe(false)
+    const feed = follower()
+    const stop = w.runs.subscribe(feed.one)
+    await new Promise((done) => setTimeout(done, 40))
+    expect(w.runs.watching).toBe(true)
+    expect(w.runs.activity().length).toBe(2)
+    stop()
+    await new Promise((done) => setTimeout(done, 30))
+    expect(w.runs.watching).toBe(false)
+    const after = w.asked.count
+    await new Promise((done) => setTimeout(done, 30))
+    expect(w.asked.count).toBe(after)
   })
 })
