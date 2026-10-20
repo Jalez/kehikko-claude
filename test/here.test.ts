@@ -5,13 +5,13 @@ import { join } from 'node:path'
 
 import { skillPath, skillTextIssue } from 'kehikot-module-protocol'
 
-import { MANIFEST, TICKET, answer, hostCheck, stream } from '../doors.ts'
+import { MANIFEST, TICKET, answer, hostCheck, servingAt, stream } from '../doors.ts'
 import { SAID, here, readSay, type HereNeeds } from '../here.ts'
 import { Runs, headless, theRuns } from '../live.ts'
 import { placeKey } from '../place.ts'
 import { PROGRAM, recordDirs, type Active, type Program } from '../program.ts'
 import { assign, readPlaces } from '../record.ts'
-import { PLUGIN_DIR, skillDeclarations, skillText } from '../skills.ts'
+import { ORIGIN_SLOT, PLUGIN_DIR, VERSION_SLOT, fill, servedOrigin, sessionPlugin, skillDeclarations, skillTemplate, skillText } from '../skills.ts'
 import { CONFIG, HOME } from './setup.ts'
 
 /**
@@ -257,16 +257,74 @@ describe('its doors', () => {
     expect(text).toBe(skillText('kehikot-here')!)
     expect(skillTextIssue(text, 'kehikot-here')).toBeNull()
     expect(MANIFEST.declares?.skills).toEqual(skillDeclarations())
+    const version = MANIFEST.declares?.skills?.[0]?.version
     expect(MANIFEST.declares?.skills?.[0]).toMatchObject({ name: 'kehikot-here', version: expect.stringMatching(/^[0-9a-f]{12}$/) })
     /* Only a person's slash command runs it; the conversation's own id is written in by Claude Code. */
     expect(text).toContain('\ndisable-model-invocation: true\n')
     expect(text).toContain('session=${CLAUDE_SESSION_ID}')
-    expect(text).toContain('http://127.0.0.1:8010/api/here')
+    /* Filled in: the origin this process serves on, and its own version for a person to paste back. */
+    expect(text).not.toContain(ORIGIN_SLOT)
+    expect(text).not.toContain(VERSION_SLOT)
+    expect(text).toContain(`${servedOrigin()}/api/here`)
+    expect(text).toContain(`[skill ${version}]`)
     expect((await answer('POST', skillPath('kehikot-here'), none, null, null))?.status).toBe(405)
     expect(await answer('GET', '/kehikot/skills/other.md', none, null, null)).toBeNull()
-    /* The plugin a session started here is given is the same file. */
-    expect(readFileSync(join(PLUGIN_DIR, 'skills', 'kehikot-here', 'SKILL.md'), 'utf8')).toBe(text)
     expect(JSON.parse(readFileSync(join(PLUGIN_DIR, '.claude-plugin', 'plugin.json'), 'utf8')).name).toBe('kehikot')
+  })
+
+  test('the skill never dead-ends: its ! line retries through a restart and always exits 0, with only curl and echo allowed', () => {
+    const text = skillText('kehikot-here')!
+    const front = text.split('\n---\n')[0]!
+    /* Measured on 2.1.304: echo after || passes the check with these, and a line that exits non-zero aborts the skill. */
+    expect(front).toContain('\nallowed-tools: Bash(curl:*), Bash(echo:*)')
+    expect(front).not.toMatch(/Bash\((sh|bash|zsh|sed|env)\b/)
+    const bang = text.split('\n').filter((line) => line.startsWith('!`'))
+    expect(bang).toHaveLength(1)
+    const line = bang[0]!
+    for (const flag of ['--retry 4', '--retry-connrefused', '--retry-delay 1', '--retry-max-time 12', '-m 5']) expect(line).toContain(` ${flag} `)
+    /* curl's own reason, said in the answer, so a person can paste one line back. */
+    expect(line).toContain("-w '\\n[curl exit %{exitcode}: %{errormsg}; HTTP %{http_code}]\\n'")
+    expect(line).toMatch(/ \|\| echo "\[no answer from http:\/\/127\.0\.0\.1:\d+\]"`$/)
+    /* Nothing but curl and echo: no pipe, no second command, no substitution. */
+    expect(line.slice(2).replace(/ \|\| echo "[^"$`]*"`$/, '').replace(/ -w '[^']*'/, '')).not.toMatch(/[|;&<>`]|\$\(/)
+    /* What the model says when it cannot reach the module, and for an older module. */
+    expect(text).toContain(`Kehikot: couldn't reach the Claude module at ${servedOrigin()} (REASON; it may be restarting or not running). Try /kehikot-here again in a moment`)
+    expect(text).toContain('older than this skill')
+    expect(text).toContain("update Claude from Kehikot's Updates menu")
+    /* The registration lookup stays, for a module that moved after the skill was installed. */
+    expect(text).toContain('Kehikot/modules/kehikot.claude.json')
+  })
+
+  test('the template names no port; the text and its version follow the origin the module is on', () => {
+    const template = skillTemplate('kehikot-here')!
+    expect(template).not.toMatch(/127\.0\.0\.1:\d/)
+    expect(template).toContain(`${ORIGIN_SLOT}/api/here`)
+    const usual = fill(template, 'http://127.0.0.1:8010')
+    const moved = fill(template, 'http://127.0.0.1:8011')
+    expect(moved.version).not.toBe(usual.version)
+    expect(moved.text).toContain('http://127.0.0.1:8011/api/here ||')
+    expect(moved.text).not.toContain(':8010')
+    expect(skillTextIssue(moved.text, 'kehikot-here')).toBeNull()
+    /* Said once listening: what is served and what the manifest declares move together. */
+    const was = servedOrigin()
+    try {
+      servingAt('http://127.0.0.1:8011')
+      expect(skillText('kehikot-here')).toBe(moved.text)
+      expect(MANIFEST.declares?.skills?.[0]?.version).toBe(moved.version)
+    } finally {
+      servingAt(was)
+    }
+    expect(() => servingAt('http://example.com:80')).toThrow()
+  })
+
+  test('a session started here is given the skill filled in, in its own temporary folder', () => {
+    const base = dir()
+    const plugin = sessionPlugin('http://127.0.0.1:8011', base)
+    expect(plugin.startsWith(base)).toBe(true)
+    expect(readFileSync(join(plugin, 'skills', 'kehikot-here', 'SKILL.md'), 'utf8')).toBe(skillText('kehikot-here', 'http://127.0.0.1:8011')!)
+    expect(JSON.parse(readFileSync(join(plugin, '.claude-plugin', 'plugin.json'), 'utf8')).name).toBe('kehikot')
+    expect(sessionPlugin('http://127.0.0.1:8011', base)).toBe(plugin)
+    expect(sessionPlugin('http://127.0.0.1:8012', base)).not.toBe(plugin)
   })
 
   test('nothing here installs a skill: no door, no tool, and nothing written to the person’s Claude config', async () => {

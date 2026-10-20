@@ -414,14 +414,32 @@ measured with a scratch config folder:
   what the person typed after it.
 - A line `` !`command` `` in it runs when the skill is loaded, before the model sees anything, and
   its output takes its place. The command passes Claude Code's permission check: the skill's
-  `allowed-tools: Bash(curl:*)` covers a bare `curl`. (Reading the registration file with `sed`
-  in that line was refused: the file is outside the conversation's folders.)
+  `allowed-tools: Bash(curl:*), Bash(echo:*)` covers `curl … || echo "…"`. (Reading the
+  registration file with `sed` in that line was refused: the file is outside the conversation's
+  folders; so was `|| touch …`.)
+- **A `!` line that exits non-zero aborts the skill** ("Shell command failed for pattern …"), and
+  nothing after it runs — measured with the first version of this skill against a module that was
+  not answering. So the line can never fail: curl retries through a restart (`--retry 4
+  --retry-connrefused --retry-delay 1 --retry-max-time 12`, each try `-m 5`), says its own reason
+  (`-w '[curl exit %{exitcode}: %{errormsg}; HTTP %{http_code}]'`), and `|| echo` keeps the exit 0.
 - `disable-model-invocation: true`: only the person's slash command loads it; the model cannot.
 
 So the skill (`plugin/skills/kehikot-here/SKILL.md`, one file) is one `curl` to
-`POST http://127.0.0.1:8010/api/here?session=<id>&say=<words>`, and the model repeats the answer,
-which always begins `Kehikot:`. When this module is on another port, the skill tells the model to
-run the same `curl` once with the address read from the registration file (the person approves it).
+`POST <origin>/api/here?session=<id>&say=<words>`, and the model repeats the answer, which always
+begins `Kehikot:`. **The file names no port**: it is a template, and the text served (and the copy a
+session started here is given, in this user's temporary folder) has `{{origin}}` filled in with the
+origin this module is really bound to, and `{{version}}` with the skill's version (skills.ts). A
+module that had to take another port gives out a skill that reaches it, and its version changes, so
+a host's sync updates an installed copy (an untouched copy of another text is "outdated", not
+"edited"). When the module does not answer there, the skill tells the model to run the same `curl`
+once with the address read from the registration file (the person approves it), for a module that
+moved after the skill was installed. When that does not answer either, the model says one line a
+person can paste back, with curl's reason, the address and the skill's version:
+
+> Kehikot: couldn't reach the Claude module at http://127.0.0.1:8010 (connection refused; it may be restarting or not running). Try /kehikot-here again in a moment; if it keeps failing, update Claude from Kehikot's Updates menu. [skill 8f2f313a2951]
+
+A module older than the skill (HTTP 403 or 404 at `/api/here`) is said as one: "… is older than this
+skill (or another program has its port). Update Claude from Kehikot's Updates menu …".
 
 **What the door believes.** `/api/here` takes no ticket — the conversation has none — so anything on
 this machine can call it, and the id is a claim. It is believed only for a conversation Claude Code
@@ -452,8 +470,8 @@ the lists are said again):
 
 **Where the skill comes from.**
 
-- **A session this module starts** has it with nothing installed: `--plugin-dir <this
-  module>/plugin` on its command line, for that one process, beside `--mcp-config`. Measured on
+- **A session this module starts** has it with nothing installed: `--plugin-dir <a filled-in
+  copy of this module's plugin, in this user's temporary folder>` on its command line, for that one process, beside `--mcp-config`. Measured on
   2.1.304: the plugin's skill is listed as `kehikot:kehikot-here`, and the bare `/kehikot-here`
   runs it. A copy whose help has no `--plugin-dir` is started without it.
 - **A conversation started outside Kehikot** needs it in `~/.claude/skills/kehikot-here/`. This

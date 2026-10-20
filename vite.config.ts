@@ -2,10 +2,10 @@ import { resolve } from 'node:path'
 
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
-import { doors, serves } from 'kehikot-module-protocol/serve'
+import { doors, originFor, serves } from 'kehikot-module-protocol/serve'
 import { defineConfig, type Plugin } from 'vite'
 
-import { BUILD, MANIFEST, TICKET, answer, stream } from './doors.ts'
+import { BUILD, MANIFEST, TICKET, answer, servingAt, stream } from './doors.ts'
 import { serveSessions } from './live.ts'
 import { ID, PREFERRED_PORT } from './manifest.ts'
 import { isSkillPath } from './skills.ts'
@@ -40,6 +40,8 @@ function sockets(): Plugin {
       http.once('listening', () => {
         const address = http.address()
         if (address && typeof address === 'object') bound = address.port
+        /* The skills name the origin this module is really on, not the one it preferred (skills.ts). */
+        servingAt(originFor(bound))
         serveSessions(http, bound, (line) => server.config.logger.info(line))
       })
     },
