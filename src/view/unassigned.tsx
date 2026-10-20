@@ -1,6 +1,7 @@
 import { useState } from 'react'
 
-import type { Assignable } from '../../doors.ts'
+import type { Assignable, OwnConversation } from '../../doors.ts'
+import { ago } from './places.ts'
 import { Button } from '@/components/ui/button'
 
 /**
@@ -35,6 +36,28 @@ export interface UnassignedRow {
 
 export const NOT_KEHIKOT = 'Not a Kehikot conversation'
 
+const titled = (own: OwnConversation) => own.title || 'untitled'
+
+/** What a place's own conversation is, said at every assign target: its title and when it was last active, or that it has none. */
+export function ownLine(own: OwnConversation | null | undefined, now: number): string {
+  if (!own) return 'No conversation of its own yet'
+  const when = ago(own.lastActive, now)
+  return `Own conversation: ${titled(own)}${when ? ` · last active ${when}` : ''}`
+}
+
+/**
+ * The choices at one target. With an own conversation there are two: file it
+ * and keep that one, or make it the own and leave that one listed there.
+ * Without one there is a single choice, and it becomes the own.
+ */
+export function assignChoices(own: OwnConversation | null | undefined): { own: boolean; label: string }[] {
+  if (!own) return [{ own: false, label: 'Assign here (becomes this kehikko’s own)' }]
+  return [
+    { own: false, label: `Assign here (keeps ${titled(own)} as this kehikko’s own)` },
+    { own: true, label: `Assign and make it this kehikko’s own (replaces ${titled(own)})` },
+  ]
+}
+
 export function unassignedLine(n: number): string {
   return n === 1 ? 'A Claude Code session in this project isn’t assigned to a kehikko.' : `${n} Claude Code sessions in this project aren’t assigned to a kehikko.`
 }
@@ -42,6 +65,7 @@ export function unassignedLine(n: number): string {
 export function Unassigned({
   rows,
   hereSaid,
+  hereOwn,
   elsewhere,
   open,
   onOpen,
@@ -51,13 +75,17 @@ export function Unassigned({
   rows: readonly UnassignedRow[]
   /** This container's place in a few words, for the "Assign here" button's title. */
   hereSaid: string
+  /** This container's place's own conversation, null when it has none. */
+  hereOwn: OwnConversation | null
   elsewhere: readonly Assignable[]
   open: boolean
   onOpen: (open: boolean) => void
-  /** `key` null: here. Otherwise one of `elsewhere`. */
-  onAssign: (session: string, key: string | null) => Promise<unknown>
+  /** `key` null: here. Otherwise one of `elsewhere`. `own`: make it that place's own, replacing the one it has. */
+  onAssign: (session: string, key: string | null, own: boolean) => Promise<unknown>
   onIgnore: (session: string) => Promise<unknown>
 }) {
+  /* The place picked from "Assign to…" for a row: its choices are shown before anything is filed. */
+  const [picked, setPicked] = useState<Readonly<Record<string, string>>>({})
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set())
   if (!rows.length) return null
   /* One answer at a time per row; the row comes back if the answer was not taken. */
@@ -73,6 +101,7 @@ export function Unassigned({
         }),
       )
   }
+  const now = Date.now()
   const kehikot = [...new Set(elsewhere.map((one) => one.kehikko))]
 
   return (
@@ -93,17 +122,23 @@ export function Unassigned({
                 <span className="truncate text-xs" title={`${name} (${row.id})`}>
                   {name}
                 </span>
+                <span className="text-muted-foreground" data-own-here>
+                  This kehikko · {ownLine(hereOwn, now)}
+                </span>
                 <span role="group" aria-label={`answers for ${name}`} className="flex flex-wrap items-center gap-1">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-6 px-2 text-[11px]"
-                    disabled={waiting}
-                    title={`Assign it to this kehikko: ${hereSaid}`}
-                    onClick={() => pressed(row.id, () => onAssign(row.id, null))}
-                  >
-                    Assign here
-                  </Button>
+                  {assignChoices(hereOwn).map((choice) => (
+                    <Button
+                      key={String(choice.own)}
+                      size="sm"
+                      variant="outline"
+                      className="h-auto min-h-6 px-2 py-0.5 text-left text-[11px] whitespace-normal"
+                      disabled={waiting}
+                      title={`Assign it to this kehikko: ${hereSaid}`}
+                      onClick={() => pressed(row.id, () => onAssign(row.id, null, choice.own))}
+                    >
+                      {choice.label}
+                    </Button>
+                  ))}
                   {elsewhere.length > 0 && (
                     <select
                       aria-label={`Assign ${name} to another place`}
@@ -112,7 +147,7 @@ export function Unassigned({
                       value=""
                       onChange={(event) => {
                         const key = event.target.value
-                        if (key) pressed(row.id, () => onAssign(row.id, key))
+                        if (key) setPicked((was) => ({ ...was, [row.id]: key }))
                       }}
                     >
                       <option value="">Assign to…</option>
@@ -122,7 +157,7 @@ export function Unassigned({
                             .filter((one) => one.kehikko === kehikko)
                             .map((one) => (
                               <option key={one.key} value={one.key}>
-                                {`${kehikko} · ${one.label}`}
+                                {`${kehikko} · ${one.label} — ${one.own ? `own: ${titled(one.own)}` : 'no own yet'}`}
                               </option>
                             ))}
                         </optgroup>
@@ -140,6 +175,34 @@ export function Unassigned({
                     {NOT_KEHIKOT}
                   </Button>
                 </span>
+                {(() => {
+                  const there = elsewhere.find((one) => one.key === picked[row.id])
+                  if (!there) return null
+                  return (
+                    <span role="group" aria-label={`choices at ${there.kehikko} · ${there.label}`} className="flex flex-col gap-1 rounded-sm border px-1.5 py-1" data-assign-there={there.key}>
+                      <span className="text-muted-foreground">
+                        {there.kehikko} · {there.label} · {ownLine(there.own, now)}
+                      </span>
+                      <span className="flex flex-wrap items-center gap-1">
+                        {assignChoices(there.own).map((choice) => (
+                          <Button
+                            key={String(choice.own)}
+                            size="sm"
+                            variant="outline"
+                            className="h-auto min-h-6 px-2 py-0.5 text-left text-[11px] whitespace-normal"
+                            disabled={waiting}
+                            onClick={() => pressed(row.id, () => onAssign(row.id, there.key, choice.own))}
+                          >
+                            {choice.label}
+                          </Button>
+                        ))}
+                        <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={() => setPicked((was) => ({ ...was, [row.id]: '' }))}>
+                          Cancel
+                        </Button>
+                      </span>
+                    </span>
+                  )
+                })()}
               </li>
             )
           })}

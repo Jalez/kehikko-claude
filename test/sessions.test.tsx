@@ -4,7 +4,7 @@ import { headerItemsSchema } from 'kehikot-module-protocol'
 import { resetServerStanding } from 'kehikot-module-protocol/client'
 import { useEffect, useRef } from 'react'
 
-import type { Assignable, Listing, Row } from '../doors.ts'
+import type { Assignable, Listing, OwnConversation, Row } from '../doors.ts'
 import type { ActivityRow, Notice, Stated } from '../live.ts'
 import { NOTICES } from '../manifest.ts'
 import type { Api } from '../src/api.ts'
@@ -65,7 +65,7 @@ const row = (id: string, more: Partial<Row> = {}): Row => ({ id, label: '', last
 /** A server in a variable: what each place holds, and what was asked of it. */
 function server(start: Record<string, Row[]> = {}) {
   const held: Record<string, Row[]> = { ...start }
-  const state = { found: '/bin/claude' as string | null, lacks: null as string | null, running: [] as Listing['running'], others: [] as Row[], unassigned: [] as Row[], assignable: [] as Assignable[] }
+  const state = { found: '/bin/claude' as string | null, lacks: null as string | null, running: [] as Listing['running'], others: [] as Row[], unassigned: [] as Row[], assignable: [] as Assignable[], ownNow: null as OwnConversation | null }
   const asked: string[] = []
   /** What the page asked to have brought across to a kehikko's key, in order with the reads. */
   const order: string[] = []
@@ -86,6 +86,7 @@ function server(start: Record<string, Row[]> = {}) {
         running: state.running,
         unassigned: state.unassigned,
         assignable: state.assignable,
+        ownNow: state.ownNow,
       }
     },
     assign: async (_projectPath, key, session, own, kehikkoName) => {
@@ -795,7 +796,7 @@ describe('a notice for a person who is not looking', () => {
 })
 
 describe('conversations that belong to no place, answered in the page', () => {
-  const OTHER: Assignable = { key: 'epic=paper;parts=;kehikko=key:f00dcafe', kehikko: 'reviews', label: 'paper · whole epic' }
+  const OTHER: Assignable = { key: 'epic=paper;parts=;kehikko=key:f00dcafe', kehikko: 'reviews', label: 'paper · whole epic', own: { id: 'o1', title: 'reply to reviewer 2', lastActive: null } }
   const lines = (container: HTMLElement) => container.querySelector('[data-unassigned]')
 
   test('a line at any width, and each answer — here, another kehikko, not Kehikot — from the open list', async () => {
@@ -815,11 +816,15 @@ describe('conversations that belong to no place, answered in the page', () => {
     expect(s.asked).toContain('ignore u1')
     expect(answers('u1')).toBeNull()
 
-    fireEvent.click([...answers('u2').querySelectorAll('button')].find((one) => one.textContent === 'Assign here')!)
+    fireEvent.click([...answers('u2').querySelectorAll('button')].find((one) => one.textContent === 'Assign here (becomes this kehikko’s own)')!)
     await flush()
     expect(s.asked).toContain(`assign u2 ${KEY()} k3`)
 
     fireEvent.change(answers('u3').querySelector('select')!, { target: { value: OTHER.key } })
+    await flush()
+    /* Picking a place files nothing: its choices come first. */
+    expect(s.asked).not.toContain(`assign u3 ${OTHER.key} reviews`)
+    fireEvent.click([...answers('u3').querySelectorAll('button')].find((one) => one.textContent === 'Assign here (keeps reply to reviewer 2 as this kehikko’s own)')!)
     await flush()
     expect(s.asked).toContain(`assign u3 ${OTHER.key} reviews`)
     /* None left: no line, and the header's item is withdrawn. */
@@ -834,6 +839,7 @@ describe('conversations that belong to no place, answered in the page', () => {
     await flush()
     const item = (s.headers.at(-1) as { id: string; options: { id: string }[] }[]).find((one) => one.id === 'unassigned')!
     expect(item.options.map((one) => one.id)).toEqual(['u1', 'answer'])
+    expect((item.options[0] as unknown as { label: string }).label).toBe('Assign to this kehikko: started in a terminal')
     expect(headerItemsSchema.safeParse(s.headers.at(-1)).success).toBe(true)
     let answer: unknown
     act(() => {
@@ -841,6 +847,102 @@ describe('conversations that belong to no place, answered in the page', () => {
     })
     expect(answer).toBe(true)
     await flush()
+    expect(container.querySelector('[data-unassigned-row="u1"]')).not.toBeNull()
+  })
+})
+
+describe('assigning says what the kehikko’s own conversation is, and lets you replace it or not', () => {
+  const OTHER: Assignable = { key: 'epic=paper;parts=;kehikko=key:f00dcafe', kehikko: 'reviews', label: 'paper · whole epic', own: { id: 'o1', title: 'reply to reviewer 2', lastActive: Date.now() - 3 * 60_000 } }
+  const NONE: Assignable = { key: 'epic=paper;parts=x;kehikko=key:f00dcafe', kehikko: 'reviews', label: 'paper · x', own: null }
+  const buttons = (el: HTMLElement) => [...el.querySelectorAll('button')].map((one) => one.textContent)
+  const open = async (s: ReturnType<typeof told>) => {
+    const view = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    fireEvent.click([...view.container.querySelectorAll('[data-unassigned] button')].find((one) => one.textContent === 'Answer')!)
+    return view.container
+  }
+
+  test('here, with an own conversation: it is named, and there are two choices — keep, or replace', async () => {
+    const s = told({ [KEY()]: [row('a', { label: 'one' })] })
+    s.state.unassigned = [row('u1', { label: 'started in a terminal' })]
+    s.state.ownNow = { id: 'a', title: 'tighten the methods', lastActive: Date.now() - 2 * 3_600_000 }
+    const container = await open(s)
+    const here = container.querySelector('[data-unassigned-row="u1"]') as HTMLElement
+    expect(here.querySelector('[data-own-here]')?.textContent).toBe('This kehikko · Own conversation: tighten the methods · last active 2 h ago')
+    expect(buttons(here)).toContain('Assign here (keeps tighten the methods as this kehikko’s own)')
+    expect(buttons(here)).toContain('Assign and make it this kehikko’s own (replaces tighten the methods)')
+    expect(buttons(here)).not.toContain('Assign here')
+    fireEvent.click([...here.querySelectorAll('button')].find((one) => one.textContent?.startsWith('Assign and make it'))!)
+    await flush()
+    expect(s.asked).toContain(`assign u1 ${KEY()} own k3`)
+  })
+
+  test('here, keeping: assigns without own', async () => {
+    const s = told({ [KEY()]: [row('a')] })
+    s.state.unassigned = [row('u1')]
+    s.state.ownNow = { id: 'a', title: 'tighten the methods', lastActive: null }
+    const container = await open(s)
+    fireEvent.click([...container.querySelectorAll('button')].find((one) => one.textContent?.startsWith('Assign here (keeps'))!)
+    await flush()
+    expect(s.asked).toContain(`assign u1 ${KEY()} k3`)
+    expect(s.asked.some((one) => one.includes(' own '))).toBe(false)
+  })
+
+  test('here, with no own: said, and one choice that makes it the own', async () => {
+    const s = told({ [KEY()]: [] })
+    s.state.unassigned = [row('u1')]
+    const container = await open(s)
+    const here = container.querySelector('[data-unassigned-row="u1"]') as HTMLElement
+    expect(here.querySelector('[data-own-here]')?.textContent).toBe('This kehikko · No conversation of its own yet')
+    expect(buttons(here).filter((one) => one?.startsWith('Assign'))).toEqual(['Assign here (becomes this kehikko’s own)'])
+  })
+
+  test('another place: each choice in the list shows its own, and the picked one offers both ways', async () => {
+    const s = told({ [KEY()]: [row('a')] })
+    s.state.unassigned = [row('u1')]
+    s.state.assignable = [OTHER, NONE]
+    const container = await open(s)
+    const there = container.querySelector('[data-unassigned-row="u1"]') as HTMLElement
+    const options = [...there.querySelectorAll('option')].map((one) => one.textContent)
+    expect(options).toContain('reviews · paper · whole epic — own: reply to reviewer 2')
+    expect(options).toContain('reviews · paper · x — no own yet')
+    fireEvent.change(there.querySelector('select')!, { target: { value: OTHER.key } })
+    const block = there.querySelector('[data-assign-there]') as HTMLElement
+    expect(block.textContent).toContain('Own conversation: reply to reviewer 2 · last active 3 min ago')
+    expect(buttons(block)).toContain('Assign and make it this kehikko’s own (replaces reply to reviewer 2)')
+    fireEvent.click([...block.querySelectorAll('button')].find((one) => one.textContent?.startsWith('Assign and make it'))!)
+    await flush()
+    expect(s.asked).toContain(`assign u1 ${OTHER.key} own reviews`)
+  })
+
+  test('another place with no own: said, one choice', async () => {
+    const s = told({ [KEY()]: [row('a')] })
+    s.state.unassigned = [row('u1')]
+    s.state.assignable = [NONE]
+    const container = await open(s)
+    const there = container.querySelector('[data-unassigned-row="u1"]') as HTMLElement
+    fireEvent.change(there.querySelector('select')!, { target: { value: NONE.key } })
+    const block = there.querySelector('[data-assign-there]') as HTMLElement
+    expect(block.textContent).toContain('No conversation of its own yet')
+    expect(buttons(block).filter((one) => one?.startsWith('Assign'))).toEqual(['Assign here (becomes this kehikko’s own)'])
+  })
+
+  test('the header: one option per conversation; with an own it opens the page’s choice instead of assigning', async () => {
+    const s = told({ [KEY()]: [row('a')] })
+    s.state.unassigned = [row('u1', { label: 'started in a terminal' })]
+    s.state.ownNow = { id: 'a', title: 'tighten the methods', lastActive: null }
+    const { container } = render(<Sessions theme="dark" at={at()} api={s.api} hosted={s.hosted} />)
+    await flush()
+    const item = (s.headers.at(-1) as { id: string; options: { id: string; label: string }[] }[]).find((one) => one.id === 'unassigned')!
+    expect(item.options.map((one) => one.label)).toEqual(['Assign to this kehikko…: started in a terminal', 'Another kehikko, or not a Kehikot conversation…'])
+    expect(headerItemsSchema.safeParse(s.headers.at(-1)).success).toBe(true)
+    let pressed: unknown
+    act(() => {
+      pressed = s.hosted.presses.current?.({ item: 'unassigned', value: 'u1' })
+    })
+    expect(pressed).toBe(true)
+    await flush()
+    expect(s.asked.some((one) => one.startsWith('assign'))).toBe(false)
     expect(container.querySelector('[data-unassigned-row="u1"]')).not.toBeNull()
   })
 })

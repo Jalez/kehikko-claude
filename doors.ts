@@ -150,6 +150,8 @@ export interface Listing {
    * place first — the one a person most likely means by "that kehikko".
    */
   assignable?: Assignable[]
+  /** This place's own conversation as the record has it (what "Assign here" keeps or replaces), or null for none. */
+  ownNow?: OwnConversation | null
   /** Whether sessions started outside Kehikot are reported here (the SessionStart hook is installed). */
   hook?: boolean
   /**
@@ -196,13 +198,23 @@ export interface Assignable {
   kehikko: string
   /** The epic and parts: "thesis · methods + results", "thesis · whole epic", "no epic". */
   label: string
+  /** That place's own conversation — what assigning here would keep or replace — or null when it has none yet. */
+  own: OwnConversation | null
+}
+
+/** A place's own conversation, said by title and when it was last active. */
+export interface OwnConversation {
+  id: string
+  /** Its title; `''` when it has none yet (the page says "untitled"). */
+  title: string
+  lastActive: number | null
 }
 
 /**
  * The places, other than `key`, that a conversation can be assigned to: those on a kehikko, by
  * kehikko (in the order each was last used), most recently used first within each. At most `most`.
  */
-export function assignable(places: Places, key: string, most = 24): Assignable[] {
+export function assignable(places: Places, key: string, most = 24, own: (id: string) => OwnConversation = (id) => recordedOwn(places, id)): Assignable[] {
   const used = (entry: Places['places'][string]) =>
     Math.max(0, ...entry.sessions.map((id) => Date.parse((Object.hasOwn(places.sessions, id) ? places.sessions[id]?.lastActive : null) ?? '') || 0))
   const rows = Object.entries(places.places)
@@ -211,11 +223,19 @@ export function assignable(places: Places, key: string, most = 24): Assignable[]
       key: one,
       kehikko: entry.kehikko?.name || 'a kehikko',
       label: entry.epic ? `${entry.epic} · ${entry.parts.length ? entry.parts.join(' + ') : 'whole epic'}` : 'no epic',
+      own: ownOf(places, one) ? own(ownOf(places, one)!) : null,
       used: used(entry),
     }))
     .sort((a, b) => b.used - a.used)
   const order = [...new Set(rows.map((one) => one.kehikko))]
   return order.flatMap((name) => rows.filter((one) => one.kehikko === name)).slice(0, most).map(({ used: _used, ...rest }) => rest)
+}
+
+/** A conversation as the record alone knows it: the title it was given, and when it was last active. */
+function recordedOwn(places: Places, id: string): OwnConversation {
+  const kept = Object.hasOwn(places.sessions, id) ? places.sessions[id] : undefined
+  const at = kept?.lastActive ? Date.parse(kept.lastActive) : NaN
+  return { id, title: kept?.label ?? '', lastActive: Number.isFinite(at) ? at : null }
 }
 
 /** A recorded place in a few words: its parts, or "whole epic", and what its kehikko is called. */
@@ -367,7 +387,16 @@ export async function listing(
       }),
     ),
     unassigned: unassigned(read.value).filter((id) => !here.includes(id)).map(row),
-    assignable: assignable(read.value, key),
+    assignable: assignable(read.value, key, 24, (id) => {
+      const one = row(id)
+      return { id, title: one.label, lastActive: one.lastActive }
+    }),
+    ownNow: (() => {
+      const id = ownOf(read.value, key)
+      if (!id) return null
+      const one = row(id)
+      return { id, title: one.label, lastActive: one.lastActive }
+    })(),
     hook: enabled(),
     others: ordered(held, here, key, read.value).map(({ one, near }) => ({ ...row(one.id), ...(near.length ? { near } : {}) })),
     running: live.map((run) => ({

@@ -613,6 +613,7 @@ export function Sessions({
     viewing: view?.session ?? null,
     title: titleOf,
     unassigned: (here?.unassigned ?? []).map((one) => ({ id: one.id, label: one.label })),
+    hasOwn: Boolean(here?.ownNow),
     working,
   })
   /* Nothing left to answer: the answers close, so the next one to arrive is a line again. */
@@ -662,6 +663,12 @@ export function Sessions({
           return true
         }
         if (typeof value !== 'string' || !at || !api.assign || !here?.unassigned?.some((one) => one.id === value)) return 'That conversation is not waiting to be assigned any more.'
+        /* A place with an own conversation has two ways to assign, and they are the page's to show:
+           the header's press opens them rather than choosing one. With none, it becomes the own. */
+        if (here.ownNow) {
+          setAnswering(true)
+          return true
+        }
         void api.assign(at.projectPath, at.key, value, false, at.kehikkoName).finally(() => setAgain((n) => n + 1))
         return true
       }
@@ -693,15 +700,16 @@ export function Sessions({
         <Unassigned
           rows={(here.unassigned ?? []).map((one) => ({ id: one.id, label: one.label }))}
           hereSaid={[at.kehikkoName, at.epic ?? 'no epic'].filter(Boolean).join(' · ')}
+          hereOwn={here.ownNow ?? null}
           elsewhere={here.assignable ?? []}
           open={answering}
           onOpen={setAnswering}
-          onAssign={async (session, key) => {
+          onAssign={async (session, key, own) => {
             if (!api.assign) return
             const there = key === null ? null : (here.assignable ?? []).find((one) => one.key === key)
             if (key !== null && !there) return
             try {
-              await api.assign(at.projectPath, there ? there.key : at.key, session, false, there ? there.kehikko : at.kehikkoName)
+              await api.assign(at.projectPath, there ? there.key : at.key, session, own, there ? there.kehikko : at.kehikkoName)
             } finally {
               setAgain((n) => n + 1)
             }
