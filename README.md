@@ -149,8 +149,18 @@ background session is open, Claude Code is asked `claude agents --json` every se
 asking at a time; the clock stops with the last view), and each entry's `state` becomes the session's
 state: `working` is working, `blocked` needs you, `done` finished. Any other word, or none, is no
 state. From there it is said, listed (`activity.set`) and noticed exactly as a session that reports.
-A failed asking changes nothing, is logged once, and the next waits longer (up to a minute). A
-background session nobody has a view of here is not asked about.
+A failed asking changes nothing, is logged once, and the next waits longer (up to a minute).
+
+**Every place's background session is listed, viewed or not.** The work of an epic goes on in the
+background while the person looks at another epic, and a list that held only what this module had a
+view of named two epics out of five. So the same asking covers every project a page has been framed
+in since this server started, while any page follows along: each place in its `places.json`, each of
+its sessions followed to where the conversation is now (through `continued-in`), and of those, every
+one Claude Code runs in the background. Each is listed once — under the place whose `current` it is,
+else the first place that lists it — with its place, the name Claude Code gives it and its `state`,
+and a change of state is noticed as a view's is (one first seen in a state is listed, not noticed).
+A view of it is the row while it is open. A background session no place holds is not this module's
+to file under an epic, and is not listed; *Attach an existing session* makes it a place's.
 
 **A Claude Code too old for `agents --json` or `attach`** is told apart from "nothing is running".
 Such a copy resumes a session as it always did, and says so on the terminal's first line —

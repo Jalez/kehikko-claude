@@ -213,6 +213,8 @@ export async function listing(
   if (!readPlaceKey(key)) return { ok: false, error: 'That is not a place.' }
   const recorded = readPlaces(root.value)
   if (!recorded.ok) return recorded
+  /* The page framed in this project: the background sessions of all its places are listed from now on, viewed or not. */
+  runs.know(root.value)
 
   const found = program.find()
   const able = found.file ? await program.supports(found.file) : { ok: true, missing: null, tells: false, lists: false }
