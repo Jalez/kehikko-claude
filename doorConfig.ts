@@ -1,5 +1,5 @@
-import { randomBytes } from 'node:crypto'
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash, randomBytes } from 'node:crypto'
+import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -131,6 +131,68 @@ export function writeConfig(doors: readonly SessionDoor[], base = tmpdir()): str
   const file = join(dir, `${randomBytes(9).toString('base64url')}.json`)
   writeFileSync(file, mcpConfig(doors), { mode: 0o600, flag: 'wx' })
   return file
+}
+
+/**
+ * The folder a BACKGROUND conversation's files are kept in — its doors file and its plugin folder —
+ * for as long as it may be woken: Claude Code keeps the paths it was started with as the session's
+ * saved options and reads them again whenever the session is woken (see "The background" in
+ * program.ts), so they are at the same place every time. Named after the conversation's token,
+ * hashed, so the folder's name says nothing a door would take. Rewritten before every start or
+ * wake, so what it holds is the doors of now; never removed while the conversation can be woken —
+ * only by `sweepKept`, long after it was last written.
+ */
+export function keptDirOf(token: string, base = tmpdir()): string {
+  return join(configDirOf(base), `session-${createHash('sha256').update(token).digest('hex').slice(0, 24)}`)
+}
+
+/** Write a background conversation's doors file in its kept folder, replacing what was there. */
+export function writeKeptConfig(doors: readonly SessionDoor[], dir: string): string {
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  chmodSync(dir, 0o700)
+  const file = join(dir, 'mcp.json')
+  const temporary = `${file}.${process.pid}.tmp`
+  writeFileSync(temporary, mcpConfig(doors), { mode: 0o600 })
+  renameSync(temporary, file)
+  return file
+}
+
+/** The doors a background conversation was last given, as its kept doors file says; empty when there is none. */
+export function keptDoors(dir: string): SessionDoor[] {
+  try {
+    const said = JSON.parse(readFileSync(join(dir, 'mcp.json'), 'utf8')) as { mcpServers?: Record<string, { type?: unknown; url?: unknown }> }
+    return Object.entries(said.mcpServers ?? {}).flatMap(([name, one]) =>
+      typeof one?.url === 'string' ? [{ module: '', name, url: one.url, transport: one.type === 'sse' ? ('sse' as const) : ('http' as const) }] : [],
+    )
+  } catch {
+    return []
+  }
+}
+
+/** How long a kept folder nothing has written to is left: two weeks. */
+export const KEPT_FOR = 14 * 24 * 60 * 60_000
+
+/** Remove the kept folders nothing has written to for `olderThan`. Never throws. */
+export function sweepKept(base = tmpdir(), olderThan = KEPT_FOR, now = Date.now()): number {
+  const root = configDirOf(base)
+  let names: string[] = []
+  try {
+    names = readdirSync(root)
+  } catch {
+    return 0
+  }
+  let swept = 0
+  for (const name of names) {
+    if (!/^session-[0-9a-f]{24}$/.test(name)) continue
+    try {
+      if (now - statSync(join(root, name)).mtimeMs < olderThan) continue
+      rmSync(join(root, name), { recursive: true, force: true })
+      swept += 1
+    } catch {
+      /* Gone already. */
+    }
+  }
+  return swept
 }
 
 export function removeConfig(file: string | null): void {

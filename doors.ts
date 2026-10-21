@@ -5,7 +5,7 @@ import { TICKET, elsewhereOf, sameProject, theRuns, type Elsewhere, type Run, ty
 import { ID, MANIFEST as DECLARED, VERSION } from './manifest.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, readPlaceKey, type Place } from './place.ts'
 import { PROGRAM, headOf, home, type Program, type Recorded, type Running, type State } from './program.ts'
-import { PLACE_TOKEN, WHERE, assign, detach, follow, homeOf, ownOf, projectRoot, readPlaces, recordedIds, rekey, sessionsAt, type Places } from './record.ts'
+import { PLACE_TOKEN, WHERE, assign, detach, follow, homeOf, ownOf, projectRoot, readPlaces, readSettings, recordedIds, rekey, sessionsAt, writeSettings, type Places } from './record.ts'
 import { enable, enabled, hookCommand, settingsFile } from './hook.ts'
 import { here } from './here.ts'
 import { serveFrom, skillAt, skillDeclarations } from './skills.ts'
@@ -651,6 +651,19 @@ export async function answer(
       id: typeof said.id === 'number' && Number.isSafeInteger(said.id) ? said.id : undefined,
     })
     return written.ok ? ok({ ok: true, moved: written.value.moved }) : bad(written.error)
+  }
+
+  /* This project's settings for this module: "Resume conversations cut off by a restart". A
+     person's, through the page's ticket; no MCP tool reads or changes them. */
+  if (path === '/api/settings' && method === 'GET') {
+    const root = projectRoot(query.get('projectPath'))
+    if (!root.ok) return bad(root.error)
+    return ok({ ok: true, settings: readSettings(root.value) })
+  }
+  if (path === '/api/settings' && method === 'POST') {
+    if (typeof body?.resumeCutOff !== 'boolean') return bad('say whether conversations cut off by a restart are resumed: true or false')
+    const written = writeSettings(typeof body?.projectPath === 'string' ? body.projectPath : null, { resumeCutOff: body.resumeCutOff })
+    return written.ok ? ok({ ok: true, settings: written.value }) : bad(written.error)
   }
 
   /* End a running session, because a person chose that one. Never asked OF a

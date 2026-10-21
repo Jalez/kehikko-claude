@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
+import { open as openFile, stat } from 'node:fs/promises'
 import type { IncomingMessage } from 'node:http'
 import { basename, join } from 'node:path'
 import type { Duplex } from 'node:stream'
@@ -9,10 +10,11 @@ import { mintTicket, sameTicket } from 'kehikot-module-protocol/serve'
 
 import { typedByPerson } from './input.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, sortedParts, type Kehikko } from './place.ts'
-import { PROGRAM, headOf, home, sessionName, type Active, type Program, type Running, type State } from './program.ts'
-import { assign, attach, born, byToken, follow, homeOf, note, projectRoot, readPlaces, recordedIds, sighted, tokenFor, type NamedPlace, type PlaceEntry, type Places } from './record.ts'
+import { cutOffs, cutOffWords, midTurn, movedOn, type CutOff } from './cutoff.ts'
+import { PROGRAM, headOf, home, recordFile, sessionName, type Active, type Able, type Program, type Running, type State } from './program.ts'
+import { assign, attach, born, byToken, follow, homeOf, markSession, markSessions, note, projectRoot, readPlaces, readSettings, recordedIds, sighted, tokenFor, type NamedPlace, type PlaceEntry, type Places, type SessionEntry } from './record.ts'
 import { removePlugin, sessionPlugin } from './skills.ts'
-import { freshToken, hostDoors, removeConfig, writeConfig, type DoorsAsked, type SessionDoor } from './doorConfig.ts'
+import { freshToken, hostDoors, keptDirOf, keptDoors, removeConfig, sweepKept, writeConfig, writeKeptConfig, type DoorsAsked, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
 
 /**
@@ -99,9 +101,14 @@ import { readPlaceKey } from './place.ts'
  * state. Everything else is as it was, including the rule that used to be
  * the only one: put away after a long silence.
  *
- * When this process stops, its sessions stop with it — nothing is left
- * running with no owner — and that costs nothing lasting, for the same
- * reason.
+ * When this process stops, what stops with it is the pty of each run. A
+ * conversation this module starts or resumes runs in Claude Code's own
+ * BACKGROUND (`claude --bg`, see "The background" in program.ts), so the pty
+ * is only a view of it (`attach`), and the conversation — its agents, its
+ * background shells — goes on, to be attached to again by the next start.
+ * What was cut off anyway is looked for when a project is first named
+ * (`recover`). Only a conversation that could not run there (a folder not yet
+ * trusted, a copy without `--bg`) is a child of the pty and stops with it.
  *
  * ## A conversation that is already running somewhere else
  *
@@ -280,6 +287,29 @@ export const tellLine = (event: string, script: string = TELL): string => `/bin/
 const LABEL_TRIES = 8
 /** How often a running session's process is asked which conversation it is showing (see `track`). */
 const TRACK_EVERY = 10_000
+
+/**
+ * The one sentence this module ever sends a conversation, and only one that a restart cut off
+ * mid-turn (see `recover`): once per interruption, behind the person's setting "Resume
+ * conversations cut off by a restart", which is on unless they turned it off.
+ */
+export const RESUME_LINE = 'Kehikot restarted while you were working. Some background work may have been cut off: check your task notifications and resume anything unfinished.'
+/** The setting's words, as the page draws them. */
+export const RESUME_SETTING = 'Resume conversations cut off by a restart'
+/**
+ * How recently a conversation recorded before this module kept a "working" mark must have last
+ * grown to be judged by its transcript instead (`midTurn`): the update that brought this release
+ * ended the sessions the old one held, and only their records say where they were.
+ */
+const LEGACY_WINDOW = 30 * 60_000
+/** How far back a conversation's cut-off tasks are told the first time its transcript is read. */
+const FIRST_LOOK = 24 * 60 * 60_000
+/** How often the transcripts of the watched projects' conversations are read for cut-off work, at most. */
+const CUTOFF_EVERY = 20_000
+/** How much of the end of a transcript is read for it. */
+const CUTOFF_TAIL = 1024 * 1024
+/** How long a "resumed after a restart" line stays in the Inbox when nobody opens the conversation. */
+const RESUMED_FOR = 24 * 60 * 60_000
 
 /**
  * What a session is called in Claude Code's own lists, from where it belongs:
@@ -581,6 +611,15 @@ export interface Run {
   config: string | null
   /** The plugin folder it was given with `--plugin-dir`, removed when the process ends. */
   plugin: string | null
+  /**
+   * A conversation this module runs in the BACKGROUND (`claude --bg`): `joined` is its session, the
+   * pty only a view of it, and ending the view — or this process — leaves it running. Set for one
+   * started or woken here, and for one the record says was (`background`). Its files are kept
+   * (`kept`), not removed with the view.
+   */
+  owned: boolean
+  /** The folder its doors file and plugin are kept in while it may be woken (`keptDirOf`). */
+  kept: string | null
 }
 
 /** A conversation's place, as this module's record says it: what `/api/kehikot/place` answers. */
@@ -746,7 +785,7 @@ const clip = (text: string, most: number): string => (text.length <= most ? text
  * the protocol refuses a long one; a place with more than 16 parts leaves them out and
  * keeps the epic and the kehikko.
  */
-export function activityRows(runs: Iterable<Run>, project: string | null = null, unviewed: Iterable<Unviewed> = []): ActivityRow[] {
+export function activityRows(runs: Iterable<Run>, project: string | null = null, unviewed: Iterable<Unviewed> = [], more: Iterable<ActivityRow> = []): ActivityRow[] {
   const rows: ActivityRow[] = []
   for (const run of runs) {
     if (run.what !== 'session' || run.ended || !run.state) continue
@@ -798,8 +837,100 @@ export function activityRows(runs: Iterable<Run>, project: string | null = null,
       project: one.projectPath,
     })
   }
+  /* What the conversations' records say besides their state: work a restart cut off, one woken after it (`recover`). */
+  for (const row of more) {
+    if (said.has(row.id) || (project !== null && row.project !== project)) continue
+    said.add(row.id)
+    rows.push(row)
+  }
   rows.sort((a, b) => ACTIVITY_ORDER[a.state] - ACTIVITY_ORDER[b.state] || b.since - a.since || a.id.localeCompare(b.id))
   return rows.slice(0, ACTIVITY_ITEMS)
+}
+
+/** The place a conversation's Inbox line goes to: the place it is open at, else the one it belongs to, else the first that lists it. */
+export function placeEntryFor(places: Places, id: string): PlaceEntry | null {
+  const entries = Object.entries(places.places).sort(([a], [b]) => a.localeCompare(b))
+  const current = entries.find(([, entry]) => entry.current === id)
+  if (current) return current[1]
+  const home = homeOf(places, id)
+  if (home && Object.hasOwn(places.places, home)) return places.places[home]!
+  return entries.find(([, entry]) => entry.sessions.includes(id))?.[1] ?? null
+}
+
+/** A place as an Inbox line carries it (`ActivityRow['place']`). */
+function rowPlace(entry: PlaceEntry | null): ActivityRow['place'] | undefined {
+  if (!entry) return undefined
+  const place: NonNullable<ActivityRow['place']> = {}
+  if (entry.epic) place.epic = entry.epic
+  if (entry.parts.length > 0 && entry.parts.length <= PLACE_PARTS) place.parts = [...entry.parts]
+  if (entry.kehikko?.key) place.kehikko = entry.kehikko.key
+  return Object.keys(place).length > 0 ? place : undefined
+}
+
+/**
+ * The Inbox lines a project's record holds besides its sessions' states (see `recover`):
+ *
+ *  - **`cut-off:<session>`, needs you**: background tasks of the conversation that a restart cut
+ *    off, or that failed, as its transcript says (cutoff.ts) — until the person moves the
+ *    conversation on, which is a prompt typed in it after them. A dismissed one stays dismissed
+ *    until another task is cut off (its `since` is the latest one's).
+ *  - **`resumed:<session>`, finished**: the conversation was working when a restart cut it off,
+ *    and was woken in the background and told so — until the person has it on screen, or a day.
+ */
+export function recordRows(places: Places, projectPath: string, now: number): ActivityRow[] {
+  const rows: ActivityRow[] = []
+  for (const [id, entry] of Object.entries(places.sessions)) {
+    if (entry.ignored) continue
+    const at = placeEntryFor(places, id)
+    if (!at) continue
+    const place = rowPlace(at)
+    const title = entry.label.replace(/\s+/g, ' ').trim() || 'Claude session'
+    const open = entry.cutOff?.open ?? []
+    if (open.length > 0) {
+      const { said, detail } = cutOffWords(open)
+      rows.push({
+        id: `cut-off:${id}`,
+        state: 'attention',
+        label: clip(`${title}: ${said}`, ACTIVITY_LABEL),
+        ...(place ? { place } : {}),
+        since: Math.max(...open.map((one) => one.at)),
+        detail: clip(detail, ACTIVITY_DETAIL),
+        project: projectPath,
+      })
+    }
+    const resumed = entry.resumed
+    const since = resumed ? Date.parse(resumed.at) : NaN
+    if (resumed && !resumed.told && Number.isFinite(since) && now - since < RESUMED_FOR) {
+      rows.push({
+        id: `resumed:${id}`,
+        state: 'done',
+        label: clip(`${title}: resumed after Kehikot restarted`, ACTIVITY_LABEL),
+        ...(place ? { place } : {}),
+        since,
+        detail: clip('It was working when Kehikot restarted, and was woken in the background and asked to check its background work and carry on.', ACTIVITY_DETAIL),
+        project: projectPath,
+      })
+    }
+  }
+  return rows
+}
+
+/** The last `most` bytes of a file, as text. Empty for anything that cannot be read. */
+async function tailOfFile(file: string, most: number): Promise<string> {
+  try {
+    const handle = await openFile(file, 'r')
+    try {
+      const { size } = await handle.stat()
+      const from = Math.max(0, size - most)
+      const buffer = Buffer.alloc(size - from)
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, from)
+      return buffer.subarray(0, bytesRead).toString('utf8')
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    return ''
+  }
 }
 
 /**
@@ -943,6 +1074,16 @@ export class Runs {
   private readonly showing = new Map<string, Showing>()
   /** Where each project's places' sessions were followed to, kept while the record and what is running are unchanged. */
   private readonly heads = new Map<string, { stamp: string; heads: Map<string, string> }>()
+  /** Each watched project's look at what was cut off while this module was not running (`recover`), once per project. */
+  private readonly recovering = new Map<string, Promise<void>>()
+  /** The Inbox lines the projects' records hold besides the sessions' states (`recordRows`), by project. */
+  private readonly extras = new Map<string, ActivityRow[]>()
+  /** What each transcript was when it was last read for cut-off work: its size and time, by project and session. */
+  private readonly cutRead = new Map<string, string>()
+  /** When the transcripts were last read for cut-off work (`CUTOFF_EVERY`). */
+  private cutAt = Number.NEGATIVE_INFINITY
+  /** Whether the kept folders of long-gone background conversations were swept since this process started. */
+  private swept = false
 
   constructor(private readonly options: RunsOptions) {
     this.program = options.program ?? PROGRAM
@@ -985,7 +1126,271 @@ export class Runs {
   know(projectPath: string): void {
     if (this.projects.has(projectPath)) return
     this.projects.add(projectPath)
+    if (!this.recovering.has(projectPath)) {
+      this.recovering.set(
+        projectPath,
+        this.recover(projectPath).catch((error: unknown) => this.log(`claude: looking for what a restart cut off in ${projectPath} failed — ${error instanceof Error ? error.message : String(error)}`)),
+      )
+    }
     this.kick()
+  }
+
+  /** The look at what a restart cut off in this project, when one was begun (for a test, and for `start`). */
+  recovered(projectPath: string): Promise<void> {
+    return this.recovering.get(projectPath) ?? Promise.resolve()
+  }
+
+  /**
+   * What happened in this project's conversations while this module was not running — asked once,
+   * when a page or an open first names the project after this process started.
+   *
+   * ## A conversation a restart cut off mid-turn
+   *
+   * A conversation this module runs in the background survives a restart of the module or of
+   * Kehikot (see "The background" in program.ts), but not everything does: one opened in the
+   * terminal (a folder not yet trusted, a copy of Claude Code without `--bg`), the sessions an
+   * older release of this module held when it was updated, and anything the computer restarting
+   * took with it. Each conversation's record carries `working` while this module sees it working;
+   * one still marked and no longer running was cut off. A record from before that mark is judged by
+   * its transcript instead: grown in the last half hour, and its last turn not ended (`midTurn`).
+   *
+   * Each such conversation, at most once per interruption (the mark is cleared first), and never
+   * one a person ended here (ending it clears the mark): woken in the background with one sentence
+   * of this module's (`RESUME_LINE`), and one Inbox line says so — unless the person turned off
+   * "Resume conversations cut off by a restart" in this project, when it is left for them.
+   *
+   * ## Background work that did not finish
+   *
+   * Then every conversation's transcript is read for background tasks that were cut off or failed
+   * (`readCutOffs`), so what happened while this module was down is told too.
+   */
+  async recover(projectPath: string): Promise<void> {
+    if (!this.swept) {
+      this.swept = true
+      const swept = sweepKept(this.options.configBase)
+      if (swept) this.log(`claude: removed ${swept} kept folder${swept === 1 ? '' : 's'} of background conversations nothing has written to in two weeks`)
+    }
+    const read = readPlaces(projectPath)
+    if (!read.ok) return
+    /* The ones that may have been cut off first, from the record and their transcripts; the program
+       is asked what is running only when there is one. */
+    const candidates: [string, PlaceEntry][] = []
+    for (const [id, entry] of Object.entries(read.value.sessions)) {
+      if (entry.ignored || this.find(id)) continue
+      const at = placeEntryFor(read.value, id)
+      if (at && (entry.working || (await this.wasCut(projectPath, id, entry)))) candidates.push([id, at])
+    }
+    const file = candidates.length ? this.program.find().file : null
+    const running = file ? await this.running(file) : ({ known: false, why: 'failed' } as const)
+    if (file && running.known) {
+      const able = await this.program.supports(file)
+      const settings = readSettings(projectPath)
+      const live = new Set(running.active.map((one) => one.session))
+      for (const [id, at] of candidates) {
+        if (live.has(id) || this.find(id)) continue
+        /* Once per interruption: the mark goes before anything else is tried. */
+        markSession(projectPath, id, (one) => {
+          if (!one.working) return false
+          delete one.working
+          return true
+        })
+        if (!settings.resumeCutOff) {
+          this.log(`claude: ${id} was working when it was cut off by a restart; not resumed — "${RESUME_SETTING}" is off in ${projectPath}`)
+          continue
+        }
+        if (!able.backgrounds || !this.program.background) {
+          this.log(`claude: ${id} was working when it was cut off by a restart; this ${this.program.name} cannot run it in the background, so it is left for the person to open`)
+          continue
+        }
+        const woke = await this.launch(file, able, projectPath, projectIdAt(projectPath), id, placeOf(at), RESUME_LINE)
+        if (!woke.ok) {
+          this.log(`claude: ${id} was working when it was cut off by a restart, and could not be woken — ${woke.why}`)
+          continue
+        }
+        this.log(`claude: ${id} was working when it was cut off by a restart — woken in the background${woke.session !== id ? ` as ${woke.session}` : ''} and told so`)
+        markSession(projectPath, woke.session, (one) => {
+          one.resumed = { at: new Date(this.now()).toISOString() }
+          return true
+        })
+      }
+    }
+    await this.readCutOffs(projectPath, true)
+  }
+
+  /**
+   * Whether a conversation recorded before this module kept a `working` mark was cut off mid-turn:
+   * never read by this release (no `cutOff`), never run in the background, its transcript grown in
+   * the last half hour, and its last turn not ended.
+   */
+  private async wasCut(projectPath: string, id: string, entry: SessionEntry): Promise<boolean> {
+    if (entry.cutOff || entry.background || entry.resumed) return false
+    const file = await recordFile(projectPath, id)
+    if (!file) return false
+    try {
+      if (this.now() - (await stat(file)).mtimeMs > LEGACY_WINDOW) return false
+    } catch {
+      return false
+    }
+    return midTurn(await tailOfFile(file, CUTOFF_TAIL))
+  }
+
+  /**
+   * Read the transcripts of this project's conversations for background tasks that were cut off or
+   * failed (cutoff.ts), and keep what is found in the record (`cutOff`): each task once, read up to
+   * the last one told; told until the person moves the conversation on. A transcript is read again
+   * only when it has grown, and only what is newer than the last one told — the first time, the
+   * last day of it. Not more often than `CUTOFF_EVERY` unless `now`.
+   */
+  async readCutOffs(projectPath: string, now = false): Promise<void> {
+    if (!now && this.now() - this.cutAt < CUTOFF_EVERY) return
+    if (!now) this.cutAt = this.now()
+    const read = readPlaces(projectPath)
+    if (!read.ok) return
+    const edits = new Map<string, (entry: SessionEntry) => boolean>()
+    for (const [id, entry] of Object.entries(read.value.sessions)) {
+      if (entry.ignored || !placeEntryFor(read.value, id)) continue
+      const file = await recordFile(projectPath, id)
+      if (!file) continue
+      let stamp = ''
+      let grown = 0
+      try {
+        const said = await stat(file)
+        stamp = `${said.size}@${said.mtimeMs}`
+        grown = said.mtimeMs
+      } catch {
+        continue
+      }
+      const key = `${projectPath}\0${id}`
+      if (this.cutRead.get(key) === stamp) continue
+      this.cutRead.set(key, stamp)
+      const since = entry.cutOff?.through ?? this.now() - FIRST_LOOK
+      if (entry.cutOff && grown <= since && entry.cutOff.open.length === 0) continue
+      const tail = await tailOfFile(file, CUTOFF_TAIL)
+      const fresh = cutOffs(tail).filter((one) => one.at > since)
+      const open: CutOff[] = [...(entry.cutOff?.open ?? []), ...fresh].slice(-8)
+      const latest = open.reduce((most, one) => Math.max(most, one.at), 0)
+      const dealt = open.length > 0 && movedOn(tail, latest, [RESUME_LINE])
+      const next = { through: fresh.reduce((most, one) => Math.max(most, one.at), since), open: dealt ? [] : open }
+      if (JSON.stringify(next) === JSON.stringify(entry.cutOff ?? null)) continue
+      if (fresh.length) this.log(`claude: ${id} — ${fresh.map((one) => one.summary).join('; ')}`)
+      if (dealt) this.log(`claude: ${id} moved on since its background work was cut off; its Inbox line goes`)
+      edits.set(id, (one) => {
+        one.cutOff = next
+        return true
+      })
+    }
+    const written = markSessions(projectPath, edits)
+    if (!written.ok) this.log(`claude: ${written.error}`)
+    this.recount(projectPath)
+  }
+
+  /** The Inbox lines of a project's record, read again; said where they changed. */
+  private recount(projectPath: string): void {
+    const read = readPlaces(projectPath)
+    this.extras.set(projectPath, read.ok ? recordRows(read.value, projectPath, this.now()) : [])
+    this.changed()
+  }
+
+  /**
+   * Start or wake a conversation in the BACKGROUND (`claude --bg`), with its doors and its plugin in
+   * its kept folder (`keptDirOf`): a new one (`settled` null), or a recorded one. One this module ran
+   * in the background before is woken with no flag (its saved options are these files, rewritten
+   * now); any other is given them, and Claude Code keeps them from then on. `line` is
+   * `RESUME_LINE`, or nothing. A conversation carried on as a copy is followed in the record.
+   */
+  private async launch(
+    file: string,
+    able: Able,
+    projectPath: string,
+    projectId: string | null,
+    settled: string | null,
+    place: NamedPlace,
+    line?: string,
+  ): Promise<{ ok: true; active: Active; session: string; kept: string; token: string; doors: SessionDoor[] } | { ok: false; why: string }> {
+    const program = this.program
+    if (!program.background || !program.backgroundArgs) return { ok: false, why: `this ${program.name} cannot run a session in the background` }
+    const read = settled ? readPlaces(projectPath) : null
+    const entry = settled && read?.ok && Object.hasOwn(read.value.sessions, settled) ? read.value.sessions[settled] : undefined
+    const saved = Boolean(entry?.background)
+    const token = (settled ? tokenFor(projectPath, settled, freshToken) : null) ?? freshToken()
+    const kept = keptDirOf(token, this.options.configBase)
+    let doors: SessionDoor[] = []
+    let config: string | null = null
+    if (able.configures) {
+      const kehikko = place.kehikko && 'key' in place.kehikko ? place.kehikko.key : null
+      const got = await (this.options.doors ?? hostDoors)({ projectPath, projectId, token, kehikko }).catch(() => null)
+      if (got?.length) {
+        try {
+          config = writeKeptConfig(got, kept)
+          doors = got
+        } catch (error) {
+          this.log(`claude: the session's doors could not be written — ${error instanceof Error ? error.message : String(error)}`)
+        }
+      } else {
+        this.log('claude: no host gave this session its doors; it starts with the agent’s own configuration')
+      }
+    }
+    const plugin = able.plugins ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log, into: join(kept, 'plugin') }) : null
+    const name = able.names ? placeName(projectPath, place) : ''
+    const args = [
+      ...program.backgroundArgs(settled, name || undefined, saved, line),
+      /* Saved options are the session's own: a flag here would carry it on as a copy. Last: `--mcp-config` takes every word after it. */
+      ...(saved ? [] : [...(plugin ? ['--plugin-dir', plugin] : []), ...(config ? ['--mcp-config', config] : [])]),
+    ]
+    const woke = await program.background(file, args, projectPath, program.environment())
+    if (!woke.ok) return woke
+    const session = woke.active.session
+    if (settled && session !== settled) {
+      this.log(`claude: ${settled} was carried on in the background as ${session} — the record follows it`)
+      const moved = follow(projectPath, settled, session)
+      if (!moved.ok) this.log(`claude: ${moved.error}`)
+    }
+    this.markBackground(projectPath, session)
+    return { ok: true, active: woke.active, session, kept, token, doors }
+  }
+
+  /** Record that a conversation runs in the background with this module's saved options. Nothing for one the record does not hold yet. */
+  private markBackground(projectPath: string, id: string): void {
+    const written = markSession(projectPath, id, (entry) => {
+      if (entry.background) return false
+      entry.background = true
+      return true
+    })
+    if (!written.ok) this.log(`claude: ${written.error}`)
+  }
+
+  /**
+   * Keep the record's `working` mark with what a conversation is doing: set when it starts working,
+   * gone when its turn ends or it stops for the person. Nothing is said of "no state": that is also
+   * what a conversation cut off looks like, and the mark is what tells that apart (`recover`).
+   */
+  private markWorking(projectPath: string, id: string | null, state: State | null): void {
+    if (!id || state === null) return
+    const working = state === 'working'
+    const written = markSession(projectPath, id, (entry) => {
+      if (working) {
+        if (entry.working) return false
+        entry.working = new Date(this.now()).toISOString()
+        return true
+      }
+      if (!entry.working) return false
+      delete entry.working
+      return true
+    })
+    if (!written.ok) this.log(`claude: ${written.error}`)
+  }
+
+  /** The person has the conversation on screen: its "resumed after a restart" line has been seen, and goes. */
+  private toldResumed(run: Run): void {
+    const id = run.settled
+    if (!id || run.looking.size === 0) return
+    if (!(this.extras.get(run.projectPath) ?? []).some((row) => row.id === `resumed:${id}`)) return
+    markSession(run.projectPath, id, (entry) => {
+      if (!entry.resumed || entry.resumed.told) return false
+      entry.resumed.told = true
+      return true
+    })
+    this.recount(run.projectPath)
   }
 
   /** Ask now, if something is to be asked about and the clock runs, and then keep the clock. */
@@ -1036,6 +1441,8 @@ export class Runs {
         this.become(run, listed?.state ?? null)
       }
       await this.see(running)
+      for (const projectPath of this.projects) await this.readCutOffs(projectPath).catch(() => {})
+      if (this.projects.size > 0) this.cutAt = this.now()
     } finally {
       this.watchBusy = false
     }
@@ -1097,6 +1504,7 @@ export class Runs {
     for (const [id, one] of next) this.unviewed.set(id, one)
     for (const one of gone) if (!mine.has(one.session)) this.announce({ session: one.session, state: null, since: this.now() })
     for (const one of moved) {
+      this.markWorking(one.projectPath, one.session, one.state)
       this.announce({ session: one.session, state: one.state, since: one.since })
       if (before.has(one.session)) this.noticeOf(one)
     }
@@ -1201,7 +1609,7 @@ export class Runs {
       if (run.elsewhere) viewer.say({ elsewhere: run.elsewhere, session: id })
       return run
     }
-    this.attach(run, viewer, asked.cols, asked.rows, inFlight ? 'attached' : run.joined ? 'background' : run.copyOf ? 'copy' : run.settled ? 'resumed' : 'new')
+    this.attach(run, viewer, asked.cols, asked.rows, inFlight ? 'attached' : run.joined && !run.owned ? 'background' : run.copyOf ? 'copy' : run.settled ? 'resumed' : 'new')
     return run
   }
 
@@ -1318,7 +1726,7 @@ export class Runs {
    */
   async doorsChanged(id: string): Promise<{ added: string[]; removed: string[] } | null> {
     const run = this.find(id)
-    if (!run?.token || !run.config) return null
+    if (!run?.token || (!run.config && !run.kept)) return null
     const kehikko = run.at?.kehikko && 'key' in run.at.kehikko ? run.at.kehikko.key : null
     const now = await (this.options.doors ?? hostDoors)({ projectPath: run.projectPath, projectId: run.projectId, token: run.token, kehikko }).catch(() => null)
     if (!now) return null
@@ -1337,11 +1745,13 @@ export class Runs {
     const run = this.find(id)
     if (!run) return 'That session is not running.'
     if (why === 'moved' && run.cwd === run.projectPath) return 'That session already runs in its project’s folder.'
-    if (run.joined) return 'That is a view of a session running in the background: it runs where it was started.'
+    if (run.joined && !(run.owned && why === 'doors')) return 'That is a view of a session running in the background: it runs where it was started.'
     if (run.state === 'working') return 'It is working. Restart it when it is idle.'
     run.restarting = true
     this.log(`claude: ${run.settled ?? run.id} is ended by a person to be resumed ${why === 'doors' ? 'with the doors of its kehikko now' : `in ${run.projectPath}`}`)
-    kill(run.pty)
+    /* One this module runs in the background is stopped (its conversation kept) and woken again by the page, with its files rewritten. */
+    if (run.owned && run.joined?.handle) void this.stopOwned(run).finally(() => kill(run.pty))
+    else kill(run.pty)
     return true
   }
 
@@ -1433,6 +1843,8 @@ export class Runs {
   private async start(projectPath: string, id: string, asked: Extract<Opening, { what: 'session' }>): Promise<Run | Refusal> {
     const found = this.program.find()
     if (!found.file) return { code: CLOSED.missing, why: `${this.program.name} is not installed.` }
+    /* The look at what a restart cut off goes first: it may be waking this very conversation. */
+    await this.recovered(projectPath)
 
     let settled = await this.program.settled(projectPath, id, 0)
     if (asked.session && !settled) {
@@ -1465,6 +1877,38 @@ export class Runs {
       else if (open) {
         this.log(`claude: ${settled} is open in another ${this.program.name} process (${open.called || 'unknown kind'}, pid ${open.pid ?? '?'}) — nothing was started, and the page asks`)
         return { code: CLOSED.elsewhere, why: 'open in another process; nothing was started', elsewhere: elsewhereOf(open) }
+      }
+    }
+
+    /* Run it in the BACKGROUND (see "The background" in program.ts): what this pty holds is then
+       only a view, and the conversation outlives it, this module's process and the app. A copy
+       that cannot, a folder not yet trusted, a copy a person asked for beside another process, or
+       an asking that failed (one may be running elsewhere): in this terminal, as before. */
+    const able = await this.program.supports(found.file)
+    let owned = false
+    let kept: string | null = null
+    let woken: { token: string; doors: SessionDoor[] } | null = null
+    if (joined && settled) {
+      const read = readPlaces(projectPath)
+      owned = read.ok && Boolean(Object.hasOwn(read.value.sessions, settled) && read.value.sessions[settled]?.background)
+      /* Attached to again after a restart: its token, and the doors its kept file gave it, for "Restart to load …". */
+      const token = owned ? tokenFor(projectPath, settled, freshToken) : null
+      if (token) {
+        kept = keptDirOf(token, this.options.configBase)
+        woken = { token, doors: keptDoors(kept) }
+      }
+    }
+    if (!joined && !copyOf && !unchecked && able.backgrounds && able.lists) {
+      const woke = await this.launch(found.file, able, projectPath, asked.projectId ?? projectIdAt(projectPath), settled, asked.place)
+      if (woke.ok) {
+        joined = woke.active
+        owned = true
+        kept = woke.kept
+        woken = { token: woke.token, doors: woke.doors }
+        if (settled) settled = woke.session
+        else id = woke.session
+      } else {
+        this.log(`claude: ${settled ?? 'a new conversation'} could not be run in the background (${woke.why}) — opened in this terminal instead, where it ends with this module`)
       }
     }
 
@@ -1572,19 +2016,25 @@ export class Runs {
       joining: new Map(),
       looking: new Set(),
       ended: false,
-      token,
-      doors,
+      token: woken?.token ?? token,
+      doors: woken?.doors ?? doors,
       config,
       plugin,
+      owned,
+      kept,
     }
     this.runs.set(id, run)
     /* A view of it now says it: the row listed for it while nobody had one goes. */
     if (settled && this.unviewed.delete(settled)) this.changed()
     /* What the program said the background session is doing when it was asked, a moment ago; asked again on a clock from here (`watch`). */
-    if (joined?.state) run.state = joined.state
+    if (joined?.state) {
+      run.state = joined.state
+      this.markWorking(projectPath, settled, joined.state)
+    }
     this.keepWatching()
     this.log(`claude: ${found.file} ${args.slice(0, 2).join(' ')}${tells ? ', asked to report' : ''} in ${projectPath} (pid ${pty.pid})`)
-    if (joined) this.log(`claude: ${settled} is running in the background (pid ${joined.pid ?? '?'}) — attached to it, and no second process was started`)
+    if (joined && owned) this.log(`claude: ${settled ?? id} runs in the background as ${joined.handle} — this terminal is a view of it, and it outlives this module`)
+    else if (joined) this.log(`claude: ${settled} is running in the background (pid ${joined.pid ?? '?'}) — attached to it, and no second process was started`)
     if (copyOf) this.log(`claude: ${settled} is open in another process (pid ${copyOf.pid ?? '?'}) and a person chose to open a copy here`)
     if (unchecked) {
       this.log(`claude: ${settled} was resumed without asking whether it is running elsewhere — ${unchecked === 'too-old' ? 'this copy has no `agents --json` or no `attach`' : 'the asking failed'}`)
@@ -1613,6 +2063,7 @@ export class Runs {
       ? assign(run.projectPath, place, run.settled, { label: run.label, lastActive: this.now() })
       : attach(run.projectPath, place, run.settled, { label: run.label, lastActive: this.now() })
     if (!written.ok) this.log(`claude: ${written.error}`)
+    if (run.owned) this.markBackground(run.projectPath, run.settled)
   }
 
   private follow(run: Run): void {
@@ -1665,6 +2116,8 @@ export class Runs {
       const written = born(run.projectPath, run.place, run.settled, run.token, { label, lastActive: known?.lastActive })
       if (!written.ok) this.log(`claude: ${written.error}`)
       run.place = null
+      if (run.owned) this.markBackground(run.projectPath, run.settled)
+      if (run.state) this.markWorking(run.projectPath, run.settled, run.state)
     } else {
       note(run.projectPath, run.settled, { label, lastActive: known?.lastActive })
     }
@@ -1727,7 +2180,7 @@ export class Runs {
       /* What this run is, for as long as it is on screen: a view of a session
          running in the background, a copy beside another process, or one
          resumed without the program having been asked. */
-      ...(run.joined ? { background: elsewhereOf(run.joined) } : {}),
+      ...(run.joined && !run.owned ? { background: elsewhereOf(run.joined) } : {}),
       ...(run.copyOf ? { copyOf: elsewhereOf(run.copyOf) } : {}),
       ...(run.unchecked ? { unchecked: run.unchecked } : {}),
       /* The project's folder was renamed while it ran: the program still has the old one. */
@@ -1735,6 +2188,7 @@ export class Runs {
     })
     /* On screen until the page says otherwise: a view connects when it is shown. */
     run.looking.add(viewer)
+    if (run.what === 'session') this.toldResumed(run)
     /* The same viewer attaching again replaces its own wait rather than adding a second. */
     run.viewers.delete(viewer)
     const since: string[] = []
@@ -1759,6 +2213,7 @@ export class Runs {
     if (run.ended) return
     if (looking) {
       run.looking.add(viewer)
+      this.toldResumed(run)
       return
     }
     if (run.looking.delete(viewer) && run.looking.size === 0) this.left(run)
@@ -1802,6 +2257,7 @@ export class Runs {
     if (run.state === state) return
     run.state = state
     run.stateSince = this.now()
+    this.markWorking(run.projectPath, run.settled, state)
     this.tell(run)
     if (state !== 'needs-you' && state !== 'finished') return
     if (run.looking.size > 0) return
@@ -1855,7 +2311,7 @@ export class Runs {
   activity(project: string | null = null): ActivityRow[] {
     /* The sessions, and nothing about conversations that belong to no kehikko: that is said on the
        page of the kehikko that has none, not in the Inbox. A host closes an item absent from the list. */
-    return activityRows(this.runs.values(), project, this.unviewed.values()).slice(0, ACTIVITY_ITEMS)
+    return activityRows(this.runs.values(), project, this.unviewed.values(), [...this.extras.values()].flat()).slice(0, ACTIVITY_ITEMS)
   }
 
   /**
@@ -1974,7 +2430,11 @@ export class Runs {
         .then(() => {
           if (run.ended || run.viewers.size + run.joining.size > 0 || run.touched || run.settled) return
           this.log(`claude: ended ${run.id}, which nobody had typed into and nobody was looking at`)
-          kill(run.pty)
+          /* Started in the background a moment ago and never a conversation: it goes, then its view. */
+          const file = this.program.find().file
+          if (run.owned && run.joined?.handle && file && this.program.remove) {
+            void this.program.remove(file, run.joined.handle).catch(() => false).finally(() => kill(run.pty))
+          } else kill(run.pty)
         })
     }, this.grace)
     run.idle.unref?.()
@@ -2084,6 +2544,8 @@ export class Runs {
       doors: [],
       config: null,
       plugin: null,
+      owned: false,
+      kept: null,
     }
     this.runs.set(INSTALL, run)
     this.log(`claude: installing, on a press in the page — ${line}`)
@@ -2101,11 +2563,28 @@ export class Runs {
   end(id: string): boolean {
     const run = this.find(id)
     if (!run) return false
-    kill(run.pty)
+    /* A person ended it: whatever it was doing, it was not cut off (`recover`). */
+    this.markWorking(run.projectPath, run.settled, 'finished')
+    /* One this module runs in the background is a conversation of the person's: "End" stops it. */
+    if (run.owned && run.joined?.handle) void this.stopOwned(run).finally(() => kill(run.pty))
+    else kill(run.pty)
     return true
   }
 
-  /** End everything: this process is stopping, and nothing it started may outlive it. */
+  /** Stop a background conversation this module runs (`claude stop`): its conversation is kept. */
+  private async stopOwned(run: Run): Promise<void> {
+    const file = this.program.find().file
+    const handle = run.joined?.handle
+    if (!file || !handle || !this.program.stop) return
+    const stopped = await this.program.stop(file, handle).catch(() => false)
+    this.log(`claude: ${stopped ? 'stopped' : 'could not stop'} background session ${handle} (${run.settled ?? run.id}), on a person's press`)
+  }
+
+  /**
+   * End everything: this process is stopping, and nothing it started may outlive it — except a
+   * conversation it runs in the background, which is the point of running it there: what ends is
+   * the view, and the next start of this module attaches to it again.
+   */
   endAll(): void {
     for (const run of this.runs.values()) {
       kill(run.pty)

@@ -47,7 +47,10 @@ import { delimiter, join } from 'node:path'
  *
  * ## What is never here
  *
- * A prompt. Nothing in this module sends one: the person types. And no flag
+ * A prompt of anybody's but the person's: the person types. The one sentence
+ * this module ever sends is its own, fixed, to a conversation a restart cut
+ * off mid-turn, behind a setting the person can turn off (`RESUME_LINE` in
+ * live.ts). And no flag
  * that widens what the program may do. `fresh` and `resume` name a session;
  * `reports` adds, for a copy that can take it, the one other thing on the
  * command line — the program's own hooks, pointed at this module — and that
@@ -61,14 +64,50 @@ import { delimiter, join } from 'node:path'
  *     claude --resume <uuid> [--name <place>] [--settings <json>] [--plugin-dir <plugin>] [--mcp-config <file>]      a session nothing else is running
  *     claude agents --json                            before every resume and every list: what is running. Reads; starts nothing
  *     claude attach <handle>                          a view of a session the program runs in the background
+ *     claude --bg [--resume <uuid>] [<line>] [--name <place>] [--plugin-dir <plugin>] [--mcp-config <file>]
+ *                                                     a conversation of a place's, started or resumed in the background
+ *     claude stop <handle>                            a background session of this module's, ended by a person
+ *     claude rm <handle>                              one this module started that nobody ever typed into
  *
- * The last two were added for the eighth question, deliberately. Neither
- * carries a prompt or a permission. `<uuid>` is an id this module minted or
+ * `agents --json` and `attach` were added for the eighth question, deliberately.
+ * Neither carries a prompt or a permission. `<uuid>` is an id this module minted or
  * the program holds a record for; `<handle>` is a word the program itself
- * printed in `agents --json` a moment before, checked to be one word that
+ * printed in `agents --json` (or `--bg`) a moment before, checked to be one word that
  * cannot be read as a flag (`HANDLE`). Nothing a page sent is ever an
- * argument. Never `stop`, `rm`, `respawn` or `--bg`: this module does not
- * end, delete, restart or start anything in the background.
+ * argument.
+ *
+ * ## The background, and why a conversation runs there (`--bg`)
+ *
+ * A conversation that was a child of this module's process died with it: an
+ * update of the module, a restart of Kehikot, and every agent and background
+ * shell in every conversation was cut off. So a conversation this module starts
+ * or resumes runs as one of Claude Code's own BACKGROUND sessions (`--bg`), and
+ * the terminal in the container is only `attach`ed to it. Detaching — the module
+ * stopping, the app quitting, a page reloading — leaves it running, and the
+ * next start attaches again. Measured on 2.1.306:
+ *
+ *  - `--bg` runs the session under Claude Code's own daemon (re-parented to
+ *    launchd, its own process group), prints `backgrounded · <handle> · <name>`
+ *    and returns. It ignores `--session-id` ("--bg manages the session id"), so
+ *    the id is the program's choice, read back from `agents --json` by handle.
+ *  - `--name`, `--plugin-dir` and `--mcp-config` reach the session, and are kept
+ *    as its "saved options": the same files are read again when it is woken.
+ *    `--resume <id>` with NO flags wakes a stopped one under the same id with
+ *    those options; with flags, a background session's conversation is carried
+ *    on as a copy under a new id (which `background` reports, and the record
+ *    follows).
+ *  - The environment of the caller does NOT reach the session (it is the
+ *    daemon's), so a background session is never asked to report through
+ *    `tell.sh`: what it is doing is asked of the program (`agents --json`).
+ *  - A folder not yet trusted is refused ("Workspace not trusted"); the
+ *    conversation is then opened in the terminal as before, where the trust
+ *    question is asked.
+ *
+ * `<line>` is one fixed sentence of this module's (`RESUME_LINE` in live.ts),
+ * sent once to a conversation that a restart cut off mid-turn, behind a
+ * setting the person can turn off. `stop` is only ever a person's "End" on a
+ * conversation this module runs in the background; `rm` only one this module
+ * started a moment ago that nobody typed a character into. Never `respawn`.
  */
 
 export interface Found {
@@ -103,7 +142,23 @@ export interface Able {
   configures?: boolean
   /** Whether this copy loads a plugin for one process (`--plugin-dir`): how a session is given `/kehikot-here`. */
   plugins?: boolean
+  /**
+   * Whether this copy runs a session in the background and can stop one (`--bg`, `stop`, `rm`):
+   * how a conversation outlives this module's process. Only with `lists`, since a background
+   * session is opened by `attach`.
+   */
+  backgrounds?: boolean
 }
+
+/** A session started or woken in the background (`--bg`), or why not. */
+export type Backgrounded =
+  | {
+      ok: true
+      handle: string
+      /** What `agents --json` says of it: its session id among the rest. */
+      active: Active
+    }
+  | { ok: false; why: string }
 
 /**
  * One session the program says is running now, in a process of its own.
@@ -257,6 +312,19 @@ export interface Program {
   active(file: string, env?: NodeJS.ProcessEnv): Promise<Running>
   /** The arguments that open a view of a background session, by the handle `active` gave for it. */
   attach(handle: string): string[]
+  /**
+   * The arguments, after `--bg`, that start a conversation in the background (`resume` null) or wake
+   * one. `saved`: it is a background session this module started, whose saved options are already
+   * its own, so no other flag may be given (a flag would carry it on as a copy). `line` is a sentence
+   * of this module's own to send it, or nothing.
+   */
+  backgroundArgs?(resume: string | null, name: string | undefined, saved: boolean, line?: string): string[]
+  /** Start or wake a session in the background, in `cwd`: `claude --bg <args>`. Only for a copy whose `supports()` said `backgrounds`. */
+  background?(file: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<Backgrounded>
+  /** Stop a background session by its handle; its conversation is kept. False when the program did not say it did. */
+  stop?(file: string, handle: string, env?: NodeJS.ProcessEnv): Promise<boolean>
+  /** Remove a background session by its handle, conversation and all. Only ever one this module started that nobody typed into. */
+  remove?(file: string, handle: string, env?: NodeJS.ProcessEnv): Promise<boolean>
 }
 
 /* ------------------------------------------------------------------------ *
@@ -392,6 +460,17 @@ const CONFIGURES = '--mcp-config <'
  */
 const PLUGINS = '--plugin-dir <'
 
+/**
+ * What a copy that runs sessions in the background has: the flag, and the commands that stop and
+ * remove one. From the help of 2.1.306:
+ *
+ *     --bg, --background   Start the session in the background and return immediately. Prints the id that
+ *                          `claude attach`, `logs`, `stop` and `rm` take; …
+ *     rm <id>              Delete a background session, …
+ *     stop|kill <id>       Stop a background session. Its conversation is kept: …
+ */
+const BACKGROUNDS = [/--bg\b/, /^\s*stop\b/m, /^\s*rm\b/m]
+
 const able = new Map<string, Able>()
 
 /**
@@ -412,10 +491,12 @@ const able = new Map<string, Able>()
  * Nothing is typed into the program (its standard input is closed), and what
  * comes back is `''` for anything that went wrong.
  */
-function answered(file: string, args: readonly string[], env?: NodeJS.ProcessEnv): Promise<string> {
+function answered(file: string, args: readonly string[], env?: NodeJS.ProcessEnv, more: { cwd?: string; timeout?: number; errors?: boolean } = {}): Promise<string> {
+  /* `errors`: what the program says on its standard error is part of the answer (`--bg` refusing). */
+  const line = more.errors ? '"$0" "$@" </dev/null 2>&1 | /bin/cat' : '"$0" "$@" </dev/null | /bin/cat'
   return new Promise((done) => {
-    const child = execFile('/bin/sh', ['-c', '"$0" "$@" </dev/null | /bin/cat', file, ...args], { timeout: 8000, maxBuffer: 16 * 1024 * 1024, ...(env ? { env } : {}) }, (error, stdout) =>
-      done(error ? '' : stdout),
+    const child = execFile('/bin/sh', ['-c', line, file, ...args], { timeout: more.timeout ?? 8000, maxBuffer: 16 * 1024 * 1024, ...(env ? { env } : {}), ...(more.cwd ? { cwd: more.cwd } : {}) }, (error, stdout) =>
+      done(error && !more.errors ? '' : String(stdout ?? '')),
     )
     child.on('error', () => done(''))
   })
@@ -443,10 +524,11 @@ async function supports(file: string): Promise<Able> {
   /* Nothing was learned, so nothing extra is passed either: a flag this copy
      turned out not to have would stop it from starting at all. */
   const said: Able = !stdout
-    ? { ok: true, missing: null, tells: false, lists: false, names: false, configures: false, plugins: false }
+    ? { ok: true, missing: null, tells: false, lists: false, names: false, configures: false, plugins: false, backgrounds: false }
     : (() => {
         const missing = NEEDS.find((flag) => !stdout.includes(flag)) ?? null
-        return { ok: missing === null, missing, tells: stdout.includes(TELLS), lists: LISTS.every((command) => command.test(stdout)), names: stdout.includes(NAMES), configures: stdout.includes(CONFIGURES), plugins: stdout.includes(PLUGINS) }
+        const lists = LISTS.every((command) => command.test(stdout))
+        return { ok: missing === null, missing, tells: stdout.includes(TELLS), lists, names: stdout.includes(NAMES), configures: stdout.includes(CONFIGURES), plugins: stdout.includes(PLUGINS), backgrounds: lists && BACKGROUNDS.every((one) => one.test(stdout)) }
       })()
   able.set(stamp, said)
   return said
@@ -984,6 +1066,36 @@ async function active(file: string, env: NodeJS.ProcessEnv = process.env): Promi
   return { known: true, active: parsed.map(readActive).filter((one): one is Active => one !== null) }
 }
 
+/** What `--bg` prints when the session is under way: `backgrounded · <handle> · <name>`. */
+const BACKGROUNDED = /backgrounded\s*·\s*([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?![A-Za-z0-9_-])/
+
+/** The first line of what the program said, short, for a log line and a sentence. */
+const saidFirst = (text: string): string => line(text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ''), 200)
+
+/**
+ * `claude --bg <args>` in `cwd`, and the session it started, as `agents --json` lists it a moment
+ * later (the handle it printed is the short id; the session id is read from the list). Never throws.
+ */
+async function background(file: string, args: string[], cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<Backgrounded> {
+  const said = await answered(file, ['--bg', ...args], environment(env), { cwd, timeout: 60_000, errors: true })
+  const handle = BACKGROUNDED.exec(said)?.[1] ?? null
+  if (!handle || !HANDLE.test(handle)) return { ok: false, why: saidFirst(said) || `${BINARY} --bg said nothing` }
+  for (let tries = 0; tries < 10; tries += 1) {
+    const running = await active(file, env)
+    const found = running.known ? running.active.find((one) => one.kind === 'background' && one.handle === handle) : undefined
+    if (found) return { ok: true, handle, active: found }
+    await new Promise((done) => setTimeout(done, 300))
+  }
+  return { ok: false, why: `${handle} was started in the background and is not in \`agents --json\`` }
+}
+
+/** `claude stop|rm <handle>`: whether the program said it did. */
+async function command(word: 'stop' | 'rm', file: string, handle: string, env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
+  if (!HANDLE.test(handle)) return false
+  const said = await answered(file, [word, handle], environment(env), { timeout: 20_000, errors: true })
+  return new RegExp(`\\b(stopped|removed)\\s+${handle}\\b`).test(said)
+}
+
 /** `--name` and the name, or nothing. Only a name `sessionName` would give is passed. */
 const named = (name: string | undefined): string[] => {
   const clean = name ? sessionName([name]) : ''
@@ -1015,5 +1127,16 @@ export const PROGRAM: Program = {
     if (!HANDLE.test(handle)) throw new Error('that is not a background session’s handle')
     return ['attach', handle]
   },
+  /* No `--session-id`: `--bg` chooses the id. A line of this module's own goes right after the id,
+     before any flag: `--mcp-config` takes every word after it. */
+  backgroundArgs: (resume, name, saved, said) => {
+    if (resume !== null && !SESSION_ID.test(resume)) throw new Error('that is not a session id')
+    const words = said && !said.startsWith('-') ? [said] : []
+    if (resume === null) return [...words, ...named(name)]
+    return saved ? ['--resume', resume, ...words] : ['--resume', resume, ...words, ...named(name)]
+  },
+  background,
+  stop: (file, handle, env) => command('stop', file, handle, env),
+  remove: (file, handle, env) => command('rm', file, handle, env),
 }
 
