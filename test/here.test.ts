@@ -11,7 +11,7 @@ import { Runs, headless, theRuns } from '../live.ts'
 import { placeKey } from '../place.ts'
 import { PROGRAM, recordDirs, type Active, type Program } from '../program.ts'
 import { assign, readPlaces } from '../record.ts'
-import { ORIGIN_SLOT, PLUGIN_DIR, VERSION_SLOT, fill, servedOrigin, sessionPlugin, skillDeclarations, skillTemplate, skillText } from '../skills.ts'
+import { ORIGIN_SLOT, PLUGIN_DIR, VERSION_SLOT, fill, servedOrigin, skillDeclarations, skillTemplate, skillText } from '../skills.ts'
 import { CONFIG, HOME } from './setup.ts'
 
 /**
@@ -319,16 +319,6 @@ describe('its doors', () => {
       servingAt(was)
     }
     expect(() => servingAt('http://example.com:80')).toThrow()
-  })
-
-  test('a session started here is given the skill filled in, in its own temporary folder', () => {
-    const base = dir()
-    const plugin = sessionPlugin('http://127.0.0.1:8011', base)
-    expect(plugin.startsWith(base)).toBe(true)
-    expect(readFileSync(join(plugin, 'skills', 'kehikot-here', 'SKILL.md'), 'utf8')).toBe(skillText('kehikot-here', 'http://127.0.0.1:8011')!)
-    expect(JSON.parse(readFileSync(join(plugin, '.claude-plugin', 'plugin.json'), 'utf8')).name).toBe('kehikot')
-    expect(sessionPlugin('http://127.0.0.1:8011', base)).toBe(plugin)
-    expect(sessionPlugin('http://127.0.0.1:8012', base)).not.toBe(plugin)
   })
 
   test('nothing here installs a skill: no door, no tool, and nothing written to the person’s Claude config', async () => {

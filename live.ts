@@ -11,7 +11,7 @@ import { typedByPerson } from './input.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, sortedParts, type Kehikko } from './place.ts'
 import { PROGRAM, headOf, home, sessionName, type Active, type Program, type Running, type State } from './program.ts'
 import { assign, attach, born, byToken, follow, homeOf, note, projectRoot, readPlaces, recordedIds, sighted, tokenFor, type NamedPlace, type PlaceEntry, type Places } from './record.ts'
-import { sessionPlugin } from './skills.ts'
+import { removePlugin, sessionPlugin } from './skills.ts'
 import { freshToken, hostDoors, removeConfig, writeConfig, type DoorsAsked, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
 
@@ -579,6 +579,8 @@ export interface Run {
   doors: SessionDoor[]
   /** Its `--mcp-config` file, removed when the process ends. */
   config: string | null
+  /** The plugin folder it was given with `--plugin-dir`, removed when the process ends. */
+  plugin: string | null
 }
 
 /** A conversation's place, as this module's record says it: what `/api/kehikot/place` answers. */
@@ -892,8 +894,8 @@ export interface RunsOptions {
   log?: (line: string) => void
   /** Asks the host for a session's doors (`hostDoors`); a test stands one in. */
   doors?: (asked: DoorsAsked) => Promise<SessionDoor[] | null>
-  /** The plugin folder a session is given with `--plugin-dir`; by default this module's own, filled in for the origin it serves on (`sessionPlugin`, under `configBase`). */
-  plugins?: string
+  /** How a session's skills are fetched from the modules on its kehikko; a test stands one in. */
+  fetch?: typeof fetch
   /** Where `--mcp-config` files are written; this user's temporary folder by default. */
   configBase?: string
 }
@@ -1496,13 +1498,18 @@ export class Runs {
         this.log('claude: no host gave this session its doors; it starts with the agent’s own configuration')
       }
     }
+    /* The skills of every module on the kehikko, for this one process: one folder, removed with it. */
+    const plugin =
+      !joined && (await this.program.supports(found.file)).plugins
+        ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log })
+        : null
     const args = joined
       ? this.program.attach(joined.handle!)
       : [
           ...(settled ? this.program.resume(settled, name || undefined) : this.program.fresh(id, name || undefined)),
           ...(tells ? this.program.reports(tellLine) : []),
-          /* `/kehikot-here`, for this one process: nothing is written into the person's config. */
-          ...((await this.program.supports(found.file)).plugins ? ['--plugin-dir', this.options.plugins ?? sessionPlugin(undefined, this.options.configBase)] : []),
+          /* Every module's skills, for this one process: nothing is written into the person's config. */
+          ...(plugin ? ['--plugin-dir', plugin] : []),
           /* Last: the flag takes every word after it until the next flag. */
           ...(config ? ['--mcp-config', config] : []),
         ]
@@ -1524,6 +1531,7 @@ export class Runs {
       })
     } catch (error) {
       removeConfig(config)
+      removePlugin(plugin)
       const why = error instanceof Error ? error.message : String(error)
       this.log(`claude: could not start ${found.file} in ${projectPath} — ${why}`)
       return { code: CLOSED.failed, why: `${this.program.name} could not be started on this machine.` }
@@ -1567,6 +1575,7 @@ export class Runs {
       token,
       doors,
       config,
+      plugin,
     }
     this.runs.set(id, run)
     /* A view of it now says it: the row listed for it while nobody had one goes. */
@@ -1628,6 +1637,7 @@ export class Runs {
     run.pty.onExit(({ exitCode }) => {
       run.ended = true
       removeConfig(run.config)
+      removePlugin(run.plugin)
       if (run.idle) clearTimeout(run.idle)
       this.runs.delete(run.id)
       /* Gone: no state to show for it, and nothing held about it is still true. */
@@ -2073,6 +2083,7 @@ export class Runs {
       token: null,
       doors: [],
       config: null,
+      plugin: null,
     }
     this.runs.set(INSTALL, run)
     this.log(`claude: installing, on a press in the page — ${line}`)
@@ -2100,6 +2111,7 @@ export class Runs {
       kill(run.pty)
       /* This process is going: the session's doors file goes now, not when the pty says it exited. */
       removeConfig(run.config)
+      removePlugin(run.plugin)
     }
   }
 }

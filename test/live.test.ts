@@ -2359,12 +2359,17 @@ describe('a conversation’s place, on every Kehikot door (protocol 2.4.0)', () 
     const args = w.ptys[0]!.args
     expect(args.slice(0, 2)).toEqual(['--session-id', B])
     expect(args.at(-4)).toBe('--plugin-dir')
+    expect(args.filter((one) => one === '--plugin-dir')).toHaveLength(1)
     expect(args.at(-2)).toBe('--mcp-config')
     /* The skill filled in for the origin this module serves on, beside the session's doors. */
     const plugin = args.at(-3)!
     expect(plugin.startsWith(base)).toBe(true)
     expect(readFileSync(join(plugin, 'skills', 'kehikot-here', 'SKILL.md'), 'utf8')).toBe(skillText('kehikot-here')!)
     expect(existsSync(join(CONFIG, 'skills'))).toBe(false)
+    /* The session's own folder goes when its process does. */
+    w.ptys[0]!.ends(0)
+    await settle()
+    expect(existsSync(plugin)).toBe(false)
     /* A copy without the flag is started without it. */
     const old = world({ plugins: false })
     await old.runs.open(ask(project(), null, KEYED), new Watcher())
