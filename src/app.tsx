@@ -10,7 +10,7 @@ import { ID, NOTICES } from '../manifest.ts'
 import type { State } from '../program.ts'
 import { api as realApi, type Api } from './api.ts'
 import { NoConversationBar } from './view/bar.tsx'
-import { DISCONNECT, MAKE_OWN, NOT_CONNECTED, VIEW, connected, viewHeader } from './view/conversations.ts'
+import { DISCONNECT, MAKE_OWN, NOT_CONNECTED, RESUME, VIEW, connected, resumeToggle, viewHeader } from './view/conversations.ts'
 import { ElsewhereQuestion } from './view/elsewhere.tsx'
 import {
   COPY,
@@ -262,6 +262,8 @@ export function Sessions({
   /** The installer's own view, while it runs and after it fails. */
   const [installing, setInstalling] = useState<{ n: number; failed: string | null } | null>(null)
   const [again, setAgain] = useState(0)
+  /** This project's "Resume conversations cut off by a restart", by project; absent until read. */
+  const [resume, setResume] = useState<{ project: string; on: boolean } | null>(null)
   const count = useRef(0)
   /** The kehikot whose older entries this page has already asked the server to bring across to their key. */
   const brought = useRef(new Map<string, Promise<void>>())
@@ -609,10 +611,24 @@ export function Sessions({
   const rows = usable ? connected(here) : []
   /* What each row says, with what has been said since the list was read. */
   const worded = rows.map((one) => (labels[one.id] ? { ...one, label: labels[one.id]! } : one))
+  /* The project's setting, read when the project changes. */
+  const settingsOf = at?.projectPath ?? null
+  useEffect(() => {
+    if (!settingsOf || !api.settings) return
+    let live = true
+    void api
+      .settings(settingsOf)
+      .then((said) => live && setResume({ project: settingsOf, on: said.resumeCutOff }))
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [settingsOf])
+  const resumeOn = resume && resume.project === settingsOf ? resume.on : null
   const items = useMemo<HeaderItemInput[]>(
-    () => (usable ? viewHeader({ rows: worded, own: here ? here.own : undefined, viewing: view?.session ?? null, viewingLabel: label, how: how?.word ?? null, now: Date.now() }) : []),
+    () => (usable ? [...viewHeader({ rows: worded, own: here ? here.own : undefined, viewing: view?.session ?? null, viewingLabel: label, how: how?.word ?? null, now: Date.now() }), ...resumeToggle(resumeOn)] : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [usable, JSON.stringify(worded.map((one) => [one.id, one.label, one.state ?? '', one.lastActive])), here?.own, view?.session, label, how?.word],
+    [usable, JSON.stringify(worded.map((one) => [one.id, one.label, one.state ?? '', one.lastActive])), here?.own, view?.session, label, how?.word, resumeOn],
   )
   useEffect(() => {
     hosted?.header(items)
@@ -626,6 +642,15 @@ export function Sessions({
         if (value === session || (value === NOT_CONNECTED && session === null)) return true
         if (!rows.some((one) => one.id === value)) return 'That conversation is no longer connected to this kehikko.'
         open(value)
+        return true
+      }
+      if (item === RESUME) {
+        if (typeof value !== 'boolean' || !at || !api.setResume) return 'Say whether conversations cut off by a restart are resumed.'
+        const project = at.projectPath
+        void api
+          .setResume(project, value)
+          .then((said) => setResume({ project, on: said.resumeCutOff }))
+          .catch(() => {})
         return true
       }
       if (item === MAKE_OWN) {

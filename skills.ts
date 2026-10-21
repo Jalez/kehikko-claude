@@ -119,6 +119,8 @@ export interface GatherOptions {
   /** Where the person's skills are kept; `CLAUDE_CONFIG_DIR` or `~/.claude` by default. Read, never written. */
   claudeDir?: string
   timeoutMs?: number
+  /** The folder to write the plugin into, replacing it — a background conversation's kept one (`keptDirOf`). A new one when absent. */
+  into?: string
 }
 
 /** Whether the person already installed `name` at `version` through Kehikot (its marker says the same version). */
@@ -219,7 +221,12 @@ export async function sessionPlugin(doors: readonly SessionDoor[], options: Gath
   const base = configDirOf(options.base)
   mkdirSync(base, { recursive: true, mode: 0o700 })
   chmodSync(base, 0o700)
-  const dir = mkdtempSync(join(base, 'plugin-'))
+  let dir: string
+  if (options.into) {
+    dir = options.into
+    rmSync(dir, { recursive: true, force: true })
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+  } else dir = mkdtempSync(join(base, 'plugin-'))
   chmodSync(dir, 0o700)
   mkdirSync(join(dir, '.claude-plugin'), { mode: 0o700 })
   for (const [name, text] of found) {

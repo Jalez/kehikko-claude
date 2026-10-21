@@ -34,6 +34,10 @@ export interface Api {
   showing?(page: string, at: { projectPath: string; key: string; kehikkoName: string; partNames: string[]; onScreen: boolean } | null): Promise<void>
   /** Take a session off a place ("Disconnect from this kehikko"). The session itself is kept. */
   detach(projectPath: string, key: string, session: string): Promise<void>
+  /** This project's settings for this module: whether conversations a restart cut off are resumed. */
+  settings?(projectPath: string): Promise<{ resumeCutOff: boolean }>
+  /** A person's press: change it. */
+  setResume?(projectPath: string, resumeCutOff: boolean): Promise<{ resumeCutOff: boolean }>
   /**
    * Follow what changes while the page is open: every running session's
    * state, and — when `notices` says a host is there to pass them to — the
@@ -68,6 +72,12 @@ export const api: Api = {
   },
   async detach(projectPath, key, session) {
     answered(await ask('./api/detach', { body: { projectPath, key, session } }))
+  },
+  async settings(projectPath) {
+    return answered(await ask<{ ok: true; settings: { resumeCutOff: boolean } }>('./api/settings', { query: { projectPath }, ticket: true })).settings
+  },
+  async setResume(projectPath, resumeCutOff) {
+    return answered(await ask<{ ok: true; settings: { resumeCutOff: boolean } }>('./api/settings', { body: { projectPath, resumeCutOff } })).settings
   },
   feed(notices, heard, project, page) {
     return follow<Stated | Notice | { items: ActivityRow[] } | SessionsChanged>(

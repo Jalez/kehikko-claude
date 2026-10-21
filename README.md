@@ -251,8 +251,39 @@ viewer that comes back is sent the screen as it stands, from a second, headless 
 feeds (`@xterm/headless`). Ending an agent mid-work because a page reloaded would be costly, and it
 does not happen.
 
-When the server itself stops, its sessions stop with it — nothing is left running with no owner — and
-the next open of each place **resumes** its session by id.
+### A conversation outlives the module, and Kehikot
+
+A conversation runs as one of Claude Code's own **background** sessions (`claude --bg`), and the
+terminal in the container is only attached to it (`claude attach`). Updating or restarting this
+module, or quitting Kehikot, ends the view and nothing else: the agent, its subagents and its
+background shells go on, and the next start attaches to the conversation again. Its doors file and
+its plugin folder are kept beside it (the session keeps their paths as its saved options) and are
+rewritten every time it is started or woken.
+
+Where it cannot run in the background — a folder Claude Code does not trust yet (the trust question
+is asked in the terminal), a copy of Claude Code without `--bg` — it is opened in the terminal as
+before, and ends with this module's server; the next open of its place **resumes** it by id.
+
+### What a restart cut off anyway
+
+- **A conversation that was working.** The record keeps a mark while a conversation is working. One
+  still marked at the module's next start and no longer running was cut off: it is woken in the
+  background, once, with one sentence — *"Kehikot restarted while you were working. Some background
+  work may have been cut off: check your task notifications and resume anything unfinished."* — and
+  one Inbox line says so (*"<conversation>: resumed after Kehikot restarted"*). Never one a person
+  ended here. A conversation recorded before the mark existed is judged by its transcript (grown in
+  the last half hour, its last turn not ended). **Resume conversations cut off by a restart** in the
+  View menu turns this off for the project (a person's toggle: no agent can press it; kept in
+  `.kehikot/claude/settings.json`).
+- **Background work that did not finish, or failed.** Each conversation's transcript is read for
+  Claude Code's task notifications (`cutoff.ts` lists the shapes): a background shell command or agent
+  that *didn't finish before the previous session ended*, a command that failed (a non-zero exit below
+  128), an agent that failed, a task stopped for time or memory. Each such task raises ONE *needs you*
+  line for the conversation, at its place — *"<conversation>: 2 background tasks didn't finish before
+  the session ended"*, the summaries in its detail — once: the record keeps how far it has read. It
+  goes when the person types in the conversation after it, or dismisses it. Successes, what the
+  person or Claude stopped on purpose, commands ended by a signal and watchers are not said. It is
+  read when the module starts, so what happened while it was down is said too.
 
 ### No limit, and nothing to tidy
 
@@ -366,7 +397,8 @@ switch kehikko. A line filed under the session's epic is the most that exists.
 
 ### What it never does
 
-- It never sends a prompt. The person types.
+- It never sends a prompt of anybody's. The person types. Its one sentence, to a conversation a
+  restart cut off, is above.
 - It never passes a flag that widens what Claude may do. A new session is `claude --session-id <uuid>`
   and a resumed one `claude --resume <uuid>`, in the project's folder — followed, for a copy that can
   take them, by `--name <the place>` and by `--settings` and the hooks above, which is the whole
@@ -374,11 +406,15 @@ switch kehikko. A line filed under the session's epic is the most that exists.
   nothing else: nothing about permissions, models or tools. The only other command lines there are:
   `claude --help`, once per binary; `claude agents --json`, which reads; and `claude attach <handle>`,
   with the handle Claude Code itself printed, checked to be one word that cannot be a flag.
-- It never stops, deletes, restarts or backgrounds anything: no `stop`, `rm`, `respawn` or `--bg`.
+- It runs the conversations it starts or resumes in the background (`claude --bg`, see above). It
+  stops one only on a person's **End** (`claude stop`, the conversation kept), removes one only when
+  it started it a moment ago and nobody typed a character into it (`claude rm`), and never
+  `respawn`s anything.
 - It never reads or shows a transcript beyond what labels a session: the first line of the first
   prompt, and the rows Claude Code appends to describe it — its name and title, the last prompt as
   Claude Code noted it, the pull requests it linked, and where it was continued (`tailOf` in
-  `program.ts`).
+  `program.ts`) — and, for what a restart cut off, the summary lines of its task notifications,
+  whether the person typed after them, and whether its last turn ended (`cutoff.ts`).
 - It never reads the screen to decide anything, and never reads what a hook is handed.
 
 ## Each conversation knows its own place
@@ -637,7 +673,8 @@ itself honours) — the list of a project's sessions, their first prompt, and wh
 | `WS /session` | the terminal. Origin and Host are checked on the upgrade; the ticket rides the first frame; nothing starts before it is read |
 | `GET /api/place?projectPath&key&projectId` | what a place holds: its sessions, the project's others, what is running, whether the program is installed. **Ticketed**, since it says what somebody worked on |
 | `POST /api/rekey` | bring the entries an older release filed under a kehikko's row number across to its key. Ticketed; the only thing that migrates |
-| `POST /api/end` | end a running session, because a person chose that one. Ticketed |
+| `POST /api/end` | end a running session, because a person chose that one (one in the background is stopped, its conversation kept). Ticketed |
+| `GET`/`POST /api/settings?projectPath` | the project's **Resume conversations cut off by a restart** (`resumeCutOff`, on unless turned off), read and changed by a person's toggle. Ticketed; no MCP tool reads or changes it |
 | `POST /api/restart` | end a running session whose project's folder was renamed under it, so its views resume it in the new folder, because a person pressed that. Refused while it is working. Ticketed |
 | `POST /api/assign` | "Make this the kehikko’s own": the record says the conversation on screen is its place's own. Ticketed |
 | `POST /api/detach` | "Disconnect from this kehikko": take a session off a place; the session is not ended. Ticketed |

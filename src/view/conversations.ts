@@ -50,6 +50,17 @@ export const MAKE_OWN = 'make-own'
 export const DISCONNECT = 'disconnect'
 /** The switch's value while what is on screen is a new conversation that is not connected yet. */
 export const NOT_CONNECTED = 'not-connected'
+/**
+ * The project's setting: wake a conversation a restart cut off mid-turn, and tell it so (live.ts,
+ * `recover`). A toggle that says nothing about agents, so only a person can press it.
+ */
+export const RESUME = 'resume-cut-off'
+export const RESUME_LABEL = 'Resume conversations cut off by a restart'
+
+/** The setting's toggle, for the View menu; nothing while the setting is not known. */
+export function resumeToggle(checked: boolean | null): HeaderItemInput[] {
+  return checked === null ? [] : [{ kind: 'toggle', id: RESUME, label: RESUME_LABEL, icon: 'refresh', checked }]
+}
 
 /** What the module types into a conversation to connect it. */
 export const HERE_COMMAND = '/kehikot-here'

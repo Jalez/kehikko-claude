@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join } from 'node:path'
 
 import { KEHIKOT_DIR, kehikotDir, moduleDir, moduleFile, within } from 'kehikot-module-protocol'
 
+import type { CutOff } from './cutoff.ts'
 import { ID } from './manifest.ts'
 import { isKehikkoKey, placeKey, readPlaceKey, sortedParts, type Place } from './place.ts'
 
@@ -176,6 +177,31 @@ export interface SessionEntry {
    * again; assigning it later takes it back.
    */
   ignored?: { at: string }
+  /**
+   * Started or woken in the background (`claude --bg`) by this module: its saved options — the
+   * name, the plugin folder and the doors file — are this module's, so it is woken with none
+   * given (a flag would carry it on as a copy). See "The background" in program.ts.
+   */
+  background?: true
+  /**
+   * Since when this module has seen it working, while it still is: cleared when its turn ends,
+   * when it stops for the person, and when a person ends it here. Still set at the next start of
+   * this module and not running: a restart cut it off mid-turn (see `recover` in live.ts).
+   */
+  working?: string
+  /** When this module last woke it after a restart had cut it off; `told` once the person has had it on screen. */
+  resumed?: { at: string; told?: boolean }
+  /**
+   * Its background tasks that were cut off or failed, as its transcript says (cutoff.ts): read up
+   * to `through` (ms), so each is said once; `open` until the person moves the conversation on.
+   */
+  cutOff?: { through: number; open: CutOff[] }
+}
+
+/** A project's settings for this module: `<project>/.kehikot/claude/settings.json`. Changed only by a person, in the page. */
+export interface Settings {
+  /** Wake a conversation a restart cut off mid-turn, and tell it so (default on). */
+  resumeCutOff: boolean
 }
 
 export interface Places {
@@ -566,7 +592,64 @@ function describe(places: Places, id: string, about: { label?: string; lastActiv
     ...(was?.token ? { token: was.token } : {}),
     ...(was?.seen ? { seen: was.seen } : {}),
     ...(was?.ignored ? { ignored: was.ignored } : {}),
+    ...(was?.background ? { background: was.background } : {}),
+    ...(was?.working ? { working: was.working } : {}),
+    ...(was?.resumed ? { resumed: was.resumed } : {}),
+    ...(was?.cutOff ? { cutOff: was.cutOff } : {}),
   }
+}
+
+/**
+ * Change what is kept about one recorded session — its background, working, resumed and cut-off
+ * marks — and write only when `edit` says it changed something. Nothing for a session the record
+ * does not hold.
+ */
+export function markSession(projectPath: string | null | undefined, id: string, edit: (entry: SessionEntry) => boolean): Result<Places> {
+  const read = readPlaces(projectPath)
+  if (!read.ok) return read
+  if (!Object.hasOwn(read.value.sessions, id)) return read
+  /* Asked of a copy first, so that a change of nothing writes nothing. */
+  const trial = structuredClone(read.value.sessions[id]!)
+  if (!edit(trial)) return read
+  return change(projectPath, (places) => {
+    if (!Object.hasOwn(places.sessions, id)) return false
+    return edit(places.sessions[id]!)
+  })
+}
+
+/** `markSession` for several sessions at once: one write for all of them. */
+export function markSessions(projectPath: string | null | undefined, edits: ReadonlyMap<string, (entry: SessionEntry) => boolean>): Result<Places> {
+  if (edits.size === 0) return readPlaces(projectPath)
+  return change(projectPath, (places) => {
+    let changed = false
+    for (const [id, edit] of edits) if (Object.hasOwn(places.sessions, id) && edit(places.sessions[id]!)) changed = true
+    return changed
+  })
+}
+
+const SETTINGS = 'settings'
+const DEFAULTS: Settings = { resumeCutOff: true }
+
+/** A project's settings for this module, the defaults where the file says nothing. */
+export function readSettings(projectPath: string | null | undefined): Settings {
+  const file = fileFor(projectPath, false, SETTINGS)
+  if (!file.ok || !existsSync(file.value)) return { ...DEFAULTS }
+  try {
+    const raw = JSON.parse(readFileSync(file.value, 'utf8')) as { resumeCutOff?: unknown }
+    return { resumeCutOff: typeof raw.resumeCutOff === 'boolean' ? raw.resumeCutOff : DEFAULTS.resumeCutOff }
+  } catch {
+    return { ...DEFAULTS }
+  }
+}
+
+/** Write a project's settings, whole. A person's press in the page is the only caller. */
+export function writeSettings(projectPath: string | null | undefined, settings: Settings): Result<Settings> {
+  const file = fileFor(projectPath, true, SETTINGS)
+  if (!file.ok) return file
+  const temporary = `${file.value}.${process.pid}.tmp`
+  writeFileSync(temporary, `${JSON.stringify({ resumeCutOff: settings.resumeCutOff === true }, null, 2)}\n`)
+  renameSync(temporary, file.value)
+  return { ok: true, value: { resumeCutOff: settings.resumeCutOff === true } }
 }
 
 /**
@@ -656,8 +739,21 @@ function tidy(raw: unknown): Places {
   if (typeof sessions === 'object' && sessions !== null) {
     for (const [id, value] of Object.entries(sessions)) {
       if (!id || id.length > 128 || typeof value !== 'object' || value === null) continue
-      const entry = value as { added?: unknown; label?: unknown; lastActive?: unknown; home?: unknown; token?: unknown; seen?: { via?: unknown; at?: unknown }; ignored?: { at?: unknown } }
+      const entry = value as {
+        added?: unknown
+        label?: unknown
+        lastActive?: unknown
+        home?: unknown
+        token?: unknown
+        seen?: { via?: unknown; at?: unknown }
+        ignored?: { at?: unknown }
+        background?: unknown
+        working?: unknown
+        resumed?: { at?: unknown; told?: unknown }
+        cutOff?: { through?: unknown; open?: unknown }
+      }
       const via = entry.seen?.via
+      const cut = cutOffOf(entry.cutOff)
       out.sessions[id] = {
         added: typeof entry.added === 'string' ? entry.added : '',
         label: typeof entry.label === 'string' ? entry.label.slice(0, 200) : '',
@@ -666,14 +762,31 @@ function tidy(raw: unknown): Places {
         ...(typeof entry.token === 'string' && PLACE_TOKEN.test(entry.token) ? { token: entry.token } : {}),
         ...((via === 'hook' || via === 'agents') && typeof entry.seen?.at === 'string' ? { seen: { via, at: entry.seen.at } } : {}),
         ...(typeof entry.ignored?.at === 'string' ? { ignored: { at: entry.ignored.at } } : {}),
+        ...(entry.background === true ? { background: true as const } : {}),
+        ...(typeof entry.working === 'string' ? { working: entry.working } : {}),
+        ...(typeof entry.resumed?.at === 'string' ? { resumed: { at: entry.resumed.at, ...(entry.resumed.told === true ? { told: true } : {}) } } : {}),
+        ...(cut ? { cutOff: cut } : {}),
       }
     }
   }
   return out
 }
 
+/** A cut-off mark as read back, or null for anything that is not one. At most eight tasks are kept open. */
+function cutOffOf(raw: { through?: unknown; open?: unknown } | undefined): { through: number; open: CutOff[] } | null {
+  if (!raw || typeof raw.through !== 'number' || !Number.isFinite(raw.through)) return null
+  const open = Array.isArray(raw.open)
+    ? raw.open.flatMap((one: unknown): CutOff[] => {
+        const said = one as Partial<CutOff> | null
+        if (!said || typeof said.at !== 'number' || typeof said.summary !== 'string' || (said.kind !== 'ended' && said.kind !== 'stopped' && said.kind !== 'failed')) return []
+        return [{ at: said.at, kind: said.kind, summary: said.summary.slice(0, 200), tasks: typeof said.tasks === 'number' && said.tasks > 0 ? Math.min(99, Math.trunc(said.tasks)) : 1 }]
+      })
+    : []
+  return { through: raw.through, open: open.slice(-8) }
+}
+
 /** The record's path, checked to resolve inside the project. `make` creates the folder first. */
-function fileFor(projectPath: string | null | undefined, make: boolean): Result<string> {
+function fileFor(projectPath: string | null | undefined, make: boolean, name: string = FILE): Result<string> {
   const root = projectRoot(projectPath)
   if (!root.ok) return root
 
@@ -688,7 +801,7 @@ function fileFor(projectPath: string | null | undefined, make: boolean): Result<
     const after = escapesAny(root.value, levels)
     if (after) return { ok: false, error: after }
   }
-  const file = moduleFile(root.value, ID, FILE)!
+  const file = moduleFile(root.value, ID, name)!
   if (existsSync(file)) {
     const out = escapes(root.value, file)
     if (out) return { ok: false, error: out }
