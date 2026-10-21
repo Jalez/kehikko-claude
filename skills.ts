@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { skillPath, skillTextIssue, type ModuleSkill } from 'kehikot-module-protocol'
+import { WELL_KNOWN, moduleSkillsSchema, skillPath, skillTextIssue, type ModuleSkill } from 'kehikot-module-protocol'
 import { originFor, preferred } from 'kehikot-module-protocol/serve'
 
-import { configDirOf } from './doorConfig.ts'
-import { PREFERRED_PORT } from './manifest.ts'
+import { configDirOf, type SessionDoor } from './doorConfig.ts'
+import { ID, PREFERRED_PORT } from './manifest.ts'
+import { configDir } from './program.ts'
 
 /**
  * The Claude Code skills this module offers (protocol 2.5.0, `declares.skills`), in one list.
@@ -18,10 +18,10 @@ import { PREFERRED_PORT } from './manifest.ts'
  * skill's version. So a module that had to take another port than 8010 still gives out a skill
  * that reaches it, and a person can paste the skill's own version back to us.
  *
- *  - **A session this module starts** is given it for that one process: `--plugin-dir` on its
- *    command line, beside `--mcp-config` (see `start` in live.ts). The folder passed is a copy
- *    with the text filled in (`sessionPlugin`), in this user's temporary folder — never the
- *    template, and nothing is written into `~/.claude`. Measured on 2.1.304 with a scratch
+ *  - **A session this module starts** is given it, with every other module's, for that one process:
+ *    `--plugin-dir` on its command line, beside `--mcp-config` (see `start` in live.ts). The folder
+ *    passed is assembled for the session (`sessionPlugin`), in this user's temporary folder and removed
+ *    when it ends — never the template, and nothing is written into `~/.claude`. Measured on 2.1.304 with a scratch
  *    config: the plugin's skill is listed as `kehikot:kehikot-here`, and the bare
  *    `/kehikot-here` runs it.
  *  - **A host** asks for the text at `skillPath(name)` and shows it; a person presses Install
@@ -108,22 +108,135 @@ export function skillAt(path: string): { name: string; text: string } | null {
 /** Whether a path is one this module serves a skill on: what `doors()` hands to `answer`. */
 export const isSkillPath = (path: string): boolean => OFFERED.some((one) => skillPath(one.name) === path)
 
+const MARKER = '.kehikot-skill.json'
+const FETCH_MS = 1500
+
+/** What a session's skills were gathered with. */
+export interface GatherOptions {
+  base?: string
+  fetch?: typeof fetch
+  log?: (line: string) => void
+  /** Where the person's skills are kept; `CLAUDE_CONFIG_DIR` or `~/.claude` by default. Read, never written. */
+  claudeDir?: string
+  timeoutMs?: number
+}
+
+/** Whether the person already installed `name` at `version` through Kehikot (its marker says the same version). */
+function installed(dir: string, name: string, version: string): boolean {
+  try {
+    const marker = JSON.parse(readFileSync(join(dir, 'skills', name, MARKER), 'utf8')) as { version?: unknown }
+    return marker.version === version
+  } catch {
+    return false
+  }
+}
+
+async function getText(origin: string, path: string, options: GatherOptions): Promise<{ status: number; body: string } | null> {
+  const control = new AbortController()
+  const timer = setTimeout(() => control.abort(), options.timeoutMs ?? FETCH_MS)
+  try {
+    const response = await (options.fetch ?? fetch)(`${origin}${path}`, { signal: control.signal, headers: { accept: 'application/json, text/markdown, text/plain' } })
+    return { status: response.status, body: await response.text() }
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /**
- * The plugin folder a session started here is given with `--plugin-dir`: `plugin.json` as kept,
- * and each skill filled in for `origin`. One folder per set of versions, in this user's own
- * temporary folder (beside the sessions' `--mcp-config` files), written once and then reused.
+ * The plugin folder a session started here is given with `--plugin-dir`: ONE plugin, `kehikot`,
+ * holding the skills of every module on the session's kehikko (those whose door it was given) and
+ * this module's own.
+ *
+ * Each module's manifest is read at its origin (the door's) and each skill it declares fetched at
+ * `skillPath(name)`; a text the protocol's `skillTextIssue` refuses is left out with one log line.
+ * A module that does not answer is skipped with one line, and the start goes on. A skill the person
+ * installed through Kehikot at the same version (`~/.claude/skills/<name>/.kehikot-skill.json`) is
+ * left out so it is not listed twice; at another version the session's copy, which is current, is
+ * used. The first module to offer a name keeps it.
+ *
+ * The folder is new for each session, 0700, in this user's temporary folder, and the caller removes
+ * it (`removePlugin`) when the session ends. Null when there is nothing to offer.
  */
-export function sessionPlugin(origin = served, base = tmpdir()): string {
-  const skills = skillDeclarations(origin)
-  const dir = join(configDirOf(base), `plugin-${sha12(skills.map((one) => `${one.name}@${one.version}`).join(','))}`)
-  const manifest = join(dir, '.claude-plugin', 'plugin.json')
-  if (existsSync(manifest)) return dir
-  mkdirSync(join(dir, '.claude-plugin'), { recursive: true, mode: 0o700 })
-  for (const one of skills) {
-    mkdirSync(join(dir, 'skills', one.name), { recursive: true, mode: 0o700 })
-    writeFileSync(join(dir, 'skills', one.name, 'SKILL.md'), skillText(one.name, origin)!, { mode: 0o600 })
+export async function sessionPlugin(doors: readonly SessionDoor[], options: GatherOptions = {}): Promise<string | null> {
+  const log = options.log ?? (() => {})
+  const claudeDir = options.claudeDir ?? configDir()
+  const found = new Map<string, string>()
+  const take = (name: string, text: string, version: string, from: string) => {
+    if (found.has(name)) return log(`claude: skill ${name} from ${from} left out — another module already offers one by that name`)
+    if (installed(claudeDir, name, version)) return log(`claude: skill ${name} is already installed (${version}) — not listed twice`)
+    found.set(name, text)
+  }
+  for (const one of skillDeclarations()) take(one.name, skillText(one.name)!, one.version, ID)
+
+  const origins = new Map<string, string>()
+  for (const door of doors) {
+    if (door.module === ID) continue
+    try {
+      const origin = new URL(door.url).origin
+      if (!origins.has(origin)) origins.set(origin, door.module)
+    } catch {
+      /* Not a URL: isDoor refused it already. */
+    }
+  }
+  const gathered = await Promise.all(
+    [...origins].map(async ([origin, module]) => {
+      const said = await getText(origin, WELL_KNOWN, options)
+      if (said === null) {
+        log(`claude: ${module} did not answer at ${origin} — its skills are not loaded in this session`)
+        return []
+      }
+      /* The host's own door, or a module that is not one: nothing to offer, and nothing to say. */
+      if (said.status !== 200) return []
+      let declared: ModuleSkill[] = []
+      try {
+        const parsed = moduleSkillsSchema.safeParse((JSON.parse(said.body) as { declares?: { skills?: unknown } }).declares?.skills ?? [])
+        if (parsed.success) declared = parsed.data
+        else log(`claude: ${module} declares skills that are not a valid list — none loaded`)
+      } catch {
+        return []
+      }
+      const texts = await Promise.all(declared.map((skill) => getText(origin, skillPath(skill.name), options)))
+      return declared.flatMap((skill, i) => {
+        const got = texts[i]!
+        if (got.status !== 200) {
+          log(`claude: ${module} did not give skill ${skill.name} (${got.status}) — left out`)
+          return []
+        }
+        const issue = skillTextIssue(got.body, skill.name)
+        if (issue) {
+          log(`claude: skill ${skill.name} from ${module} refused — ${issue}`)
+          return []
+        }
+        return [{ module, skill, text: got.body }]
+      })
+    }).map((one) => one.catch(() => [])),
+  )
+  for (const list of gathered) for (const one of list) take(one.skill.name, one.text, one.skill.version, one.module)
+  if (found.size === 0) return null
+
+  const base = configDirOf(options.base)
+  mkdirSync(base, { recursive: true, mode: 0o700 })
+  chmodSync(base, 0o700)
+  const dir = mkdtempSync(join(base, 'plugin-'))
+  chmodSync(dir, 0o700)
+  mkdirSync(join(dir, '.claude-plugin'), { mode: 0o700 })
+  for (const [name, text] of found) {
+    mkdirSync(join(dir, 'skills', name), { recursive: true, mode: 0o700 })
+    writeFileSync(join(dir, 'skills', name, 'SKILL.md'), text, { mode: 0o600 })
   }
   /* Last, so a folder with its plugin.json is a whole one. */
-  writeFileSync(manifest, readFileSync(join(PLUGIN_DIR, '.claude-plugin', 'plugin.json')), { mode: 0o600 })
+  writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), readFileSync(join(PLUGIN_DIR, '.claude-plugin', 'plugin.json')), { mode: 0o600 })
   return dir
+}
+
+/** Remove a session's plugin folder. Never throws. */
+export function removePlugin(dir: string | null): void {
+  if (!dir) return
+  try {
+    rmSync(dir, { recursive: true, force: true })
+  } catch {
+    /* Gone already. */
+  }
 }
