@@ -1,7 +1,9 @@
 import { MANIFEST_KIND, PROTOCOL, manifestSchema, type Manifest } from 'kehikot-module-protocol'
+import pkg from './package.json'
 
 export const ID = 'kehikot.claude'
-export const VERSION = '0.1.0'
+/** The module's version: package.json's, the one place it is written. A release is tagged with it. */
+export const VERSION: string = pkg.version
 
 /**
  * The format a notice is sent in: the protocol's own, by its name. Whatever
