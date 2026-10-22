@@ -523,7 +523,10 @@ its list again, its bar goes, and it puts that conversation on screen):
 - **A session this module starts** has it with nothing installed: `--plugin-dir <a filled-in
   copy of this module's plugin, in this user's temporary folder>` on its command line, for that one process, beside `--mcp-config`. Measured on
   2.1.304: the plugin's skill is listed as `kehikot:kehikot-here`, and the bare `/kehikot-here`
-  runs it. A copy whose help has no `--plugin-dir` is started without it.
+  runs it. A copy whose help has no `--plugin-dir` is started without it. The same plugin holds
+  the skills of every module on the session's kehikko; a skill that needs other modules
+  (`needs`, protocol 2.12.0, "kehikko-bound") is in it only when each of them has a container
+  on that kehikko, and is otherwise left out with one log line naming what is missing.
 - **A conversation started outside Kehikot** needs it in `~/.claude/skills/kehikot-here/`. This
   module never writes there. It declares the skill in its manifest (`declares.skills`, protocol
   2.5.0: name, summary, and as version the first twelve hex digits of the text's sha256) and
