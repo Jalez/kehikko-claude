@@ -24,12 +24,12 @@ afterAll(() => {
 const text = (name: string, body = 'Do the thing.') => `---\nname: ${name}\ndescription: ${name} skill\n---\n${body}\n`
 
 /** A stand-in module: a manifest declaring skills, and each one's text. */
-function module(skills: Record<string, { text: string; version?: string }>) {
+function module(skills: Record<string, { text: string; version?: string; needs?: string[] }>) {
   const server = createServer((request, response) => {
     const path = new URL(request.url ?? '/', 'http://x').pathname
     if (path === WELL_KNOWN) {
       response.setHeader('content-type', 'application/json')
-      return void response.end(JSON.stringify({ declares: { skills: Object.entries(skills).map(([name, one]) => ({ name, summary: `${name}.`, version: one.version ?? '1' })) } }))
+      return void response.end(JSON.stringify({ declares: { skills: Object.entries(skills).map(([name, one]) => ({ name, summary: `${name}.`, version: one.version ?? '1', ...(one.needs ? { needs: one.needs } : {}) })) } }))
     }
     for (const [name, one] of Object.entries(skills)) if (path === skillPath(name)) return void response.end(one.text)
     response.statusCode = 404
@@ -112,6 +112,28 @@ describe('the skills a session is given', () => {
     expect(log.filter((line) => line.includes('already installed'))).toHaveLength(2)
     /* Nothing was written to the person's folder. */
     expect(readdirSync(join(claudeDir, 'skills')).sort()).toEqual(['browse', 'journey', 'kehikot-here'])
+  })
+
+  test('a kehikko-bound skill is included only when every module it needs has a container on the kehikko', async () => {
+    const factory = module({ factory: { text: text('factory') }, 'review-factory': { text: text('review-factory'), needs: ['kehikot.review'] } })
+    const review = module({})
+    /* Factory without Review: /factory, never /review-factory, and one line naming what is missing. */
+    const log: string[] = []
+    const alone = (await sessionPlugin([door('kehikot.factory', factory)], options({ log })))!
+    expect(names(alone)).toEqual(['factory', 'kehikot-here'])
+    expect(log).toEqual(['claude: skill review-factory from kehikot.factory left out — it needs kehikot.review on this kehikko'])
+    /* Review and Factory on one kehikko: both. */
+    const both = (await sessionPlugin([door('kehikot.factory', factory), door('kehikot.review', review)], options()))!
+    expect(names(both)).toEqual(['factory', 'kehikot-here', 'review-factory'])
+    expect(readFileSync(join(both, 'skills', 'review-factory', 'SKILL.md'), 'utf8')).toBe(text('review-factory'))
+  })
+
+  test('a skill that needs several modules is left out while any is missing', async () => {
+    const m = module({ trio: { text: text('trio'), needs: ['kehikot.review', 'kehikot.browser'] } })
+    const log: string[] = []
+    const plugin = (await sessionPlugin([door('kehikot.factory', m), door('kehikot.browser', module({}))], options({ log })))!
+    expect(names(plugin)).toEqual(['kehikot-here'])
+    expect(log).toEqual(['claude: skill trio from kehikot.factory left out — it needs kehikot.review on this kehikko'])
   })
 
   test('with nothing to offer there is no folder; and removing one removes it', async () => {

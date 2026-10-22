@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { WELL_KNOWN, moduleSkillsSchema, skillPath, skillTextIssue, type ModuleSkill } from 'kehikot-module-protocol'
+import { WELL_KNOWN, missingNeeds, moduleSkillsSchema, skillPath, skillTextIssue, type ModuleSkill } from 'kehikot-module-protocol'
 import { originFor, preferred } from 'kehikot-module-protocol/serve'
 
 import { configDirOf, type SessionDoor } from './doorConfig.ts'
@@ -158,6 +158,13 @@ async function getText(origin: string, path: string, options: GatherOptions): Pr
  * left out so it is not listed twice; at another version the session's copy, which is current, is
  * used. The first module to offer a name keeps it.
  *
+ * A kehikko-bound skill (protocol 2.12.0: its declaration lists `needs`, other modules it cannot
+ * work without) is included only when every module it needs has a container on the session's
+ * kehikko — which is what the doors are: the host gives a session the doors of the modules placed
+ * on its kehikko (`doorsFor` in the host). One that lacks any is left out with one log line naming
+ * what is missing; its text is not fetched. A module with no MCP door is not seen this way, so a
+ * skill cannot need one.
+ *
  * The folder is new for each session, 0700, in this user's temporary folder, and the caller removes
  * it (`removePlugin`) when the session ends. Null when there is nothing to offer.
  */
@@ -172,6 +179,8 @@ export async function sessionPlugin(doors: readonly SessionDoor[], options: Gath
   }
   for (const one of skillDeclarations()) take(one.name, skillText(one.name)!, one.version, ID)
 
+  /* The modules on the session's kehikko: every door the host gave, and this module, which starts it. */
+  const present = new Set([ID, ...doors.map((door) => door.module)])
   const origins = new Map<string, string>()
   for (const door of doors) {
     if (door.module === ID) continue
@@ -199,6 +208,11 @@ export async function sessionPlugin(doors: readonly SessionDoor[], options: Gath
       } catch {
         return []
       }
+      declared = declared.filter((skill) => {
+        const missing = missingNeeds(skill, present)
+        if (missing.length) log(`claude: skill ${skill.name} from ${module} left out — it needs ${missing.join(', ')} on this kehikko`)
+        return missing.length === 0
+      })
       const texts = await Promise.all(declared.map((skill) => getText(origin, skillPath(skill.name), options)))
       return declared.flatMap((skill, i) => {
         const got = texts[i]!
