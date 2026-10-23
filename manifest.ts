@@ -1,5 +1,6 @@
 import { MANIFEST_KIND, PROTOCOL, manifestSchema, type Manifest } from 'kehikot-module-protocol'
 import pkg from './package.json'
+import { SETTINGS } from './settings.ts'
 
 export const ID = 'kehikot.claude'
 /** The module's version: package.json's, the one place it is written. A release is tagged with it. */
@@ -117,6 +118,8 @@ export const MANIFEST: Manifest = manifestSchema.parse({
     uses: ['events:emit', 'activity:report'],
     storage: true,
     prompt: false,
+    /* "Resume conversations cut off by a restart", in the host's Settings too (protocol 2.15.0). See `settings.ts`. */
+    settings: SETTINGS,
   },
   health: '/healthz',
 })

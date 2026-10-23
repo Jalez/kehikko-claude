@@ -274,7 +274,8 @@ before, and ends with this module's server; the next open of its place **resumes
   ended here. A conversation recorded before the mark existed is judged by its transcript (grown in
   the last half hour, its last turn not ended). **Resume conversations cut off by a restart** in the
   View menu turns this off for the project (a person's toggle: no agent can press it; kept in
-  `.kehikot/claude/settings.json`).
+  `.kehikot/claude/settings.json`). The same switch is in Kehikot itself — the gear on Claude's
+  container, "Settings…" in its Frame menu, and Settings › Modules — and is the person's there too.
 - **Background work that did not finish, or failed.** Each conversation's transcript is read for
   Claude Code's task notifications (`cutoff.ts` lists the shapes): a background shell command or agent
   that *didn't finish before the previous session ended*, a command that failed (a non-zero exit below
@@ -678,6 +679,7 @@ itself honours) — the list of a project's sessions, their first prompt, and wh
 | `POST /api/rekey` | bring the entries an older release filed under a kehikko's row number across to its key. Ticketed; the only thing that migrates |
 | `POST /api/end` | end a running session, because a person chose that one (one in the background is stopped, its conversation kept). Ticketed |
 | `GET`/`POST /api/settings?projectPath` | the project's **Resume conversations cut off by a restart** (`resumeCutOff`, on unless turned off), read and changed by a person's toggle. Ticketed; no MCP tool reads or changes it |
+| `GET`/`POST /api/kehikot/settings` | the same setting for the host (protocol 2.15.0, `settings.get` / `settings.set`), for a project the host holds, in the same file and format. `resumeCutOff` is `personOnly`: a change is taken only with the page's ticket or a pass the host vouches for (asked of `KEHIKOT_ORIGINS` only); an agent is refused |
 | `POST /api/restart` | end a running session whose project's folder was renamed under it, so its views resume it in the new folder, because a person pressed that. Refused while it is working. Ticketed |
 | `POST /api/assign` | "Make this the kehikko’s own": the record says the conversation on screen is its place's own. Ticketed |
 | `POST /api/detach` | "Disconnect from this kehikko": take a session off a place; the session is not ended. Ticketed |

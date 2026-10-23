@@ -1,5 +1,6 @@
 import { PROJECT_ID, doorContext, manifestSchema, type Manifest } from 'kehikot-module-protocol'
-import { establishBuild, hostHasProject, refuseTicket, sameTicket, type Reply, type Stream } from 'kehikot-module-protocol/serve'
+import { establishBuild, hostHasProject, hostVouches, refuseTicket, sameTicket, settingsDoor, type Reply, type Stream } from 'kehikot-module-protocol/serve'
+import { SETTINGS, SETTINGS_FILE } from './settings.ts'
 
 import { TICKET, elsewhereOf, sameProject, theRuns, type Elsewhere, type Run, type Runs } from './live.ts'
 import { ID, MANIFEST as DECLARED, VERSION } from './manifest.ts'
@@ -73,6 +74,35 @@ export const BUILD = establishBuild({ version: VERSION, dir: import.meta.dirname
 
 const ok = (body: unknown): Reply => ({ status: 200, body })
 const bad = (why: string, status = 400): Reply => ({ status, body: { ok: false, error: why } })
+
+/**
+ * This project's settings at the module's door, for the host (protocol 2.15.0): `settings.get` and
+ * `settings.set` at `/api/kehikot/settings`, over the same `.kehikot/claude/settings.json` the
+ * page's toggle writes. A program's door like `/api/kehikot/place`, for a project the host holds.
+ * "Resume conversations cut off by a restart" is the person's: a change is taken only with the
+ * page's ticket or a pass the host vouches for, asked of the origins the host started this module
+ * with (`KEHIKOT_ORIGINS`), never of an address a request names.
+ */
+const settings = settingsDoor({
+  module: ID,
+  fields: SETTINGS,
+  ticket: TICKET,
+  vouch: (pass, about) => hostVouches(pass, about, { env: process.env }),
+  read: async (project) => {
+    const root = projectRoot(project)
+    if (!root.ok) return { values: {}, problem: root.error }
+    if (!(await hostCheck.has(root.value))) return { values: {}, problem: `${root.value} is not a project open in Kehikot.` }
+    return { values: { ...readSettings(root.value) }, file: SETTINGS_FILE }
+  },
+  write: async (project, key, value) => {
+    const root = projectRoot(project)
+    if (!root.ok) return root.error
+    if (!(await hostCheck.has(root.value))) return `${root.value} is not a project open in Kehikot.`
+    if (key !== 'resumeCutOff') return `Claude has no setting called "${key.slice(0, 64)}".`
+    const written = writeSettings(root.value, { ...readSettings(root.value), resumeCutOff: value === true })
+    return written.ok ? null : written.error
+  },
+})
 
 /** One session, as a row in a list. */
 export interface Row {
@@ -580,6 +610,10 @@ export async function answer(
   }
 
   if (!path.startsWith('/api/')) return null
+
+  /* Settings, for the host (protocol 2.15.0): before the page's ticket rule, which it keeps itself. */
+  const said = await settings(method, path, query, body, ticket)
+  if (said) return said
 
   /* A session's program saying what it is doing. Before the page's ticket is
      asked for, because it does not have one: see "One door is not the page's". */
