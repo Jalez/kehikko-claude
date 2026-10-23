@@ -45,4 +45,20 @@ fi
 # every start, since the next install undoes it (dev/fix-spawn-helper.sh).
 ./dev/fix-spawn-helper.sh || true
 
+# The built page, when its stamp is this checkout's HEAD (`bun run build`,
+# which a host runs at install and update, never at start). Read here, in the
+# shell, so choosing costs a `git rev-parse` and not a process. A checkout
+# somebody edits has no stamp, or one of an older commit, and gets Vite; a
+# stale build is never served (`serve.ts` refuses one too, with a 503).
+BUILT=
+if [ -f dist/.kehikot-built ] && [ -f dist/index.html ]; then
+  read -r BUILT < dist/.kehikot-built || true
+fi
+if [ -n "$BUILT" ] && [ "$BUILT" = "$(git rev-parse HEAD 2>/dev/null)" ]; then
+  exec bun run serve.ts
+fi
+if [ -n "$BUILT" ]; then
+  echo "claude: dist/ is a build of ${BUILT:0:7}, not of this checkout, so Vite serves the page. \`bun run build\` would make it current." >&2
+fi
+
 exec bunx vite $VITE_FORCE

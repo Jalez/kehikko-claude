@@ -14,3 +14,12 @@ Kehikot installs and updates this module from its GitHub releases, not from `mai
    and is on `main`, checks the notes, typechecks and tests, then publishes the
    release "Claude <version>". If a check fails nothing is published: fix it on
    `main`, then tag again.
+
+## Ready-built
+
+`run.sh` serves the built page (`serve.ts`, the protocol's `run`) when
+`dist/.kehikot-built` names the commit checked out, and Vite otherwise. `bun run
+build` makes it; a host runs that at install and update, never at start. Under Bun
+the pty is Bun's own (`pty.ts`, kept in step with Terminal's): node-pty does not
+work under Bun. What the module says lives in `doors.ts` and `live.ts` (`hold`),
+shared by both servers; `serve.ts` and `vite.config.ts` only mount them.

@@ -6,6 +6,7 @@ import { basename, join } from 'node:path'
 import type { Duplex } from 'node:stream'
 
 import { PROJECT_ID, projectFile, readProjectFile } from 'kehikot-module-protocol'
+import type { RunSockets } from 'kehikot-module-protocol/run'
 import { mintTicket, sameTicket } from 'kehikot-module-protocol/serve'
 
 import { typedByPerson } from './input.ts'
@@ -2632,11 +2633,11 @@ export function theRuns(log: (line: string) => void = () => {}): Runs {
 
   const runs = new Runs({
     log,
-    /* Native and CommonJS, so imported when first needed: the tests are about
-       the deciding and must run without a compiled binary. */
+    /* node-pty under Node (Vite), Bun's own pty under Bun (`serve.ts`): `pty.ts` says why.
+       Imported when first needed: the tests are about the deciding and must run without a pty. */
     spawn: async (file, args, options) => {
-      const nodePty = await import('node-pty')
-      return nodePty.spawn(file, args, { name: TERM, ...options })
+      const { spawnPty } = await import('./pty.ts')
+      return spawnPty(file, args, { name: TERM, ...options })
     },
     screen: headless,
   })
@@ -2703,12 +2704,72 @@ export function serveSessions(server: Upgradable, port: number, log: (line: stri
         socket.destroy()
         return
       }
-      sockets.handleUpgrade(request, socket, head, (ws) => hold(ws, runs, log))
+      sockets.handleUpgrade(request, socket, head, (ws) => {
+        const held = hold(
+          {
+            open: () => ws.readyState === ws.OPEN,
+            sendBytes: (data) => ws.send(data),
+            sendText: (text) => ws.send(text),
+            close: (code, reason) => ws.close(code, reason),
+            terminate: () => ws.terminate(),
+          },
+          runs,
+          log,
+        )
+        ws.on('message', (data: unknown, isBinary: boolean) => {
+          if (!isBinary) held.heard(String(data))
+        })
+        ws.on('close', held.gone)
+        ws.on('error', held.gone)
+      })
     })
     log(`claude: ready on ws://127.0.0.1:${port}${SOCKET}`)
   })().catch((error: unknown) => {
     log(`claude: could not start — ${error instanceof Error ? error.message : String(error)}`)
   })
+}
+
+/**
+ * The session socket on the BUILT server (`serve.ts`), as the protocol's `run` takes it: the same
+ * `hold` as the dev server's, on Bun's own WebSocket. The fence is `run`'s `socketFence` — `fenced`
+ * above in the protocol's words — and the ticket is still the first frame's. A binary frame from a
+ * page is not read, as under `ws`.
+ */
+export function sessionSockets(port: () => number, log: (line: string) => void): {
+  sockets: RunSockets<{ held: Held | null }>
+  listening: (port: number) => void
+} {
+  const runs = theRuns(log)
+  runs.port = port
+  return {
+    sockets: {
+      paths: [SOCKET],
+      data: () => ({ held: null }),
+      open: (ws) => {
+        ws.data.held = hold(
+          {
+            open: () => ws.readyState === 1,
+            sendBytes: (data) => {
+              ws.send(data)
+            },
+            sendText: (text) => {
+              ws.send(text)
+            },
+            close: (code, reason) => ws.close(code, reason),
+            terminate: () => ws.terminate(),
+          },
+          runs,
+          log,
+        )
+      },
+      message: (ws, message) => {
+        if (typeof message === 'string') ws.data.held?.heard(message)
+      },
+      close: (ws) => ws.data.held?.gone(),
+      refused: (why) => log(`claude: refused an upgrade — ${why}`),
+    },
+    listening: (bound) => log(`claude: ready on ws://127.0.0.1:${bound}${SOCKET}`),
+  }
 }
 
 /**
@@ -2719,7 +2780,24 @@ export function serveSessions(server: Upgradable, port: number, log: (line: stri
  * written to the emulator unread; what this module says to its own page is
  * text. A program cannot print its way into the second.
  */
-function hold(ws: import('ws').WebSocket, runs: Runs, log: (line: string) => void): void {
+/** One viewer's socket as `hold` needs it, whichever server holds it: `ws` under Vite, Bun's own under `serve.ts`. */
+export interface Connection {
+  open: () => boolean
+  /** Bytes, sent as a binary frame: what the program printed. */
+  sendBytes: (data: Uint8Array) => void
+  /** Text: what this module says to its own page. */
+  sendText: (text: string) => void
+  close: (code: number, reason: string) => void
+  terminate: () => void
+}
+
+/** What a server tells a held connection: a text frame heard, or the socket gone. */
+export interface Held {
+  heard: (text: string) => void
+  gone: () => void
+}
+
+function hold(ws: Connection, runs: Runs, log: (line: string) => void): Held {
   let run: Run | null = null
   let admitted = false
   /* What arrives between admission and the run existing: the page sends its
@@ -2742,10 +2820,10 @@ function hold(ws: import('ws').WebSocket, runs: Runs, log: (line: string) => voi
 
   const viewer: Viewer = {
     output: (data) => {
-      if (ws.readyState === ws.OPEN) ws.send(Buffer.from(data, 'utf8'))
+      if (ws.open()) ws.sendBytes(Buffer.from(data, 'utf8'))
     },
     say: (message) => {
-      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message))
+      if (ws.open()) ws.sendText(JSON.stringify(message))
     },
     close: shut,
   }
@@ -2770,7 +2848,7 @@ function hold(ws: import('ws').WebSocket, runs: Runs, log: (line: string) => voi
           /* The socket ended while the run was starting. The run is not ended
              with it: it belongs to this process, and the page that comes back
              finds it. */
-          if (ws.readyState !== ws.OPEN) return runs.detach(opened, viewer)
+          if (!ws.open()) return runs.detach(opened, viewer)
           run = opened
           for (const waiting of early.splice(0)) heard(waiting)
         })
@@ -2806,14 +2884,10 @@ function hold(ws: import('ws').WebSocket, runs: Runs, log: (line: string) => voi
     }
   }
 
-  ws.on('message', (data: unknown, isBinary: boolean) => {
-    if (!isBinary) heard(String(data))
-  })
   const gone = () => {
     clearTimeout(silent)
     /* The viewer leaves. The run stays. */
     if (run) runs.detach(run, viewer)
   }
-  ws.on('close', gone)
-  ws.on('error', gone)
+  return { heard, gone }
 }

@@ -9,7 +9,7 @@ import { PROGRAM, headOf, home, type Program, type Recorded, type Running, type 
 import { PLACE_TOKEN, WHERE, assign, detach, follow, homeOf, ownOf, projectRoot, readPlaces, readSettings, recordedIds, rekey, sessionsAt, writeSettings, type Places } from './record.ts'
 import { enable, enabled, hookCommand, settingsFile } from './hook.ts'
 import { here } from './here.ts'
-import { serveFrom, skillAt, skillDeclarations } from './skills.ts'
+import { isSkillPath, serveFrom, skillAt, skillDeclarations } from './skills.ts'
 
 /**
  * The HTTP doors, as one function: `answer` takes a request and returns a
@@ -65,6 +65,12 @@ export function servingAt(origin: string): void {
   const skills = MANIFEST.declares?.skills
   if (skills) skills.splice(0, skills.length, ...skillDeclarations())
 }
+
+/** The paths `answer` and `stream` are asked about, under Vite (`doors()`) and the built server (`run`) alike. */
+export const ours = (path: string): boolean => path === '/healthz' || path === '/mcp' || path.startsWith('/api/') || isSkillPath(path)
+
+/** The largest body a door reads. */
+export const MOST_READ = 64 * 1024
 
 /** Whether the host holds a folder as a project: the protocol's question, here so a test can stand a host in. */
 export const hostCheck = { has: (folder: string) => hostHasProject(folder) }
