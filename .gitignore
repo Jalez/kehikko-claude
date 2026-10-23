@@ -6,3 +6,8 @@ node_modules
 
 # There is no build; Vite serves the page. A stray dist is a second, stale answer.
 dist
+
+# Written by `build.ts` for the length of a build and taken away after. Left
+# behind by a killed build, it would be what Vite answers at `/`, with no
+# ticket in it.
+/index.html
