@@ -3,11 +3,12 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { join } from 'node:path'
 
 import { WELL_KNOWN, missingNeeds, moduleSkillsSchema, skillPath, skillTextIssue, type ModuleSkill } from 'kehikot-module-protocol'
-import { originFor, preferred } from 'kehikot-module-protocol/serve'
+import { originFor, preferred, registryDir } from 'kehikot-module-protocol/serve'
 
 import { configDirOf, type SessionDoor } from './doorConfig.ts'
 import { ID, PREFERRED_PORT } from './manifest.ts'
 import { configDir } from './program.ts'
+import { PLACE_TOKEN } from './record.ts'
 
 /**
  * The Claude Code skills this module offers (protocol 2.5.0, `declares.skills`), in one list.
@@ -121,6 +122,13 @@ export interface GatherOptions {
   timeoutMs?: number
   /** The folder to write the plugin into, replacing it — a background conversation's kept one (`keptDirOf`). A new one when absent. */
   into?: string
+  /**
+   * The session's place token. Given, the plugin also holds the hooks that tell the session where
+   * it is (`context.sh`, see context.ts), with the token and this module's address beside them.
+   */
+  token?: string | null
+  /** Where this module's registration is: where the hook looks when the origin it was given stops answering. */
+  registration?: string
 }
 
 /** Whether the person already installed `name` at `version` through Kehikot (its marker says the same version). */
@@ -247,9 +255,33 @@ export async function sessionPlugin(doors: readonly SessionDoor[], options: Gath
     mkdirSync(join(dir, 'skills', name), { recursive: true, mode: 0o700 })
     writeFileSync(join(dir, 'skills', name, 'SKILL.md'), text, { mode: 0o600 })
   }
+  if (options.token && PLACE_TOKEN.test(options.token)) writeContextHooks(dir, options.token, options.registration ?? join(registryDir(), `${ID}.json`))
   /* Last, so a folder with its plugin.json is a whole one. */
   writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), readFileSync(join(PLUGIN_DIR, '.claude-plugin', 'plugin.json')), { mode: 0o600 })
   return dir
+}
+
+/** The script a session's context hooks run, copied into its plugin (see `context.sh`). */
+export const CONTEXT_SCRIPT = join(import.meta.dirname, 'context.sh')
+
+/** The events a session is told of its place at: its start (any kind) and each prompt. */
+export const CONTEXT_EVENTS = ['SessionStart', 'UserPromptSubmit'] as const
+
+/**
+ * The plugin's hooks (`hooks/hooks.json`): `context.sh` at a session's start and at each prompt,
+ * from the plugin's own folder. Beside it, in `kehikot/`, 0600: the session's token, the origin
+ * this module serves on now, and where its registration is.
+ */
+function writeContextHooks(dir: string, token: string, registration: string): void {
+  const command = (event: string) => `/bin/sh "\${CLAUDE_PLUGIN_ROOT}/context.sh" ${event}`
+  const hooks = Object.fromEntries(CONTEXT_EVENTS.map((event) => [event, [{ hooks: [{ type: 'command', command: command(event), timeout: 10 }] }]]))
+  mkdirSync(join(dir, 'hooks'), { mode: 0o700 })
+  writeFileSync(join(dir, 'hooks', 'hooks.json'), `${JSON.stringify({ hooks }, null, 2)}\n`, { mode: 0o600 })
+  writeFileSync(join(dir, 'context.sh'), readFileSync(CONTEXT_SCRIPT), { mode: 0o700 })
+  mkdirSync(join(dir, 'kehikot'), { mode: 0o700 })
+  writeFileSync(join(dir, 'kehikot', 'token'), token, { mode: 0o600 })
+  writeFileSync(join(dir, 'kehikot', 'origin'), served, { mode: 0o600 })
+  writeFileSync(join(dir, 'kehikot', 'registration'), registration, { mode: 0o600 })
 }
 
 /** Remove a session's plugin folder. Never throws. */

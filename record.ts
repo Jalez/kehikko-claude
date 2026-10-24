@@ -178,6 +178,12 @@ export interface SessionEntry {
    */
   ignored?: { at: string }
   /**
+   * When a person last took it off the place it belonged to (`detach`): from then on it belongs
+   * where a person says, and this module never files it anywhere on its own again
+   * (`autoFile` in context.ts). Cleared when a person assigns it.
+   */
+  detached?: string
+  /**
    * Started or woken in the background (`claude --bg`) by this module: its saved options — the
    * name, the plugin folder and the doors file — are this module's, so it is woken with none
    * given (a flag would carry it on as a copy). See "The background" in program.ts.
@@ -504,6 +510,7 @@ export function assign(
     places.sessions[id]!.home = key
     /* Assigning one that was said to be no Kehikot conversation is the person changing their mind. */
     delete places.sessions[id]!.ignored
+    delete places.sessions[id]!.detached
     if (options.own || !places.places[key]!.own) places.places[key]!.own = id
   })
 }
@@ -559,7 +566,10 @@ export function detach(projectPath: string | null | undefined, key: string, id: 
     if (entry.own === id) delete entry.own
     /* Taken off the place it belongs to: it belongs nowhere until somebody says. */
     const session = Object.hasOwn(places.sessions, id) ? places.sessions[id] : undefined
-    if (session?.home === key) delete session.home
+    if (session?.home === key) {
+      delete session.home
+      session.detached = new Date().toISOString()
+    }
   })
 }
 
@@ -592,6 +602,7 @@ function describe(places: Places, id: string, about: { label?: string; lastActiv
     ...(was?.token ? { token: was.token } : {}),
     ...(was?.seen ? { seen: was.seen } : {}),
     ...(was?.ignored ? { ignored: was.ignored } : {}),
+    ...(was?.detached ? { detached: was.detached } : {}),
     ...(was?.background ? { background: was.background } : {}),
     ...(was?.working ? { working: was.working } : {}),
     ...(was?.resumed ? { resumed: was.resumed } : {}),
@@ -747,6 +758,7 @@ function tidy(raw: unknown): Places {
         token?: unknown
         seen?: { via?: unknown; at?: unknown }
         ignored?: { at?: unknown }
+        detached?: unknown
         background?: unknown
         working?: unknown
         resumed?: { at?: unknown; told?: unknown }
@@ -762,6 +774,7 @@ function tidy(raw: unknown): Places {
         ...(typeof entry.token === 'string' && PLACE_TOKEN.test(entry.token) ? { token: entry.token } : {}),
         ...((via === 'hook' || via === 'agents') && typeof entry.seen?.at === 'string' ? { seen: { via, at: entry.seen.at } } : {}),
         ...(typeof entry.ignored?.at === 'string' ? { ignored: { at: entry.ignored.at } } : {}),
+        ...(typeof entry.detached === 'string' ? { detached: entry.detached } : {}),
         ...(entry.background === true ? { background: true as const } : {}),
         ...(typeof entry.working === 'string' ? { working: entry.working } : {}),
         ...(typeof entry.resumed?.at === 'string' ? { resumed: { at: entry.resumed.at, ...(entry.resumed.told === true ? { told: true } : {}) } } : {}),

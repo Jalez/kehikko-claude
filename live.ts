@@ -15,8 +15,9 @@ import { cutOffs, cutOffWords, midTurn, movedOn, type CutOff } from './cutoff.ts
 import { PROGRAM, headOf, home, recordFile, sessionName, type Active, type Able, type Program, type Running, type State } from './program.ts'
 import { assign, attach, born, byToken, follow, homeOf, markSession, markSessions, note, projectRoot, readPlaces, readSettings, recordedIds, sighted, tokenFor, type NamedPlace, type PlaceEntry, type Places, type SessionEntry } from './record.ts'
 import { removePlugin, sessionPlugin } from './skills.ts'
-import { freshToken, hostDoors, keptDirOf, keptDoors, removeConfig, sweepKept, writeConfig, writeKeptConfig, type DoorsAsked, type SessionDoor } from './doorConfig.ts'
+import { freshToken, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, removeConfig, sweepKept, writeConfig, writeKeptConfig, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
+import { context, type HookAnswer, type Started } from './context.ts'
 
 /**
  * The sessions that are running, and the socket a page watches one through.
@@ -1026,6 +1027,8 @@ export interface RunsOptions {
   log?: (line: string) => void
   /** Asks the host for a session's doors (`hostDoors`); a test stands one in. */
   doors?: (asked: DoorsAsked) => Promise<SessionDoor[] | null>
+  /** Asks the host for a session's doors and the modules on its kehikko (`hostPlace`), for what a session is told (context.ts); a test stands one in. */
+  place?: (asked: DoorsAsked) => Promise<HostPlace | null>
   /** How a session's skills are fetched from the modules on its kehikko; a test stands one in. */
   fetch?: typeof fetch
   /** Where `--mcp-config` files are written; this user's temporary folder by default. */
@@ -1085,6 +1088,12 @@ export class Runs {
   private cutAt = Number.NEGATIVE_INFINITY
   /** Whether the kept folders of long-gone background conversations were swept since this process started. */
   private swept = false
+  /**
+   * Where each token this process gave out was started — the place a session's hooks speak from
+   * (context.ts) before its run exists, and after: a background conversation's is also kept in its
+   * kept folder (`writeKeptPlace`), for when this process is another one. The newest few hundred.
+   */
+  private readonly issued = new Map<string, Started>()
 
   constructor(private readonly options: RunsOptions) {
     this.program = options.program ?? PROGRAM
@@ -1315,6 +1324,7 @@ export class Runs {
     const saved = Boolean(entry?.background)
     const token = (settled ? tokenFor(projectPath, settled, freshToken) : null) ?? freshToken()
     const kept = keptDirOf(token, this.options.configBase)
+    this.issue(token, { projectPath, projectId, place }, kept)
     let doors: SessionDoor[] = []
     let config: string | null = null
     if (able.configures) {
@@ -1331,7 +1341,7 @@ export class Runs {
         this.log('claude: no host gave this session its doors; it starts with the agent’s own configuration')
       }
     }
-    const plugin = able.plugins ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log, into: join(kept, 'plugin') }) : null
+    const plugin = able.plugins ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log, into: join(kept, 'plugin'), token }) : null
     const name = able.names ? placeName(projectPath, place) : ''
     const args = [
       ...program.backgroundArgs(settled, name || undefined, saved, line),
@@ -1695,6 +1705,60 @@ export class Runs {
     return [...this.projects]
   }
 
+  /** Remember where a token was given out; a background conversation's also in its kept folder. */
+  private issue(token: string, started: Started, kept: string | null = null): void {
+    this.issued.delete(token)
+    this.issued.set(token, started)
+    while (this.issued.size > 500) this.issued.delete(this.issued.keys().next().value!)
+    if (!kept) return
+    try {
+      writeKeptPlace(kept, { projectPath: started.projectPath, projectId: started.projectId, key: placeKey(started.place), ...(started.place.kehikkoName ? { kehikkoName: started.place.kehikkoName } : {}), ...(started.place.partNames ? { partNames: started.place.partNames } : {}) })
+    } catch (error) {
+      this.log(`claude: where the session was started could not be kept — ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** Where the conversation behind a token was started: its run, what this process gave out, or its kept folder. Null for a token this module never gave out. */
+  startedOf(token: string): Started | null {
+    const run = [...this.runs.values()].find((one) => one.what === 'session' && one.token === token && !one.ended)
+    const issued = this.issued.get(token)
+    if (run) return { projectPath: run.projectPath, projectId: run.projectId, place: issued && placeKey(issued.place) === run.key ? issued.place : (run.at ?? run.place ?? issued?.place)! }
+    if (issued) return issued
+    const kept = keptPlace(keptDirOf(token, this.options.configBase))
+    const place = kept ? readPlaceKey(kept.key) : null
+    if (!kept || !place) return null
+    return { projectPath: kept.projectPath, projectId: kept.projectId, place: { ...place, ...(kept.kehikkoName ? { kehikkoName: kept.kehikkoName } : {}), ...(kept.partNames ? { partNames: kept.partNames } : {}) } }
+  }
+
+  /** The names of the doors the conversation behind a token was started with, when known. */
+  doorNamesOf(token: string): string[] | null {
+    const run = [...this.runs.values()].find((one) => one.what === 'session' && one.token === token && !one.ended)
+    if (run?.doors.length) return run.doors.map((door) => door.name)
+    const kept = keptDoors(keptDirOf(token, this.options.configBase))
+    return kept.length ? kept.map((door) => door.name) : null
+  }
+
+  /**
+   * A session's own hook asking what it is to be told (`POST /api/context`, see context.ts): its
+   * place and the modules on its kehikko at a start, what changed at a prompt — and the
+   * conversation filed under the place it was started at when it belongs nowhere yet.
+   */
+  context(event: string, session: string, token: string | null): Promise<HookAnswer | null> {
+    return context(
+      { event, session, token },
+      {
+        program: this.program,
+        startedOf: (one) => this.startedOf(one),
+        host: (asked) => (this.options.place ?? hostPlace)(asked),
+        doorsOf: (one) => this.doorNamesOf(one),
+        toldFile: (one) => join(keptDirOf(one, this.options.configBase), 'told.json'),
+        told: (projectPath, assigned) => this.told(projectPath, assigned),
+        log: this.log,
+        later: (run, ms) => setTimeout(run, ms).unref?.(),
+      },
+    )
+  }
+
   /**
    * The place a token's conversation belongs to, as the record says — what a
    * Kehikot door is told (`/api/kehikot/place`). A conversation running here
@@ -1930,6 +1994,7 @@ export class Runs {
     let config: string | null = null
     if (!joined && (await this.program.supports(found.file)).configures) {
       token = (settled ? tokenFor(projectPath, settled, freshToken) : null) ?? freshToken()
+      this.issue(token, { projectPath, projectId, place: asked.place })
       const kehikko = asked.place.kehikko && 'key' in asked.place.kehikko ? asked.place.kehikko.key : null
       const got = await (this.options.doors ?? hostDoors)({ projectPath, projectId, token, kehikko }).catch(() => null)
       if (got?.length) {
@@ -1946,7 +2011,7 @@ export class Runs {
     /* The skills of every module on the kehikko, for this one process: one folder, removed with it. */
     const plugin =
       !joined && (await this.program.supports(found.file)).plugins
-        ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log })
+        ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log, token })
         : null
     const args = joined
       ? this.program.attach(joined.handle!)

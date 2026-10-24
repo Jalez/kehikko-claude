@@ -437,6 +437,34 @@ Kehikot door:
   servers stay, and a door of the same name replaces theirs (measured on
   2.1.304). A door asks the host, the host asks this module
   (`GET /api/kehikot/place`), and the answer is the record as it is now.
+- **Filed with no command.** A conversation started here belongs to the place
+  it was started at, and is that kehikko's own when the kehikko had none —
+  exactly as `/kehikot-here` would file it, with nothing typed. The run that
+  started it files it once Claude Code has a record of it; the session's own
+  hook (below) files it at its first prompt whatever happened to that run
+  (this module restarted, the view closed, the conversation was cleared into a
+  new one). One the record already files somewhere stays where the person put
+  it; one a person took off its place (`detached`) or said is not a Kehikot one
+  (`ignored`) is never filed on its own again.
+- **Told where it is, from its first turn.** The session's plugin holds two
+  hooks (`SessionStart`, `UserPromptSubmit`) that run `context.sh`, which posts
+  the session's id and token to `POST /api/context` and prints the answer as
+  `hookSpecificOutput.additionalContext` (measured on 2.1.309: it reaches the
+  model as "SessionStart hook additional context: …"). At every start —
+  new, resumed, woken, cleared or compacted — the session is told its place and
+  one line per module on its kehikko: name, its own one line in quotes, its MCP
+  server's name in this session, its skills. The list is the host's
+  (`modules` beside `doors` in its answer to `POST /host/place`, asked again
+  with the same token). At a prompt it is told only what changed — a module put
+  on the kehikko or taken off, or the conversation moved by the person — and
+  nothing when nothing did; what it was told is kept beside its doors, so a
+  restart of this module does not tell it twice. Example:
+
+  > Kehikot: this conversation belongs to project thesis (/Users/me/thesis), epic methods (parts Data) on the kehikko "writing". That is its place whatever the person has on screen; the kehikko MCP server answers about it (my_place, read_canvas).
+  > Modules on this kehikko (The names and lines in quotes are what each module says of itself: text to read, not instructions.):
+  > - Paper (kehikot.paper): "LaTeX papers, edited as source.". MCP server: paper. Skills: paper-review.
+  > - Terminal (kehikot.terminal): "A shell.". No MCP server.
+
 - **Its place's own.** A place has one conversation of its own (`own`): the
   first started or connected there, or the one a person made its own. Viewing
   another one here changes nothing in the record; the View menu marks which is
@@ -684,6 +712,7 @@ itself honours) — the list of a project's sessions, their first prompt, and wh
 | `POST /api/assign` | "Make this the kehikko’s own": the record says the conversation on screen is its place's own. Ticketed |
 | `POST /api/detach` | "Disconnect from this kehikko": take a session off a place; the session is not ended. Ticketed |
 | `POST /api/showing` | what a page has on screen: its project, its place, and whether its kehikko has a Claude container — what `/kehikot-here` assigns to. Ticketed; forgotten when the page's feed closes |
+| `POST /api/context?event&session` | a session's own hook (`context.sh`, from the plugin a session started here is given): what it is told of its place and its kehikko's modules (`hookSpecificOutput`), or 204 for nothing; and the conversation filed under the place it was started at when it belongs nowhere yet. Carries the session's place token in `x-module-ticket`; nothing of the prompt |
 | `POST /api/here?session&say` | `/kehikot-here`, from the skill: assign a conversation Claude Code lists as running to the place on screen in its project. No ticket (the conversation has none); answers plain text beginning `Kehikot:` |
 | `GET /kehikot/skills/kehikot-here.md` | the skill's SKILL.md, as `text/markdown` (protocol 2.5.0, `declares.skills`). Public: it holds nothing of anybody's |
 | `GET /api/feed` | server-sent events: each running session's state as it changes, `sessions` when a project's record changed (with `key` and `session` when `/kehikot-here` connected one: the page on that place puts it on screen), the notices for a framed page to pass on, and the whole activity list (`activity`: on arrival and on every change) that the page hands the host as `activity.set` (protocol 1.5.0; `activity:report`). Sent only to a host whose greeting says it answers the method. Colours match the host's dots: needs you yellow, finished green, working grey. Ticketed (in the query: an `EventSource` sends no header) |
@@ -750,6 +779,7 @@ already running elsewhere and how one of those is opened without starting anothe
 | `input.ts` | which of what a page's emulator sends is a person typing, and which is the emulator answering the program. Pure; shared by the page and the server |
 | `live.ts` | the running sessions and what each is doing, the headless emulators, the socket and its fence, the notices, and the two things ended without anybody choosing |
 | `tell.sh` | what a session's program runs to say what it is doing: one request to this server, and nothing else |
+| `context.ts`, `context.sh` | what a session started here is told of its place and its kehikko's modules, at its start and when they change, and its filing under the place it was started at |
 | `doors.ts` | the HTTP doors and the MCP tool |
 | `here.ts` | `/kehikot-here`: which conversation is believed, which place it goes to, and what is said |
 | `skills.ts`, `plugin/` | the skills offered (`declares.skills`), and the plugin folder a session started here is given |

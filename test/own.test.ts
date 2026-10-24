@@ -92,6 +92,11 @@ describe('the record', () => {
     expect(homeOf(read(p), A)).toBe(placeKey(METHODS))
     detach(p, placeKey(METHODS), A)
     expect(homeOf(read(p), A)).toBeNull()
+    /* A person took it off: kept, so nothing files it anywhere on its own again — and read back as written. */
+    expect(read(p).sessions[A]?.detached).toMatch(/^\d{4}-/)
+    /* A person assigning it again is their say: the mark goes. */
+    assign(p, RESULTS, A)
+    expect(read(p).sessions[A]?.detached).toBeUndefined()
   })
 
   test('a file from before `home` says it only where it is a fact: one place lists it', () => {
