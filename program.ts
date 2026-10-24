@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { accessSync, constants, realpathSync, statSync } from 'node:fs'
+import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs'
 import { open, readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { delimiter, join } from 'node:path'
@@ -53,7 +53,8 @@ import { delimiter, join } from 'node:path'
  * live.ts). And no flag
  * that widens what the program may do. `fresh` and `resume` name a session;
  * `reports` adds, for a copy that can take it, the one other thing on the
- * command line — the program's own hooks, pointed at this module — and that
+ * command line — the program's own hooks, pointed at this module, and its
+ * status line (`statusLine`, which runs the person's own first) — and that
  * is the whole command. A session opened here has exactly the permissions
  * the same command would have in any terminal.
  *
@@ -64,7 +65,7 @@ import { delimiter, join } from 'node:path'
  *     claude --resume <uuid> [--name <place>] [--settings <json>] [--plugin-dir <plugin>] [--mcp-config <file>]      a session nothing else is running
  *     claude agents --json                            before every resume and every list: what is running. Reads; starts nothing
  *     claude attach <handle>                          a view of a session the program runs in the background
- *     claude --bg [--resume <uuid>] [<line>] [--name <place>] [--plugin-dir <plugin>] [--mcp-config <file>]
+ *     claude --bg [--resume <uuid>] [<line>] [--name <place>] [--settings <json>] [--plugin-dir <plugin>] [--mcp-config <file>]
  *                                                     a conversation of a place's, started or resumed in the background
  *     claude stop <handle>                            a background session of this module's, ended by a person
  *     claude rm <handle>                              one this module started that nobody ever typed into
@@ -99,6 +100,11 @@ import { delimiter, join } from 'node:path'
  *  - The environment of the caller does NOT reach the session (it is the
  *    daemon's), so a background session is never asked to report through
  *    `tell.sh`: what it is doing is asked of the program (`agents --json`).
+ *    Its `--settings` hold its status line only (`statusLine`), which reports
+ *    with the token in its plugin instead. Measured on 2.1.310: `--settings`
+ *    is kept among the saved options ("woke session … with its saved options
+ *    (--settings)"), and a background session runs its status line whether or
+ *    not anybody is attached.
  *  - A folder not yet trusted is refused ("Workspace not trusted"); the
  *    conversation is then opened in the terminal as before, where the trust
  *    question is asked.
@@ -202,7 +208,19 @@ export interface Active {
    * none (an interactive session has none), is null — nothing said.
    */
   state?: State | null
+  /**
+   * Where the session's process is, as the program's `status` says it — `idle` at its prompt,
+   * `busy` on a turn, `waiting` on a question it put up, `shell` running a command the person
+   * typed (the four words of Claude Code 2.1.310's session files). Unlike a background session's
+   * `state`, which is the job's (a background session can be `working` at an `idle` prompt), this
+   * is the process's own, and what Compact and Clear wait for. Null for any other word, or none.
+   */
+  status?: ActiveStatus | null
 }
+
+/** What a session's process is doing, by `agents --json`'s `status`. */
+export type ActiveStatus = 'idle' | 'busy' | 'waiting' | 'shell'
+const ACTIVE_STATUSES: readonly ActiveStatus[] = ['idle', 'busy', 'waiting', 'shell']
 
 /** The program's word for a background session's state, as this module says it. */
 const BACKGROUND_STATES: Record<string, State> = { working: 'working', blocked: 'needs-you', done: 'finished' }
@@ -300,7 +318,17 @@ export interface Program {
    * worth hearing, `command(event)` is the line it is to run when that
    * happens. Only ever given to a copy whose `supports()` said `tells`.
    */
-  reports(command: (event: string) => string): string[]
+  reports(command: (event: string) => string, more?: Record<string, unknown>): string[]
+  /**
+   * The settings that make a session started here run `script` as its status line, with the
+   * person's own status line command (`own`) for it to run first and print unchanged — or null
+   * when they have none, or one that cannot be run that way, and the session is then started
+   * without (its context is read from its transcript).
+   * Only for a copy whose `supports()` said `tells` (`--settings`).
+   */
+  statusLine?(projectPath: string, script: string, env?: NodeJS.ProcessEnv): { settings: Record<string, unknown>; own: string | null } | null
+  /** `--settings` and its JSON, for settings and nothing else: what a background session is given (it reports through no hook). */
+  settingsArgs?(settings: Record<string, unknown>): string[]
   /** What an event the program reported says about the session, or null for one that says nothing. */
   signal(event: string): State | null
   /**
@@ -1007,11 +1035,62 @@ const SIGNALS: Record<string, State> = {
   Stop: 'finished',
 }
 
-function reports(command: (event: string) => string): string[] {
+function reports(command: (event: string) => string, more: Record<string, unknown> = {}): string[] {
   const hooks = Object.fromEntries(
     Object.keys(SIGNALS).map((event) => [event, [{ hooks: [{ type: 'command', command: command(event), timeout: 5 }] }]]),
   )
-  return [TELLS, JSON.stringify({ hooks })]
+  return [TELLS, JSON.stringify({ ...more, hooks })]
+}
+
+/**
+ * The person's own status line, as Claude Code would run it for a session in `projectPath`: the
+ * first of the project's local settings, its shared settings and the person's own
+ * (`<config>/settings.json`) that names one — the order Claude Code reads them in, highest first.
+ * `--settings`, above all three, is where this module's goes. Read, never written. Policy
+ * (managed) settings outrank `--settings` and are not read: a status line set there replaces this
+ * module's too, and the meter then reads the transcript alone.
+ *
+ * `none` when none names one; `other` for one this module cannot run the way Claude Code would
+ * (another `type`, an `args` list, a `shell` that is not bash), which is then left alone.
+ */
+export function ownStatusLine(projectPath: string, env: NodeJS.ProcessEnv = process.env): { line: Record<string, unknown>; command: string } | 'none' | 'other' {
+  const files = [join(projectPath, '.claude', 'settings.local.json'), join(projectPath, '.claude', 'settings.json'), join(configDir(env), 'settings.json')]
+  for (const file of files) {
+    let said: unknown
+    try {
+      said = JSON.parse(readFileSync(file, 'utf8'))
+    } catch {
+      continue
+    }
+    if (!said || typeof said !== 'object' || Array.isArray(said) || !Object.hasOwn(said, 'statusLine')) continue
+    const line = (said as { statusLine?: unknown }).statusLine
+    if (line === null || line === undefined) return 'none'
+    if (typeof line !== 'object' || Array.isArray(line)) return 'other'
+    const one = line as Record<string, unknown>
+    if (one.type !== 'command' || typeof one.command !== 'string' || !one.command.trim() || one.args !== undefined) return 'other'
+    if (one.shell !== undefined && one.shell !== 'bash') return 'other'
+    return { line: one, command: one.command }
+  }
+  return 'none'
+}
+
+/** A word for `/bin/sh`, in single quotes. */
+const shellWord = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`
+
+/**
+ * The status line a session started here is given (`statusline.sh`, copied into its plugin):
+ * the person's own settings for it kept — padding, refresh — with the command this module's,
+ * which runs theirs first. Only when they have one: null when they have none, or one that cannot
+ * be run that way.
+ */
+function statusLine(projectPath: string, script: string, env: NodeJS.ProcessEnv = process.env): { settings: Record<string, unknown>; own: string | null } | null {
+  const own = ownStatusLine(projectPath, env)
+  /* None of theirs: none is added. An empty status line still costs a row under Claude Code's
+     prompt (measured on 2.1.310), a change to their terminal for nothing they asked for; the
+     context is then read from the transcript alone. One that cannot be run as Claude Code would is left alone. */
+  if (own === 'none' || own === 'other') return null
+  const kept = Object.fromEntries(Object.entries(own.line).filter(([key]) => key !== 'command' && key !== 'shell' && key !== 'type'))
+  return { settings: { statusLine: { ...kept, type: 'command', command: `/bin/sh ${shellWord(script)}` } }, own: own.command }
 }
 
 /**
@@ -1025,7 +1104,7 @@ const HANDLE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
 /** One entry of `agents --json`, or null for anything that is not one. Nothing in it is trusted beyond its shape. */
 export function readActive(raw: unknown): Active | null {
   if (typeof raw !== 'object' || raw === null) return null
-  const said = raw as { sessionId?: unknown; kind?: unknown; id?: unknown; pid?: unknown; cwd?: unknown; startedAt?: unknown; name?: unknown; state?: unknown }
+  const said = raw as { sessionId?: unknown; kind?: unknown; id?: unknown; pid?: unknown; cwd?: unknown; startedAt?: unknown; name?: unknown; state?: unknown; status?: unknown }
   if (typeof said.sessionId !== 'string' || !SESSION_ID.test(said.sessionId)) return null
   const called = typeof said.kind === 'string' ? said.kind.slice(0, 40) : ''
   const kind = called === 'background' ? 'background' : called === 'interactive' ? 'interactive' : 'other'
@@ -1039,6 +1118,7 @@ export function readActive(raw: unknown): Active | null {
     startedAt: typeof said.startedAt === 'number' && Number.isFinite(said.startedAt) && said.startedAt > 0 ? said.startedAt : null,
     name: typeof said.name === 'string' ? said.name.slice(0, 120) : '',
     state: typeof said.state === 'string' && Object.hasOwn(BACKGROUND_STATES, said.state) ? BACKGROUND_STATES[said.state]! : null,
+    status: typeof said.status === 'string' && (ACTIVE_STATUSES as readonly string[]).includes(said.status) ? (said.status as ActiveStatus) : null,
   }
 }
 
@@ -1118,6 +1198,8 @@ export const PROGRAM: Program = {
   install,
   environment,
   reports,
+  statusLine,
+  settingsArgs: (settings) => (Object.keys(settings).length ? [TELLS, JSON.stringify(settings)] : []),
   signal: (event) => (Object.hasOwn(SIGNALS, event) ? SIGNALS[event]! : null),
   active,
   /* The handle and nothing else, and only one `readActive` let through. No

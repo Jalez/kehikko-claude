@@ -76,3 +76,42 @@ const NOT_A_PERSON = new RegExp(
 export function typedByPerson(data: string): boolean {
   return data.replace(NOT_A_PERSON, '') !== ''
 }
+
+/**
+ * What is typed at the program's prompt and not sent, as far as the bytes say: how many
+ * characters, and when a line was last sent (Enter). Compact and Clear are typed at the prompt
+ * the person's keys go to, so they wait while anything is there — it would be sent with them —
+ * and until the program has been seen at its prompt after the last line was sent.
+ *
+ * Counted, not read: printable characters add, Backspace takes one away, Enter sends (and the
+ * count is nothing), Ctrl+C and Ctrl+U empty the line, and every escape sequence (an arrow, a
+ * function key) and every reply of the emulator's is passed over. A bracketed paste adds its
+ * length. It is a count and not a copy of the line: no character of it is kept. What it cannot
+ * see — a word deleted with Ctrl+W, a line emptied by Esc Esc — leaves it counting more than is
+ * there, which keeps Compact and Clear waiting, never the other way.
+ */
+export interface Prompt {
+  chars: number
+  /** When a line was last sent; 0 for never. */
+  sentAt: number
+}
+
+export const emptyPrompt = (): Prompt => ({ chars: 0, sentAt: 0 })
+
+const PASTE = /\x1b\[200~([\s\S]*?)\x1b\[201~/g
+const SEQUENCE = /\x1b(?:\[[0-9;?<>=]*[ -/]*[@-~]|O.|[^[O])/g
+
+export function promptAfter(prompt: Prompt, data: string, now: number): Prompt {
+  let chars = prompt.chars
+  let sentAt = prompt.sentAt
+  const said = data.replace(NOT_A_PERSON, '').replace(PASTE, (_all, pasted: string) => '\u0000'.repeat(Math.min(pasted.length, 100_000))).replace(SEQUENCE, '')
+  for (const one of said) {
+    if (one === '\r' || one === '\n') {
+      chars = 0
+      sentAt = now
+    } else if (one === '\x03' || one === '\x15') chars = 0
+    else if (one === '\x7f' || one === '\b') chars = Math.max(0, chars - 1)
+    else if (one === '\u0000' || one >= ' ') chars += 1
+  }
+  return { chars, sentAt }
+}

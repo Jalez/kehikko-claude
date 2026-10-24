@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { listing, type Listing } from '../doors.ts'
+import { listing, runOf, type Listing } from '../doors.ts'
 import { CLOSED, Runs, activityRows, sameProject, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
 import { placeKey } from '../place.ts'
 import { PROGRAM, readActive, type Active, type Program, type Recorded } from '../program.ts'
@@ -1897,7 +1897,7 @@ describe('the state of a background session a place is attached to', () => {
     await w.runs.watch()
     expect(w.runs.activity()).toMatchObject([{ id: A, state: 'done', detail: 'turn ended', since: run.stateSince }])
     expect(run.state).toBe('finished')
-    expect(viewer.said.at(-1)).toMatchObject({ session: A, state: 'finished' })
+    expect(viewer.said.filter((one) => 'state' in one).at(-1)).toMatchObject({ session: A, state: 'finished' })
     expect(feed.states.at(-1)).toMatchObject({ session: A, state: 'finished' })
     expect(feed.got.map((one) => one.state)).toEqual(['finished'])
 
@@ -2644,5 +2644,322 @@ describe('a session started here knows its place and its kehikko’s modules, an
     expect(w.runs.sighted(dir, C, 'hook')).toBe(true)
     const read = readPlaces(dir)
     expect(read.ok && read.value.sessions[C]?.home).toBeUndefined()
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * The context meter, and Compact and Clear
+ * ------------------------------------------------------------------ */
+
+describe('Compact and Clear: only at the prompt, only on a press', () => {
+  const C2 = '33333333-3333-4333-8333-333333333333'
+  const after = (ms: number) => new Promise((done) => setTimeout(done, ms))
+  /** A session in a terminal here, asked to report: what its hooks say decides. */
+  async function reporting() {
+    const dir = project()
+    const w = world({ tells: true, port: 4999 })
+    w.records(dir, A, 'tighten the methods')
+    const viewer = new Watcher()
+    const run = await w.runs.open(ask(dir, A), viewer)
+    if (!isRun(run)) throw new Error('not opened')
+    await settle()
+    return { dir, w, run, viewer, tell: (event: string) => w.runs.heard(run.id, run.secret, event) }
+  }
+
+  test('a turn under way, a question on screen, or nothing said yet: nothing is typed, and why is said in words', async () => {
+    const { w, run, tell } = await reporting()
+    expect(w.runs.readiness(run)).toBe('It is not known yet whether Claude is waiting at its prompt.')
+    expect(tell('UserPromptSubmit')).toBe(true)
+    expect(w.runs.command(run, 'compact')).toBe('Claude is working. Compact and Clear wait until it is back at its prompt.')
+    w.later(1_000)
+    tell('PermissionRequest')
+    expect(w.runs.command(run, 'clear')).toBe('Claude is waiting for an answer on screen.')
+    expect(w.ptys[0]!.typed).toEqual([])
+  })
+
+  test('at its prompt, /compact is typed through the session’s own pty, then Enter — and it waits again until it is seen back', async () => {
+    const { w, run, tell, viewer } = await reporting()
+    tell('UserPromptSubmit')
+    w.later(1_000)
+    tell('Stop')
+    w.later(1_000)
+    expect(w.runs.readiness(run)).toBeNull()
+    await settle()
+    expect(viewer.said.some((one) => (one.meter as { ready?: unknown } | undefined)?.ready === null)).toBe(true)
+    expect(w.runs.command(run, 'compact')).toBe(true)
+    expect(w.ptys[0]!.typed).toEqual(['/compact'])
+    await after(320)
+    expect(w.ptys[0]!.typed).toEqual(['/compact', '\r'])
+    /* Sent: not again until the program is seen at its prompt after it. */
+    expect(w.runs.command(run, 'clear')).toBe('Claude has not been seen at its prompt since a line was sent to it.')
+    w.later(2_000)
+    tell('UserPromptSubmit')
+    w.later(1_000)
+    tell('Stop')
+    expect(w.runs.command(run, 'clear')).toBe(true)
+    expect(w.ptys[0]!.typed.at(-1)).toBe('/clear')
+  })
+
+  test('something typed at the prompt and not sent holds them: it would be sent with them', async () => {
+    const { w, run, tell } = await reporting()
+    tell('Stop')
+    w.later(2_000)
+    w.runs.type(run, 'half a th')
+    expect(w.runs.readiness(run)).toBe('Something is typed at Claude’s prompt and not sent. Send it or clear it first.')
+    w.runs.type(run, '\x7f'.repeat(9))
+    expect(w.runs.readiness(run)).toBeNull()
+    /* The emulator answering the program, and the pointer, are not typing. */
+    w.runs.type(run, '\x1b[I\x1b[<35;10;5M')
+    expect(w.runs.readiness(run)).toBeNull()
+    w.runs.type(run, 'again')
+    w.runs.type(run, '\x03')
+    expect(w.runs.readiness(run)).toBeNull()
+    w.runs.type(run, 'a question\r')
+    expect(w.runs.readiness(run)).toBe('Claude has not been seen at its prompt since a line was sent to it.')
+  })
+
+  test('a background session: its process’s own status, asked of the program, decides — not its job’s state', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A, 'in the background')
+    const job = (status: string, session = A): Active => readActive({ pid: 4242, id: 'aaaaaaaa', cwd: dir, kind: 'background', startedAt: 1, sessionId: session, name: 'kept', status, state: 'working' })!
+    w.elsewhere.push(job('busy'))
+    const viewer = new Watcher()
+    const run = await w.runs.open(ask(dir, A), viewer)
+    if (!isRun(run)) throw new Error('not opened')
+    expect(w.ptys[0]!.args).toEqual(['attach', 'aaaaaaaa'])
+    await settle()
+    expect(w.runs.readiness(run)).toBe('Claude is working. Compact and Clear wait until it is back at its prompt.')
+    w.elsewhere.splice(0, 1, job('waiting'))
+    w.later(1_000)
+    await w.runs.watch()
+    expect(w.runs.readiness(run)).toBe('Claude is waiting for an answer on screen.')
+    w.elsewhere.splice(0, 1, job('idle'))
+    w.later(1_000)
+    await w.runs.watch()
+    /* `state: working` is the job's; at its prompt it is. */
+    expect(w.runs.readiness(run)).toBeNull()
+    expect(w.runs.command(run, 'clear')).toBe(true)
+    expect(w.ptys[0]!.typed).toEqual(['/clear'])
+  })
+
+  test('after /clear in a background session, the record follows it to its new conversation; the old one stays listed', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A, 'the old conversation')
+    const job = (session: string): Active => readActive({ pid: 4242, id: 'aaaaaaaa', cwd: dir, kind: 'background', startedAt: 1, sessionId: session, name: 'kept', status: 'idle', state: 'done' })!
+    w.elsewhere.push(job(A))
+    const viewer = new Watcher()
+    const run = await w.runs.open(ask(dir, A), viewer)
+    if (!isRun(run)) throw new Error('not opened')
+    await settle()
+    expect(listed(dir)).toEqual([A])
+    /* Claude Code started a new conversation in the same job: the handle stays, the session id is new. */
+    w.elsewhere.splice(0, 1, job(C2))
+    w.records(dir, C2, '')
+    w.later(1_000)
+    await w.runs.watch()
+    expect(run.settled).toBe(C2)
+    expect(run.joined?.session).toBe(C2)
+    expect(listed(dir)).toEqual([A, C2])
+    const read = readPlaces(dir)
+    expect(read.ok && read.value.places[placeKey(HERE)]?.current).toBe(C2)
+    expect(viewer.said).toContainEqual({ exists: true, session: C2, label: '' })
+    expect(w.logged.some((line) => line.includes(`is now on ${C2}`))).toBe(true)
+    /* Not before Claude Code has a record of it. */
+    const D = '44444444-4444-4444-8444-444444444444'
+    w.elsewhere.splice(0, 1, job(D))
+    await w.runs.watch()
+    expect(run.settled).toBe(C2)
+  })
+
+  test('after /clear in a terminal here, the record follows the process to its new conversation', async () => {
+    const { dir, w, run, viewer } = await reporting()
+    run.pty.pid = 909
+    w.records(dir, C2, '')
+    w.elsewhere.push({ session: C2, kind: 'interactive', called: 'interactive', handle: null, pid: 909, cwd: dir, startedAt: 1, name: '' })
+    await w.runs.track(run)
+    expect(run.settled).toBe(C2)
+    const read = readPlaces(dir)
+    expect(read.ok && read.value.places[placeKey(HERE)]?.current).toBe(C2)
+    expect(viewer.said.at(-1)).toMatchObject({ exists: true, session: C2 })
+    expect(listed(dir)).toEqual([A, C2])
+  })
+
+  test('a process said to be idle just after a line was sent may not have begun its turn yet', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A, 'in the background')
+    const job = (status: string): Active => readActive({ pid: 4242, id: 'aaaaaaaa', cwd: dir, kind: 'background', startedAt: 1, sessionId: A, name: 'kept', status })!
+    w.elsewhere.push(job('idle'))
+    const run = await w.runs.open(ask(dir, A), new Watcher())
+    if (!isRun(run)) throw new Error('not opened')
+    await settle()
+    w.later(3_000)
+    w.runs.type(run, 'go on\r')
+    /* Asked a second later: its UserPromptSubmit hooks are still running, and it still says idle. */
+    w.later(1_000)
+    await w.runs.watch()
+    expect(w.runs.readiness(run)).toBe('Claude has not been seen at its prompt since a line was sent to it.')
+    w.later(7_000)
+    await w.runs.watch()
+    expect(w.runs.readiness(run)).toBeNull()
+    /* What it prints says nothing: an idle program redraws when its terminal gains or loses the keyboard. */
+    w.ptys[0]!.says('\x1b[?25h')
+    expect(w.runs.readiness(run)).toBeNull()
+  })
+
+  test('a conversation’s own SessionStart hook moves its run to the new conversation at once, and its page is not switched to it as if it came from elsewhere', async () => {
+    const dir = project()
+    const base = mkdtempSync(join(tmpdir(), 'kehikko-claude-plugin-'))
+    made.push(base)
+    const w = world({ configures: true, doors: async () => [], configBase: base })
+    w.records(dir, A, 'before the clear')
+    const viewer = new Watcher()
+    const run = await w.runs.open(ask(dir, A), viewer)
+    if (!isRun(run) || !run.token) throw new Error('not opened with a token')
+    await settle()
+    const told: unknown[] = []
+    w.runs.subscribe({ notices: false, state: () => {}, notice: () => {}, sessions: (_project, assigned) => told.push(assigned ?? null) })
+    /* /clear: Claude Code starts a new conversation in the same process, and its plugin's hook says so. */
+    w.records(dir, C2, '')
+    await w.runs.context('SessionStart', C2, run.token)
+    expect(run.settled).toBe(C2)
+    expect(viewer.said).toContainEqual({ exists: true, session: C2, label: '' })
+    const read = readPlaces(dir)
+    expect(read.ok && read.value.places[placeKey(HERE)]?.current).toBe(C2)
+    expect(listed(dir)).toEqual([A, C2])
+    /* Pages are never told "switch to it" about a conversation a run here already shows: that would open a second view of it. */
+    expect(told.every((one) => one === null)).toBe(true)
+    w.runs.told(dir, { key: placeKey(HERE), session: C2 })
+    expect(told.at(-1)).toBeNull()
+    w.runs.told(dir, { key: placeKey(HERE), session: A })
+    expect(told.at(-1)).toEqual({ key: placeKey(HERE), session: A })
+  })
+
+  test('after /clear, the conversation the run is on now is the running one; the one it left is not', async () => {
+    const { dir, w, run } = await reporting()
+    w.records(dir, C2, '')
+    run.pty.pid = 919
+    w.elsewhere.push({ session: C2, kind: 'interactive', called: 'interactive', handle: null, pid: 919, cwd: dir, startedAt: 1, name: '' })
+    await w.runs.track(run)
+    expect(run.settled).toBe(C2)
+    expect(runOf(w.runs.sessions(), C2)).toBe(run)
+    expect(runOf(w.runs.sessions(), A)).toBeUndefined()
+    const said = await listing(dir, placeKey(HERE), w.runs, w.program)
+    if (!said.ok) throw new Error('no listing')
+    expect(said.sessions.find((one) => one.id === A)?.running).toBe(false)
+    expect(said.sessions.find((one) => one.id === C2)?.running).toBe(true)
+    expect(said.running.map((one) => one.id)).toEqual([C2])
+  })
+
+  test('nothing is typed for a word that is not one of the two', async () => {
+    const { w, run, tell } = await reporting()
+    tell('Stop')
+    w.later(1_000)
+    expect(w.runs.command(run, 'exit' as 'compact')).toBe('That is not something here.')
+    expect(w.ptys[0]!.typed).toEqual([])
+  })
+})
+
+describe('the context meter, from the transcript and the session’s own status line', () => {
+  const transcript = (dir: string, id: string, rows: unknown[]) => {
+    const folder = join(CONFIG, 'projects', dir.replace(/[^a-zA-Z0-9]/g, '-'))
+    mkdirSync(folder, { recursive: true })
+    writeFileSync(join(folder, `${id}.jsonl`), `${rows.map((one) => JSON.stringify(one)).join('\n')}\n`)
+  }
+  const usage = (read: number) => ({ type: 'assistant', isSidechain: false, timestamp: '2026-10-24T11:55:51.076Z', message: { model: 'claude-sonnet-4-5', role: 'assistant', usage: { input_tokens: 40, cache_creation_input_tokens: 1200, cache_read_input_tokens: read, output_tokens: 20 } } })
+
+  test('a viewer is told the context of the session on screen, and the list’s rows carry it', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A, 'measured')
+    transcript(dir, A, [{ type: 'user', message: { role: 'user', content: 'hello' } }, usage(162_760)])
+    const viewer = new Watcher()
+    await w.runs.open(ask(dir, A), viewer)
+    await settle()
+    await settle()
+    const meter = viewer.said.find((one) => one.meter)?.meter as { session: string; context: { tokens: number; percent: number; soon: boolean; window: number } }
+    expect(meter.session).toBe(A)
+    expect(meter.context).toMatchObject({ tokens: 164_000, window: 200_000, percent: 82, soon: true })
+    const listing_ = await listing(dir, placeKey(HERE), w.runs, w.program)
+    if (!listing_.ok) throw new Error('no listing')
+    expect(listing_.sessions[0]?.context).toMatchObject({ percent: 82, soon: true })
+  })
+
+  test('a session started here: its status line is given with the person’s own command kept, and what it posts is believed only with its token', async () => {
+    const dir = project()
+    const base = mkdtempSync(join(tmpdir(), 'kehikko-claude-plugin-'))
+    made.push(base)
+    writeFileSync(join(CONFIG, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'echo mine', padding: 0 } }))
+    try {
+      const w = world({ tells: true, port: 4999, configures: true, plugins: true, doors: async () => [], configBase: base })
+      const viewer = new Watcher()
+      const run = await w.runs.open(ask(dir, null), viewer)
+      if (!isRun(run)) throw new Error('not opened')
+      const args = w.ptys[0]!.args
+      const settings = JSON.parse(args[args.indexOf('--settings') + 1]!) as { statusLine: { command: string; padding: number; type: string }; hooks: unknown }
+      expect(settings.hooks).toBeDefined()
+      expect(settings.statusLine).toEqual({ padding: 0, type: 'command', command: `/bin/sh '${run.plugin}/statusline.sh'` })
+      expect(readFileSync(join(run.plugin!, 'kehikot', 'statusline'), 'utf8')).toBe('echo mine')
+      expect(existsSync(join(run.plugin!, 'statusline.sh'))).toBe(true)
+      /* The program writes its record; the status line reports. */
+      w.records(dir, B, 'started here')
+      w.ptys[0]!.says('hi\r\n')
+      await settle()
+      const raw = { session_id: B, model: { id: 'claude-opus-5-5', display_name: 'Opus 5.5' }, cost: { total_cost_usd: 1.25 }, context_window: { context_window_size: 1_000_000, current_usage: { input_tokens: 10, cache_read_input_tokens: 90_000, cache_creation_input_tokens: 0, output_tokens: 5 } } }
+      expect(w.runs.heardStatus(B, 'not-the-token-not-the-token', raw)).toBe(false)
+      expect(w.runs.heardStatus(A, run.token, { ...raw, session_id: A })).toBe(false)
+      expect(w.runs.heardStatus(B, run.token, { ...raw, session_id: A })).toBe(false)
+      expect(w.runs.heardStatus(B, run.token, raw)).toBe(true)
+      await settle()
+      const last = viewer.said.filter((one) => one.meter).at(-1)?.meter as { context: { tokens: number; window: number; windowSure: boolean; cost: unknown; model: unknown } }
+      expect(last.context).toMatchObject({ tokens: 90_010, window: 1_000_000, windowSure: true, cost: { usd: 1.25, live: true }, model: { id: 'claude-opus-5-5', name: 'Opus 5.5' } })
+    } finally {
+      rmSync(join(CONFIG, 'settings.json'), { force: true })
+    }
+  })
+
+  test('a person with no status line is given none: their terminal is not changed, and the context is read from the transcript', async () => {
+    const dir = project()
+    const base = mkdtempSync(join(tmpdir(), 'kehikko-claude-plugin-'))
+    made.push(base)
+    rmSync(join(CONFIG, 'settings.json'), { force: true })
+    const w = world({ tells: true, port: 4999, configures: true, plugins: true, doors: async () => [], configBase: base })
+    const run = await w.runs.open(ask(dir, null), new Watcher())
+    if (!isRun(run)) throw new Error('not opened')
+    const args = w.ptys[0]!.args
+    const settings = JSON.parse(args[args.indexOf('--settings') + 1]!) as Record<string, unknown>
+    expect(settings.hooks).toBeDefined()
+    expect(settings).not.toHaveProperty('statusLine')
+    expect(existsSync(join(run.plugin!, 'kehikot', 'statusline'))).toBe(false)
+    /* The transcript still says it. */
+    w.records(dir, B, 'started here')
+    transcript(dir, B, [usage(40_000)])
+    w.ptys[0]!.says('hi\r\n')
+    await settle()
+    expect((await w.runs.contextOf(dir, B))?.tokens).toBe(41_240)
+  })
+
+  test('a background session started with no status line of the person’s is given no --settings at all', async () => {
+    const dir = project()
+    rmSync(join(CONFIG, 'settings.json'), { force: true })
+    expect(PROGRAM.statusLine!(dir, '/kept/plugin/statusline.sh')).toBeNull()
+    expect(PROGRAM.settingsArgs!({})).toEqual([])
+  })
+
+  test('a person’s status line this module cannot run as Claude Code would is left alone: no status line is given', async () => {
+    const dir = project()
+    const base = mkdtempSync(join(tmpdir(), 'kehikko-claude-plugin-'))
+    made.push(base)
+    writeFileSync(join(CONFIG, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'node', args: ['line.js'] } }))
+    try {
+      const w = world({ tells: true, port: 4999, configures: true, plugins: true, doors: async () => [], configBase: base })
+      await w.runs.open(ask(dir, null), new Watcher())
+      const args = w.ptys[0]!.args
+      expect(JSON.parse(args[args.indexOf('--settings') + 1]!)).not.toHaveProperty('statusLine')
+    } finally {
+      rmSync(join(CONFIG, 'settings.json'), { force: true })
+    }
   })
 })
