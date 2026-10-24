@@ -11,6 +11,10 @@ import { assign, homeOf, ownOf, projectRoot, readPlaces, tokenFor, type NamedPla
  * `/kehikot-here`: a person types it in a Claude Code conversation, and that conversation is
  * assigned to the kehikko they have on screen.
  *
+ * A conversation started from a Claude container does not need it: it is filed under the place it
+ * was started at by itself, the same way (`autoFile` in context.ts). `/kehikot-here` is for one
+ * started anywhere else, and for moving one.
+ *
  * ## Why a skill can, where the MCP door cannot
  *
  * Claude Code never tells an MCP server which conversation is calling. A skill's text is

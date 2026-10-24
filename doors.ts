@@ -669,6 +669,17 @@ export async function answer(
     return { status: 200, body: null, raw: { bytes: `${said}\n`, type: 'text/plain; charset=utf-8' } }
   }
 
+  /* A session's own hooks, through `context.sh` (see context.ts): at its start and at each prompt,
+     what it is to be told of its place and the modules on its kehikko — and the filing of it under
+     the place it was started at. A program's door like `/api/state`: what it must carry is the
+     session's place token, which this module wrote into that session's own plugin. The answer is
+     what Claude Code reads from a hook, or nothing (204). */
+  if (path === '/api/context') {
+    if (method !== 'POST') return bad('this door takes POST', 405)
+    const said = await theRuns().context(query.get('event') ?? '', (query.get('session') ?? '').slice(0, 64), ticket)
+    return said ? { status: 200, body: null, raw: { bytes: JSON.stringify(said), type: 'application/json' } } : { status: 204, body: null }
+  }
+
   /* Every other door under /api, the read included: see "Reads carry the ticket too". */
   const refused = refuseTicket(ticket, TICKET)
   if (refused) return refused

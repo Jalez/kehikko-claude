@@ -70,10 +70,30 @@ export interface DoorsAsked {
 }
 
 /**
- * Ask the host for a session's doors (`POST /host/place`). Null when no host
- * answers or it refuses: the session then starts exactly as it did before.
+ * One container on a session's kehikko, as the host lists it beside the doors (`modules` in the
+ * answer to `POST /host/place`): its module, name, one line, the name of its door in the session's
+ * config (null for none) and the skills it offers there. The words are the module's: text to read.
  */
-export async function hostDoors(asked: DoorsAsked, options: { env?: Record<string, string | undefined>; fetch?: typeof fetch; timeoutMs?: number } = {}): Promise<SessionDoor[] | null> {
+export interface ModuleOn {
+  module: string
+  name: string
+  summary: string
+  door: string | null
+  skills: string[]
+}
+
+/** What the host answers for a session's place: its doors, and the modules on its kehikko — null from a host too old to list them. */
+export interface HostPlace {
+  doors: SessionDoor[]
+  modules: ModuleOn[] | null
+}
+
+/**
+ * Ask the host for a session's doors and the modules on its kehikko (`POST /host/place`). Null
+ * when no host answers or it refuses. Asked again with the same token, it is the kehikko as it is
+ * now: what `context.ts` tells a running session changed.
+ */
+export async function hostPlace(asked: DoorsAsked, options: { env?: Record<string, string | undefined>; fetch?: typeof fetch; timeoutMs?: number } = {}): Promise<HostPlace | null> {
   if (!PLACE_TOKEN.test(asked.token)) return null
   for (const origin of hostOrigins(options.env)) {
     const control = new AbortController()
@@ -86,9 +106,9 @@ export async function hostDoors(asked: DoorsAsked, options: { env?: Record<strin
         signal: control.signal,
       })
       if (!response.ok) continue
-      const said = (await response.json()) as { ok?: unknown; token?: unknown; doors?: unknown }
+      const said = (await response.json()) as { ok?: unknown; token?: unknown; doors?: unknown; modules?: unknown }
       if (said.ok !== true || said.token !== asked.token || !Array.isArray(said.doors)) continue
-      return said.doors.filter(isDoor).slice(0, 64)
+      return { doors: said.doors.filter(isDoor).slice(0, 64), modules: Array.isArray(said.modules) ? said.modules.flatMap(moduleOn).slice(0, 64) : null }
     } catch {
       /* Not this origin. */
     } finally {
@@ -96,6 +116,22 @@ export async function hostDoors(asked: DoorsAsked, options: { env?: Record<strin
     }
   }
   return null
+}
+
+/** Ask the host for a session's doors (`POST /host/place`). Null when no host answers or it refuses: the session then starts exactly as it did before. */
+export async function hostDoors(asked: DoorsAsked, options: { env?: Record<string, string | undefined>; fetch?: typeof fetch; timeoutMs?: number } = {}): Promise<SessionDoor[] | null> {
+  return (await hostPlace(asked, options))?.doors ?? null
+}
+
+/** One listed container, or nothing for anything that is not one. Every string is cut to one short line. */
+function moduleOn(raw: unknown): ModuleOn[] {
+  if (typeof raw !== 'object' || raw === null) return []
+  const one = raw as Record<string, unknown>
+  if (typeof one.module !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(one.module)) return []
+  const line = (text: unknown, most: number) => (typeof text === 'string' ? text.replace(/[\s\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').trim().slice(0, most) : '')
+  const door = typeof one.door === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(one.door) ? one.door : null
+  const skills = Array.isArray(one.skills) ? one.skills.filter((name): name is string => typeof name === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(name)).slice(0, 16) : []
+  return [{ module: one.module, name: line(one.name, 80) || one.module, summary: line(one.summary, 200), door, skills }]
 }
 
 function isDoor(raw: unknown): raw is SessionDoor {
@@ -201,5 +237,46 @@ export function removeConfig(file: string | null): void {
     rmSync(file, { force: true })
   } catch {
     /* Gone already. */
+  }
+}
+
+/**
+ * Where a conversation was started, kept beside its doors (`place.json` in its kept folder): what
+ * `context.ts` reads to know which place a session's hook speaks from when this process did not
+ * start it — a background conversation outlives the process that started it. The place by its
+ * key, with the names a person knows it by.
+ */
+export interface KeptPlace {
+  projectPath: string
+  projectId: string | null
+  key: string
+  kehikkoName?: string
+  partNames?: string[]
+}
+
+/** Write where a conversation was started into its kept folder, 0600. */
+export function writeKeptPlace(dir: string, kept: KeptPlace): void {
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  chmodSync(dir, 0o700)
+  const file = join(dir, 'place.json')
+  const temporary = `${file}.${process.pid}.tmp`
+  writeFileSync(temporary, JSON.stringify(kept), { mode: 0o600 })
+  renameSync(temporary, file)
+}
+
+/** Where a conversation was started, as its kept folder says; null when it says nothing readable. */
+export function keptPlace(dir: string): KeptPlace | null {
+  try {
+    const said = JSON.parse(readFileSync(join(dir, 'place.json'), 'utf8')) as Partial<KeptPlace>
+    if (typeof said.projectPath !== 'string' || typeof said.key !== 'string') return null
+    return {
+      projectPath: said.projectPath,
+      projectId: typeof said.projectId === 'string' ? said.projectId : null,
+      key: said.key,
+      ...(typeof said.kehikkoName === 'string' ? { kehikkoName: said.kehikkoName.slice(0, 120) } : {}),
+      ...(Array.isArray(said.partNames) ? { partNames: said.partNames.filter((one): one is string => typeof one === 'string').map((one) => one.slice(0, 120)) } : {}),
+    }
+  } catch {
+    return null
   }
 }
