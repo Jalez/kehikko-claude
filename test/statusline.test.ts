@@ -164,10 +164,13 @@ describe('the person’s own status line, as the settings say it', () => {
     expect(made).toEqual({ settings: { statusLine: { padding: 1, type: 'command', command: `/bin/sh '/kept/plugin/statusline.sh'` } }, own: 'mine.sh' })
   })
 
-  test('none is none; one this module cannot run as Claude Code would is left alone', () => {
+  test('none of theirs: none is added; one this module cannot run as Claude Code would is left alone', () => {
     let { project, env } = home({ 'config/settings.json': { theme: 'dark' }, 'project/.claude/settings.json': 'not json' })
     expect(ownStatusLine(project, env)).toBe('none')
-    expect(PROGRAM.statusLine!(project, '/s.sh', env)).toEqual({ settings: { statusLine: { type: 'command', command: `/bin/sh '/s.sh'` } }, own: null })
+    /* None of theirs: none is added — an empty one would still cost a row under Claude Code's prompt. */
+    expect(PROGRAM.statusLine!(project, '/s.sh', env)).toBeNull()
+    ;({ project, env } = home({ 'config/settings.json': { statusLine: null } }))
+    expect(PROGRAM.statusLine!(project, '/s.sh', env)).toBeNull()
     for (const odd of [{ type: 'command', command: 'node', args: ['x.js'] }, { type: 'command', command: 'x', shell: 'powershell' }, { type: 'other' }, 'echo hi']) {
       ;({ project, env } = home({ 'config/settings.json': { statusLine: odd } }))
       expect(ownStatusLine(project, env)).toBe('other')
@@ -176,7 +179,7 @@ describe('the person’s own status line, as the settings say it', () => {
   })
 
   test('a path with a quote in it is still one word', () => {
-    const { project, env } = home({})
+    const { project, env } = home({ 'config/settings.json': { statusLine: { type: 'command', command: 'mine.sh' } } })
     const made = PROGRAM.statusLine!(project, "/tmp/it's here/statusline.sh", env)!
     expect((made.settings.statusLine as { command: string }).command).toBe(`/bin/sh '/tmp/it'\\''s here/statusline.sh'`)
     expect(readFileSync(statusScriptIn(join(import.meta.dirname, '..')), 'utf8')).toContain('exit $said')

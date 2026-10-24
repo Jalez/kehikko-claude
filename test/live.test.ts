@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { listing, type Listing } from '../doors.ts'
+import { listing, runOf, type Listing } from '../doors.ts'
 import { CLOSED, Runs, activityRows, sameProject, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
 import { placeKey } from '../place.ts'
 import { PROGRAM, readActive, type Active, type Program, type Recorded } from '../program.ts'
@@ -2837,6 +2837,22 @@ describe('Compact and Clear: only at the prompt, only on a press', () => {
     expect(told.at(-1)).toEqual({ key: placeKey(HERE), session: A })
   })
 
+  test('after /clear, the conversation the run is on now is the running one; the one it left is not', async () => {
+    const { dir, w, run } = await reporting()
+    w.records(dir, C2, '')
+    run.pty.pid = 919
+    w.elsewhere.push({ session: C2, kind: 'interactive', called: 'interactive', handle: null, pid: 919, cwd: dir, startedAt: 1, name: '' })
+    await w.runs.track(run)
+    expect(run.settled).toBe(C2)
+    expect(runOf(w.runs.sessions(), C2)).toBe(run)
+    expect(runOf(w.runs.sessions(), A)).toBeUndefined()
+    const said = await listing(dir, placeKey(HERE), w.runs, w.program)
+    if (!said.ok) throw new Error('no listing')
+    expect(said.sessions.find((one) => one.id === A)?.running).toBe(false)
+    expect(said.sessions.find((one) => one.id === C2)?.running).toBe(true)
+    expect(said.running.map((one) => one.id)).toEqual([C2])
+  })
+
   test('nothing is typed for a word that is not one of the two', async () => {
     const { w, run, tell } = await reporting()
     tell('Stop')
@@ -2902,6 +2918,34 @@ describe('the context meter, from the transcript and the session’s own status 
     } finally {
       rmSync(join(CONFIG, 'settings.json'), { force: true })
     }
+  })
+
+  test('a person with no status line is given none: their terminal is not changed, and the context is read from the transcript', async () => {
+    const dir = project()
+    const base = mkdtempSync(join(tmpdir(), 'kehikko-claude-plugin-'))
+    made.push(base)
+    rmSync(join(CONFIG, 'settings.json'), { force: true })
+    const w = world({ tells: true, port: 4999, configures: true, plugins: true, doors: async () => [], configBase: base })
+    const run = await w.runs.open(ask(dir, null), new Watcher())
+    if (!isRun(run)) throw new Error('not opened')
+    const args = w.ptys[0]!.args
+    const settings = JSON.parse(args[args.indexOf('--settings') + 1]!) as Record<string, unknown>
+    expect(settings.hooks).toBeDefined()
+    expect(settings).not.toHaveProperty('statusLine')
+    expect(existsSync(join(run.plugin!, 'kehikot', 'statusline'))).toBe(false)
+    /* The transcript still says it. */
+    w.records(dir, B, 'started here')
+    transcript(dir, B, [usage(40_000)])
+    w.ptys[0]!.says('hi\r\n')
+    await settle()
+    expect((await w.runs.contextOf(dir, B))?.tokens).toBe(41_240)
+  })
+
+  test('a background session started with no status line of the person’s is given no --settings at all', async () => {
+    const dir = project()
+    rmSync(join(CONFIG, 'settings.json'), { force: true })
+    expect(PROGRAM.statusLine!(dir, '/kept/plugin/statusline.sh')).toBeNull()
+    expect(PROGRAM.settingsArgs!({})).toEqual([])
   })
 
   test('a person’s status line this module cannot run as Claude Code would is left alone: no status line is given', async () => {

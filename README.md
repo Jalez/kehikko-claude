@@ -278,7 +278,8 @@ reset it?"*. Nothing is typed into the conversation to know it:
    compaction compacted to, which is the figure until the next request. A `cost-state` row is the
    cost Claude Code wrote when the session was cleared or its process stopped; it is shown, marked
    *last stop*, only when no request came after it.
-2. **The session's own status line**, for a session this module starts. Claude Code hands a status
+2. **The session's own status line**, for a session this module starts, when the person has a
+   status line of their own. Claude Code hands a status
    line command its JSON (`context_window.context_window_size`, `cost.total_cost_usd`,
    `model.display_name`, …); the session's `--settings` names `statusline.sh` in its plugin as its
    status line, and that runs **the person's own status line command first and prints it byte for
@@ -290,8 +291,9 @@ reset it?"*. Nothing is typed into the conversation to know it:
    written beside the script when the session starts or wakes; their `padding` and refresh are kept.
    Nothing is written into `~/.claude` or the project. One theirs that cannot be run that way (an
    `args` list, another shell) is left alone: that session is started without, and read from its
-   transcript. A person with no status line gets one that prints nothing; Claude Code then keeps an
-   empty row under its prompt (measured).
+   transcript. **A person with no status line is given none**: even an empty one costs a row under
+   Claude Code's prompt (measured), a change to their terminal for nothing they asked for. Their
+   sessions are read from the transcript alone: no live cost, and the window from the model.
    A session this module did not start has only the transcript: its window is then the model's
    (Claude Code 2.1.310's catalog: 1M for the Opus 4.7-and-later, Sonnet 5 and Haiku 5.5 families,
    200k for the rest), and a session already past 200k is on 1M; a `[1m]` choice is not written in

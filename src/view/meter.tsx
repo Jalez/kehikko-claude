@@ -70,7 +70,7 @@ function Breakdown({ context, ready, id }: { context: Context | null; ready: str
   const words = contextWords(context)
   const rows: [string, string][] = [
     ['In use', context.tokens === null ? 'nothing sent yet' : `${context.afterCompact ? 'about ' : ''}${number(context.tokens)} of ${number(context.window)} tokens (${words.percent})`],
-    ['Window', `${number(context.window)} tokens — ${context.windowSure ? 'as Claude Code itself said' : 'the model’s, from Claude Code’s catalog (its status line is not heard from this session)'}`],
+    ['Window', `${number(context.window)} tokens — ${context.windowSure ? 'as Claude Code itself said' : 'the model’s, from Claude Code’s catalog: a [1m] choice is not written in the transcript, and only a status line says the window exactly (a session started here gets one only when you have one)'}`],
     ['Compacts', `by itself at about ${number(context.compactAt)} (${percentOf(context.compactAt, context.window)}%). From about ${number(context.warnAt)} Claude Code warns under its prompt, counting against the ${number(context.effective)} it leaves after room for an answer${context.tokens !== null && context.tokens >= context.warnAt ? ` (${percentOf(context.tokens, context.effective)}% there)` : ''}`],
   ]
   if (context.model) rows.push(['Model', `${context.model.name} (${context.model.id})`])
@@ -79,7 +79,7 @@ function Breakdown({ context, ready, id }: { context: Context | null; ready: str
   } else if (context.afterCompact) {
     rows.push(['Last request', 'none since the last compaction: the figure is what it compacted to'])
   }
-  rows.push(['Cost', context.cost ? `${costSaid(context.cost.usd)} ${context.cost.live ? 'so far, as Claude Code counts it' : 'when it was last cleared or stopped'}` : 'not reported: Claude Code says it in the status line of a session started here, and writes it when one stops'])
+  rows.push(['Cost', context.cost ? `${costSaid(context.cost.usd)} ${context.cost.live ? 'so far, as Claude Code counts it' : 'when it was last cleared or stopped'}` : 'not reported: Claude Code says it in a status line (a session started here, when you have one) and writes it when a session is cleared or stops'])
   rows.push([
     'Compacted',
     context.compacted

@@ -322,7 +322,8 @@ export interface Program {
   /**
    * The settings that make a session started here run `script` as its status line, with the
    * person's own status line command (`own`) for it to run first and print unchanged — or null
-   * when theirs is one that cannot be run that way, and the session is then started without.
+   * when they have none, or one that cannot be run that way, and the session is then started
+   * without (its context is read from its transcript).
    * Only for a copy whose `supports()` said `tells` (`--settings`).
    */
   statusLine?(projectPath: string, script: string, env?: NodeJS.ProcessEnv): { settings: Record<string, unknown>; own: string | null } | null
@@ -1079,13 +1080,17 @@ const shellWord = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`
 /**
  * The status line a session started here is given (`statusline.sh`, copied into its plugin):
  * the person's own settings for it kept — padding, refresh — with the command this module's,
- * which runs theirs first. Null when theirs is one that cannot be run that way.
+ * which runs theirs first. Only when they have one: null when they have none, or one that cannot
+ * be run that way.
  */
 function statusLine(projectPath: string, script: string, env: NodeJS.ProcessEnv = process.env): { settings: Record<string, unknown>; own: string | null } | null {
   const own = ownStatusLine(projectPath, env)
-  if (own === 'other') return null
-  const kept = own === 'none' ? {} : Object.fromEntries(Object.entries(own.line).filter(([key]) => key !== 'command' && key !== 'shell' && key !== 'type'))
-  return { settings: { statusLine: { ...kept, type: 'command', command: `/bin/sh ${shellWord(script)}` } }, own: own === 'none' ? null : own.command }
+  /* None of theirs: none is added. An empty status line still costs a row under Claude Code's
+     prompt (measured on 2.1.310), a change to their terminal for nothing they asked for; the
+     context is then read from the transcript alone. One that cannot be run as Claude Code would is left alone. */
+  if (own === 'none' || own === 'other') return null
+  const kept = Object.fromEntries(Object.entries(own.line).filter(([key]) => key !== 'command' && key !== 'shell' && key !== 'type'))
+  return { settings: { statusLine: { ...kept, type: 'command', command: `/bin/sh ${shellWord(script)}` } }, own: own.command }
 }
 
 /**

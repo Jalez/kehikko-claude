@@ -237,6 +237,15 @@ export function contextSaid(context: Context) {
   }
 }
 
+/**
+ * The run that is running conversation `id` now: the one whose process is on it. A run is on the
+ * conversation it last settled on — after `/clear` or `/resume` in it, the new one — so the
+ * conversation it was opened under, and has left, is not running in it any more.
+ */
+export function runOf(live: readonly Run[], id: string): Run | undefined {
+  return live.find((one) => (one.settled ?? one.id) === id)
+}
+
 /** A state in words an agent reads without the key to `needs-you`. */
 const DOING = { working: 'working on a turn', 'needs-you': 'waiting for its person (a permission or an answer)', finished: 'its turn is over; at its prompt' } as const
 
@@ -355,7 +364,7 @@ export async function listing(
   }
 
   const row = (id: string): Row => {
-    const run = live.find((one) => one.id === id || one.settled === id)
+    const run = runOf(live, id)
     const kept = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id] : undefined
     const keptAt = kept?.lastActive ? Date.parse(kept.lastActive) : NaN
     const said = known.get(id)
@@ -528,7 +537,7 @@ async function call(name: string, args: Record<string, unknown>): Promise<string
   const session = (id: string) => {
     const kept = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id] : undefined
     const at = held.get(id)?.lastActive
-    const run = live.find((one) => one.id === id || one.settled === id)
+    const run = runOf(live, id)
     const { elsewhere } = besides(id, run, running, runs)
     return {
       id,
