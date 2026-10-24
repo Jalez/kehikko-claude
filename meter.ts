@@ -112,11 +112,11 @@ export function windowFor(model: string | null, tokens: number | null, said: num
  * threshold. A person's `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` or `autoCompactWindow` moves it, and is
  * not known here: the threshold is said as "about".
  */
-export function thresholds(window: number, model: string | null = null): { compactAt: number; warnAt: number } {
+export function thresholds(window: number, model: string | null = null): { compactAt: number; warnAt: number; effective: number } {
   const output = modelEntry(model)?.output ?? DEFAULT_OUTPUT
   const effective = window - Math.min(output, 20_000)
   const compactAt = effective - 13_000
-  return { compactAt, warnAt: compactAt - 20_000 }
+  return { compactAt, warnAt: compactAt - 20_000, effective }
 }
 
 /** The share of the window in use, as Claude Code's status line rounds it (`used_percentage`). */
@@ -304,6 +304,11 @@ export interface Context {
   /** About where Claude Code compacts by itself, and where it starts warning. */
   compactAt: number
   warnAt: number
+  /**
+   * The window less the room Claude Code keeps for an answer: what its own warning under its prompt
+   * counts against ("91% context used" where the status line's share is 82%, measured on 2.1.310).
+   */
+  effective: number
   /** In use is at or past the warning level: "compacts soon". */
   soon: boolean
   model: { id: string; name: string } | null
@@ -338,7 +343,7 @@ export function contextOf(gauge: Gauge | null, status: Status | null = null): Co
   const modelId = status?.model?.id ?? g.model
   if (tokens === null && !modelId && !g.compactions && g.cost === null && status?.cost == null) return null
   const { window, sure } = windowFor(modelId, tokens, status?.window ?? null)
-  const { compactAt, warnAt } = thresholds(window, modelId)
+  const { compactAt, warnAt, effective } = thresholds(window, modelId)
   const cost = status?.cost != null ? { usd: status.cost, live: true } : g.cost !== null && !g.costSince ? { usd: g.cost, live: false } : null
   return {
     tokens,
@@ -347,6 +352,7 @@ export function contextOf(gauge: Gauge | null, status: Status | null = null): Co
     percent: tokens === null ? null : percentOf(tokens, window),
     compactAt,
     warnAt,
+    effective,
     soon: tokens !== null && tokens >= warnAt,
     model: status?.model ?? (g.model ? { id: g.model, name: modelName(g.model) } : null),
     cost,

@@ -1897,7 +1897,7 @@ describe('the state of a background session a place is attached to', () => {
     await w.runs.watch()
     expect(w.runs.activity()).toMatchObject([{ id: A, state: 'done', detail: 'turn ended', since: run.stateSince }])
     expect(run.state).toBe('finished')
-    expect(viewer.said.at(-1)).toMatchObject({ session: A, state: 'finished' })
+    expect(viewer.said.filter((one) => 'state' in one).at(-1)).toMatchObject({ session: A, state: 'finished' })
     expect(feed.states.at(-1)).toMatchObject({ session: A, state: 'finished' })
     expect(feed.got.map((one) => one.state)).toEqual(['finished'])
 
@@ -2703,7 +2703,7 @@ describe('Compact and Clear: only at the prompt, only on a press', () => {
   test('something typed at the prompt and not sent holds them: it would be sent with them', async () => {
     const { w, run, tell } = await reporting()
     tell('Stop')
-    w.later(1_000)
+    w.later(2_000)
     w.runs.type(run, 'half a th')
     expect(w.runs.readiness(run)).toBe('Something is typed at Claude’s prompt and not sent. Send it or clear it first.')
     w.runs.type(run, '\x7f'.repeat(9))
@@ -2784,6 +2784,57 @@ describe('Compact and Clear: only at the prompt, only on a press', () => {
     expect(read.ok && read.value.places[placeKey(HERE)]?.current).toBe(C2)
     expect(viewer.said.at(-1)).toMatchObject({ exists: true, session: C2 })
     expect(listed(dir)).toEqual([A, C2])
+  })
+
+  test('a process said to be idle just after a line was sent may not have begun its turn yet', async () => {
+    const dir = project()
+    const w = world()
+    w.records(dir, A, 'in the background')
+    const job = (status: string): Active => readActive({ pid: 4242, id: 'aaaaaaaa', cwd: dir, kind: 'background', startedAt: 1, sessionId: A, name: 'kept', status })!
+    w.elsewhere.push(job('idle'))
+    const run = await w.runs.open(ask(dir, A), new Watcher())
+    if (!isRun(run)) throw new Error('not opened')
+    await settle()
+    w.later(3_000)
+    w.runs.type(run, 'go on\r')
+    /* Asked a second later: its UserPromptSubmit hooks are still running, and it still says idle. */
+    w.later(1_000)
+    await w.runs.watch()
+    expect(w.runs.readiness(run)).toBe('Claude has not been seen at its prompt since a line was sent to it.')
+    w.later(7_000)
+    await w.runs.watch()
+    expect(w.runs.readiness(run)).toBeNull()
+    /* What it prints says nothing: an idle program redraws when its terminal gains or loses the keyboard. */
+    w.ptys[0]!.says('\x1b[?25h')
+    expect(w.runs.readiness(run)).toBeNull()
+  })
+
+  test('a conversation’s own SessionStart hook moves its run to the new conversation at once, and its page is not switched to it as if it came from elsewhere', async () => {
+    const dir = project()
+    const base = mkdtempSync(join(tmpdir(), 'kehikko-claude-plugin-'))
+    made.push(base)
+    const w = world({ configures: true, doors: async () => [], configBase: base })
+    w.records(dir, A, 'before the clear')
+    const viewer = new Watcher()
+    const run = await w.runs.open(ask(dir, A), viewer)
+    if (!isRun(run) || !run.token) throw new Error('not opened with a token')
+    await settle()
+    const told: unknown[] = []
+    w.runs.subscribe({ notices: false, state: () => {}, notice: () => {}, sessions: (_project, assigned) => told.push(assigned ?? null) })
+    /* /clear: Claude Code starts a new conversation in the same process, and its plugin's hook says so. */
+    w.records(dir, C2, '')
+    await w.runs.context('SessionStart', C2, run.token)
+    expect(run.settled).toBe(C2)
+    expect(viewer.said).toContainEqual({ exists: true, session: C2, label: '' })
+    const read = readPlaces(dir)
+    expect(read.ok && read.value.places[placeKey(HERE)]?.current).toBe(C2)
+    expect(listed(dir)).toEqual([A, C2])
+    /* Pages are never told "switch to it" about a conversation a run here already shows: that would open a second view of it. */
+    expect(told.every((one) => one === null)).toBe(true)
+    w.runs.told(dir, { key: placeKey(HERE), session: C2 })
+    expect(told.at(-1)).toBeNull()
+    w.runs.told(dir, { key: placeKey(HERE), session: A })
+    expect(told.at(-1)).toEqual({ key: placeKey(HERE), session: A })
   })
 
   test('nothing is typed for a word that is not one of the two', async () => {

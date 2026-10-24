@@ -304,8 +304,12 @@ export const COMMANDS = { compact: '/compact', clear: '/clear' } as const
 export type Command = keyof typeof COMMANDS
 /** How long after a command's text its Enter is typed: Claude Code's command menu settles on what was typed first (measured on 2.1.310). */
 const ENTER_AFTER = 250
-/** A sighting of the prompt has to be this much later than a line sent to it to count as the program having taken that line. */
-const TAKEN_AFTER = 500
+/**
+ * A sighting of the prompt (`agents --json` saying `idle`) has to be this much later than a line
+ * sent to it to count as the program having taken that line: measured on 2.1.310, a process still
+ * says `idle` while its `UserPromptSubmit` hooks run, before the turn begins.
+ */
+const TAKEN_AFTER = 5_000
 
 /**
  * The one sentence this module ever sends a conversation, and only one that a restart cut off
@@ -1132,6 +1136,8 @@ export class Runs {
   private readonly gauges = new Gauges()
   /** What each session's own status line last said (statusline.sh), by session: the newest few hundred. */
   private readonly statuses = new Map<string, Status>()
+  /** The sessions a status line report was not believed for, so that it is logged once. */
+  private readonly unbelieved = new Set<string>()
   /** What each run's viewers were last told of its context and whether Compact and Clear can be pressed. */
   private readonly metered = new WeakMap<Run, string>()
 
@@ -1513,7 +1519,7 @@ export class Runs {
         /* By its handle as well: after /clear the background session is the same job on a new conversation. */
         const handle = run.joined!.handle
         const listed = running.active.find((one) => one.kind === 'background' && (one.session === run.joined!.session || (handle !== null && one.handle === handle)))
-        if (listed && listed.session !== run.joined!.session) await this.movedOn(run, listed)
+        if (listed && listed.session !== run.joined!.session) await this.movedOn(run, listed, running)
         this.placed(run, listed ?? null, asked)
         this.become(run, listed?.state ?? null)
       }
@@ -1657,23 +1663,10 @@ export class Runs {
    * 2.1.310). Recorded as the place's session, as `track` does for a session in a terminal here;
    * the conversation it left stays listed, and can be opened again.
    */
-  private async movedOn(run: Run, listed: Active): Promise<void> {
-    const was = run.settled ?? run.joined?.session ?? run.id
-    const now = listed.session
-    if (!(await this.program.settled(run.projectPath, now, 0))) return
-    run.joined = { ...listed, handle: listed.handle ?? run.joined?.handle ?? null }
-    run.settled = now
-    const known = (await this.program.sessions(run.projectPath, [now])).find((one) => one.id === now)
-    run.label = known?.label ?? ''
-    this.log(`claude: the background session ${listed.handle ?? '?'} is now on ${now} (it was on ${was}) — recorded as its place's session`)
-    if (run.at) {
-      const written = attach(run.projectPath, run.at, now, { label: known?.label, lastActive: known?.lastActive })
-      if (!written.ok) this.log(`claude: ${written.error}`)
-    }
-    if (run.owned) this.markBackground(run.projectPath, now)
-    for (const viewer of run.viewers) viewer.say({ exists: true, session: now, label: run.label })
-    this.changed()
-    void this.meter(run)
+  private async movedOn(run: Run, listed: Active, running?: Running): Promise<void> {
+    if (!(await this.program.settled(run.projectPath, listed.session, 0))) return
+    if (run.joined) run.joined = { ...listed, handle: listed.handle ?? run.joined.handle }
+    await this.moveTo(run, listed.session, running)
   }
 
   /** A session's context, from its transcript (read as it grows) and its own status line. Null when neither says anything. */
@@ -1706,7 +1699,10 @@ export class Runs {
     const newest = said.sort((a, b) => b.at - a.at)[0]
     if (!newest) return 'It is not known yet whether Claude is waiting at its prompt.'
     if (!newest.idle) return newest.why
-    if (newest.at <= run.prompt.sentAt + TAKEN_AFTER) return 'Claude has not been seen at its prompt since a line was sent to it.'
+    /* A turn's end its own hook said (`Stop`) comes after the turn; `agents --json` may say `idle` before one begins. */
+    const taken = newest.at === run.stateSince && run.state === 'finished' ? 0 : TAKEN_AFTER
+    if (newest.at <= run.prompt.sentAt + taken) return 'Claude has not been seen at its prompt since a line was sent to it.'
+    /* Not what it prints: an idle program redraws when its terminal gains or loses the keyboard (measured), so printing says nothing here. */
     return null
   }
 
@@ -1768,7 +1764,13 @@ export class Runs {
   heardStatus(session: string, token: string | null, raw: unknown): boolean {
     if (!token || !PLACE_TOKEN.test(token) || !this.program.isId(session)) return false
     const status = readStatus(raw, this.now())
-    if (!status || status.session !== session || !this.holds(token, session)) return false
+    if (!status || status.session !== session) return false
+    if (!this.holds(token, session)) {
+      if (!this.unbelieved.has(session)) this.log(`claude: a status line report for ${session} was not believed: no conversation of that token's project`)
+      this.unbelieved.add(session)
+      if (this.unbelieved.size > 512) this.unbelieved.delete(this.unbelieved.values().next().value!)
+      return false
+    }
     this.statuses.delete(session)
     this.statuses.set(session, status)
     while (this.statuses.size > 512) this.statuses.delete(this.statuses.keys().next().value!)
@@ -1778,15 +1780,21 @@ export class Runs {
     return true
   }
 
-  /** Whether `session` is the conversation behind `token`: its run here, or the record that gave it the token. */
+  /**
+   * Whether a status line report for `session` is believed from the plugin holding `token`: a token
+   * this module gave a session it started, for a conversation of the same project — its run here,
+   * or one the project's record lists. Not narrower: a conversation cleared into a new one in the
+   * same process keeps the plugin, and so the token, of the one before it (and the record files
+   * the new one without it). The most a report can do is misstate a meter of that project.
+   */
   private holds(token: string, session: string): boolean {
-    for (const run of this.runs.values()) {
-      if (run.what === 'session' && !run.ended && run.token === token && (run.settled === session || run.id === session)) return true
-    }
     const started = this.startedOf(token)
     if (!started) return false
+    for (const run of this.runs.values()) {
+      if (run.what === 'session' && !run.ended && (run.settled === session || run.id === session) && (run.token === token || sameProject(run, started.projectPath, started.projectId))) return true
+    }
     const read = readPlaces(started.projectPath)
-    return read.ok && Object.hasOwn(read.value.sessions, session) && read.value.sessions[session]?.token === token
+    return read.ok && Object.hasOwn(read.value.sessions, session)
   }
 
   /** The run a session id names — by the id it was opened under or the one it settled as. */
@@ -1920,7 +1928,11 @@ export class Runs {
    */
   told(projectPath: string, assigned?: { key: string; session: string }): void {
     this.changed()
-    for (const follower of this.followers) if (!follower.project || follower.project === projectPath) follower.sessions?.(projectPath, assigned)
+    /* A conversation a run here has already followed to (a `/clear` in it): its page knows from the
+       run's own socket, and is not to be switched to it as if it had been connected from elsewhere —
+       that would open a second view of the same session. */
+    const followed = assigned && [...this.runs.values()].some((run) => run.what === 'session' && !run.ended && run.settled === assigned.session)
+    for (const follower of this.followers) if (!follower.project || follower.project === projectPath) follower.sessions?.(projectPath, followed ? undefined : assigned)
   }
 
   /** The projects this server has been told of (by a page, an open or a report), resolved. */
@@ -1966,7 +1978,11 @@ export class Runs {
    * place and the modules on its kehikko at a start, what changed at a prompt — and the
    * conversation filed under the place it was started at when it belongs nowhere yet.
    */
-  context(event: string, session: string, token: string | null): Promise<HookAnswer | null> {
+  async context(event: string, session: string, token: string | null): Promise<HookAnswer | null> {
+    /* A run here whose process starts another conversation (`/clear`, `/resume` in it) follows it now,
+       before the conversation is filed and pages are told: from the hook of its own plugin. */
+    const run = token && PLACE_TOKEN.test(token) ? [...this.runs.values()].find((one) => one.what === 'session' && !one.ended && one.token === token) : undefined
+    if (run && event === 'SessionStart' && this.program.isId(session) && session !== (run.settled ?? run.id)) await this.moveTo(run, session).catch(() => {})
     return context(
       { event, session, token },
       {
@@ -2108,13 +2124,31 @@ export class Runs {
       if (head !== run.settled && !background && !open) now = head
     }
     if (!now || now === run.settled || run.ended) return
+    await this.moveTo(run, now, running)
+  }
+
+  /**
+   * The process behind a run is on another conversation now — `/resume` or `/clear` typed in it, or
+   * the conversation carried on under a new id — once Claude Code has a record of it: the run
+   * follows, and so does the record. Carried on, the old id is the same conversation a step behind
+   * and is replaced wherever it is; switched (a `/clear`, a `/resume` of another), the new one is
+   * listed at the place and is what opens there next, and the old one stays listed. Asked from
+   * three sides — the run's process (`track`), its background job (`movedOn`) and its own
+   * `SessionStart` hook (`context`) — and done once.
+   */
+  private async moveTo(run: Run, now: string, running?: Running): Promise<void> {
+    if (run.ended || now === run.settled || !this.program.isId(now)) return
     if (!(await this.program.settled(run.projectPath, now, 0))) return
-    const was = run.settled
+    if (run.ended || now === run.settled) return
+    const was = run.settled ?? run.id
     const continued = (await this.head(run.projectPath, was, running)) === now
+    if (run.ended || now === run.settled) return
     run.settled = now
+    if (run.joined) run.joined = { ...run.joined, session: now }
     this.log(`claude: the process behind ${run.id} is now on ${now} (${continued ? 'carried on from' : 'switched from'} ${was}) — recorded as its place's session`)
     const known = (await this.program.sessions(run.projectPath, [now])).find((one) => one.id === now)
-    if (known?.label) run.label = known.label
+    /* A new conversation is called what it is called, which may be nothing yet: never the old one's name. */
+    run.label = known?.label || (continued ? run.label : '')
     /* Carried on: the old id is the same conversation a step behind, and is replaced wherever it is. */
     if (continued) {
       const moved = follow(run.projectPath, was, now, { label: known?.label, lastActive: known?.lastActive })
@@ -2124,8 +2158,10 @@ export class Runs {
       const written = attach(run.projectPath, run.at, now, { label: known?.label, lastActive: known?.lastActive })
       if (!written.ok) this.log(`claude: ${written.error}`)
     }
-    for (const viewer of run.viewers) viewer.say({ exists: true, session: now, ...(run.label ? { label: run.label } : {}) })
+    if (run.owned) this.markBackground(run.projectPath, now)
+    for (const viewer of run.viewers) viewer.say({ exists: true, session: now, label: run.label })
     this.changed()
+    void this.meter(run)
   }
 
   private async start(projectPath: string, id: string, asked: Extract<Opening, { what: 'session' }>): Promise<Run | Refusal> {

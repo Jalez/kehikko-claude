@@ -127,10 +127,10 @@ describe('the window, the percentage and the threshold', () => {
   })
 
   test('auto-compact: the window less the answer’s room (at most 20k) less 13k; warned 20k before', () => {
-    expect(thresholds(200_000, 'claude-sonnet-4-5')).toEqual({ compactAt: 167_000, warnAt: 147_000 })
-    expect(thresholds(1_000_000, 'claude-opus-5-5')).toEqual({ compactAt: 967_000, warnAt: 947_000 })
+    expect(thresholds(200_000, 'claude-sonnet-4-5')).toEqual({ compactAt: 167_000, warnAt: 147_000, effective: 180_000 })
+    expect(thresholds(1_000_000, 'claude-opus-5-5')).toEqual({ compactAt: 967_000, warnAt: 947_000, effective: 980_000 })
     /* An older model with less room for its answer keeps less back. */
-    expect(thresholds(200_000, 'claude-3-5-haiku')).toEqual({ compactAt: 200_000 - 8_192 - 13_000, warnAt: 200_000 - 8_192 - 33_000 })
+    expect(thresholds(200_000, 'claude-3-5-haiku')).toEqual({ compactAt: 200_000 - 8_192 - 13_000, warnAt: 200_000 - 8_192 - 33_000, effective: 200_000 - 8_192 })
   })
 
   test('near the threshold it says so in words', () => {

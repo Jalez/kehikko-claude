@@ -58,7 +58,7 @@ describe('the View menu', () => {
   })
 
   test('a line says how full the conversation’s context is, in words near where it compacts', () => {
-    const context = (percent: number | null, soon = false) => ({ tokens: percent === null ? null : percent * 2000, window: 200_000, windowSure: false, percent, compactAt: 167_000, warnAt: 147_000, soon, model: null, cost: null, compacted: null, afterCompact: false, split: null, from: 'transcript' as const, at: 1 })
+    const context = (percent: number | null, soon = false) => ({ tokens: percent === null ? null : percent * 2000, window: 200_000, windowSure: false, percent, compactAt: 167_000, warnAt: 147_000, effective: 180_000, soon, model: null, cost: null, compacted: null, afterCompact: false, split: null, from: 'transcript' as const, at: 1 })
     expect(optionLabel(row('a', { label: 'tighten the methods', lastActive: NOW - 5 * 60_000, context: context(41) }), true, NOW)).toBe('tighten the methods · 41% · 5 min ago · own')
     expect(optionLabel(row('a', { label: 'z'.repeat(200), lastActive: NOW - 5 * 60_000, state: 'finished', context: context(82, true) }), false, NOW)).toMatch(/^○ z+… · 82% soon · 5 min ago$/)
     expect(optionLabel(row('a', { label: 'new', context: context(null) }), false, NOW)).toBe('new')

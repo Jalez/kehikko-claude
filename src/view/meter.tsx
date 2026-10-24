@@ -71,7 +71,7 @@ function Breakdown({ context, ready, id }: { context: Context | null; ready: str
   const rows: [string, string][] = [
     ['In use', context.tokens === null ? 'nothing sent yet' : `${context.afterCompact ? 'about ' : ''}${number(context.tokens)} of ${number(context.window)} tokens (${words.percent})`],
     ['Window', `${number(context.window)} tokens — ${context.windowSure ? 'as Claude Code itself said' : 'the model’s, from Claude Code’s catalog (its status line is not heard from this session)'}`],
-    ['Compacts', `by itself at about ${number(context.compactAt)} (${percentOf(context.compactAt, context.window)}%), and warns from about ${number(context.warnAt)}`],
+    ['Compacts', `by itself at about ${number(context.compactAt)} (${percentOf(context.compactAt, context.window)}%). From about ${number(context.warnAt)} Claude Code warns under its prompt, counting against the ${number(context.effective)} it leaves after room for an answer${context.tokens !== null && context.tokens >= context.warnAt ? ` (${percentOf(context.tokens, context.effective)}% there)` : ''}`],
   ]
   if (context.model) rows.push(['Model', `${context.model.name} (${context.model.id})`])
   if (context.split) {
@@ -84,7 +84,7 @@ function Breakdown({ context, ready, id }: { context: Context | null; ready: str
     'Compacted',
     context.compacted
       ? `${context.compacted.times === 1 ? 'once' : `${context.compacted.times} times`} — last ${context.compacted.last.trigger === 'manual' ? 'by /compact' : 'by itself'}${context.compacted.last.at ? ` at ${clock(context.compacted.last.at)}` : ''}${context.compacted.last.before !== null && context.compacted.last.after !== null ? `, ${tokensSaid(context.compacted.last.before)} → ${tokensSaid(context.compacted.last.after)}` : ''}`
-      : 'not in what was read',
+      : 'no compaction in what was read',
   ])
   return (
     <div id={id} role="dialog" aria-label="Context window" className="space-y-1.5" data-breakdown>

@@ -300,7 +300,10 @@ reset it?"*. Nothing is typed into the conversation to know it:
 **Where Claude Code compacts** (2.1.310, `B7`/`MQ`): the window less the room kept for an answer (the
 model's maximum output, at most 20 000) less 13 000 — 167 000 of 200 000 (84%), 967 000 of
 1 000 000. Said as *about*: a person's `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` or `autoCompactWindow`
-moves it and is not read here.
+moves it and is not read here. *Compacts soon* starts where Claude Code's own warning under its prompt
+does (20 000 below that). That warning counts against the window less the room for an answer, so at
+164 000 of 200 000 it says *91% context used* where this line, like Claude Code's status line, says
+82%; the breakdown says both (measured on 2.1.310).
 
 **It updates as the transcript grows**: the session on screen is looked at every 2.5 s (a `stat`;
 what was appended, when it grew), and what its status line posts is said at once.
