@@ -264,6 +264,29 @@ export async function sessionPlugin(doors: readonly SessionDoor[], options: Gath
 /** The script a session's context hooks run, copied into its plugin (see `context.sh`). */
 export const CONTEXT_SCRIPT = join(import.meta.dirname, 'context.sh')
 
+/** The script a session's status line runs, copied into its plugin beside `context.sh` (see `statusline.sh`). */
+export const STATUS_SCRIPT = join(import.meta.dirname, 'statusline.sh')
+const STATUS_FILE = 'statusline.sh'
+
+/** Where a session's status line script is in its plugin folder. */
+export const statusScriptIn = (dir: string): string => join(dir, STATUS_FILE)
+
+/**
+ * Give a session's plugin the person's own status line command, for `statusline.sh` to run first
+ * and print unchanged — or take it away (`null`). 0600, beside the token. Never throws: a plugin
+ * that cannot be written to is one whose status line prints nothing of theirs, and false says so.
+ */
+export function writeOwnStatusLine(dir: string, own: string | null): boolean {
+  try {
+    const file = join(dir, 'kehikot', 'statusline')
+    if (own === null) rmSync(file, { force: true })
+    else writeFileSync(file, own, { mode: 0o600 })
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** The events a session is told of its place at: its start (any kind) and each prompt. */
 export const CONTEXT_EVENTS = ['SessionStart', 'UserPromptSubmit'] as const
 
@@ -278,6 +301,7 @@ function writeContextHooks(dir: string, token: string, registration: string): vo
   mkdirSync(join(dir, 'hooks'), { mode: 0o700 })
   writeFileSync(join(dir, 'hooks', 'hooks.json'), `${JSON.stringify({ hooks }, null, 2)}\n`, { mode: 0o600 })
   writeFileSync(join(dir, 'context.sh'), readFileSync(CONTEXT_SCRIPT), { mode: 0o700 })
+  writeFileSync(join(dir, STATUS_FILE), readFileSync(STATUS_SCRIPT), { mode: 0o700 })
   mkdirSync(join(dir, 'kehikot'), { mode: 0o700 })
   writeFileSync(join(dir, 'kehikot', 'token'), token, { mode: 0o600 })
   writeFileSync(join(dir, 'kehikot', 'origin'), served, { mode: 0o600 })

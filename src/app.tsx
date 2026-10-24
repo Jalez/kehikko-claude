@@ -5,13 +5,15 @@ import { held, probeServer, type PressAnswer } from 'kehikot-module-protocol/cli
 import { Cover, coverFor, useFocus, useHost, useServerStanding, type CoverState } from 'kehikot-module-protocol/client/react'
 
 import type { Listing } from '../doors.ts'
-import type { Elsewhere } from '../live.ts'
+import type { Command, Elsewhere } from '../live.ts'
+import type { Context } from '../meter.ts'
 import { ID, NOTICES } from '../manifest.ts'
 import type { State } from '../program.ts'
 import { api as realApi, type Api } from './api.ts'
 import { NoConversationBar } from './view/bar.tsx'
 import { DISCONNECT, MAKE_OWN, NOT_CONNECTED, RESUME, VIEW, connected, resumeToggle, viewHeader } from './view/conversations.ts'
 import { ElsewhereQuestion } from './view/elsewhere.tsx'
+import { ContextLine } from './view/meter.tsx'
 import {
   COPY,
   MOST_VIEWS,
@@ -262,6 +264,14 @@ export function Sessions({
   /** The installer's own view, while it runs and after it fails. */
   const [installing, setInstalling] = useState<{ n: number; failed: string | null } | null>(null)
   const [again, setAgain] = useState(0)
+  /** Each session's context as last said (meter.ts): by its view's socket, the feed, or the list. Null is "nothing known". */
+  const [contexts, setContexts] = useState<Record<string, Context | null>>({})
+  /** Why Compact and Clear cannot be pressed for each view's session now, by view number; null when they can. */
+  const [readies, setReadies] = useState<Record<number, string | null>>({})
+  /** The server's answer to the last Compact or Clear pressed in each view. */
+  const [commanded, setCommanded] = useState<Record<number, { which: Command; ok: boolean; why?: string; at: number }>>({})
+  /** What sends Compact or Clear through the socket of the view on screen (`TerminalView`). */
+  const commands = useRef<((which: Command) => boolean) | null>(null)
   /** This project's "Resume conversations cut off by a restart", by project; absent until read. */
   const [resume, setResume] = useState<{ project: string; on: boolean } | null>(null)
   const count = useRef(0)
@@ -277,13 +287,15 @@ export function Sessions({
   const here = useMemo<Listing | null>(() => {
     if (!read) return null
     const now = (row: Listing['sessions'][number]) => {
+      const measured = Object.hasOwn(contexts, row.id) ? contexts[row.id] : undefined
+      const metered = measured === undefined ? row : measured ? { ...row, context: measured } : (({ context: _was, ...rest }) => rest)(row)
       const said = Object.hasOwn(states, row.id) ? states[row.id] : undefined
-      if (!said || !row.running) return row
-      const { state: _was, since: _when, ...rest } = row
+      if (!said || !row.running) return metered
+      const { state: _was, since: _when, ...rest } = metered
       return said.state ? { ...rest, state: said.state, since: said.since } : rest
     }
     return { ...read, sessions: read.sessions.map(now), others: read.others.map(now) }
-  }, [read, states])
+  }, [read, states, contexts])
   const view = id !== null ? (views.find((one) => one.n === shownBy[id]) ?? null) : null
 
   /* The canvas moved, or something changed that the list should reflect. */
@@ -356,6 +368,8 @@ export function Sessions({
     setStandings(({ [n]: _gone, ...rest }) => rest)
     setHows(({ [n]: _was, ...rest }) => rest)
     setMoves(({ [n]: _moved, ...rest }) => rest)
+    setReadies(({ [n]: _ready, ...rest }) => rest)
+    setCommanded(({ [n]: _answer, ...rest }) => rest)
   }
 
   /*
@@ -471,6 +485,12 @@ export function Sessions({
   }
 
   const said = (one: View, heard: Said) => {
+    if (heard.meter) {
+      const { session, context, ready } = heard.meter
+      setContexts((all) => ({ ...all, [session]: context }))
+      setReadies((all) => ({ ...all, [one.n]: ready }))
+    }
+    if (heard.commanded) setCommanded((all) => ({ ...all, [one.n]: { ...heard.commanded!, at: Date.now() } }))
     if (heard.elsewhere) {
       const session = heard.session ?? one.session
       if (session) setBlocked({ place: placeId(one.at), session, there: heard.elsewhere, left: false })
@@ -506,6 +526,8 @@ export function Sessions({
     if (!api.feed) return
     return api.feed(framed, {
       state: (stated) => setStates((all) => ({ ...all, [stated.session]: { state: stated.state, since: stated.since } })),
+      /* A running session's context changed: what its line in the View menu says. */
+      context: (metered) => setContexts((all) => ({ ...all, [metered.session]: metered.context })),
       /* The server writes the whole list and says it again on every change and on arrival; this only
          passes it on. The client drops an identical one and sends nothing to a host without the method. */
       activity: (items) => told.current.hosted?.activity?.(items),
@@ -628,7 +650,7 @@ export function Sessions({
   const items = useMemo<HeaderItemInput[]>(
     () => (usable ? [...viewHeader({ rows: worded, own: here ? here.own : undefined, viewing: view?.session ?? null, viewingLabel: label, how: how?.word ?? null, now: Date.now() }), ...resumeToggle(resumeOn)] : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [usable, JSON.stringify(worded.map((one) => [one.id, one.label, one.state ?? '', one.lastActive])), here?.own, view?.session, label, how?.word, resumeOn],
+    [usable, JSON.stringify(worded.map((one) => [one.id, one.label, one.state ?? '', one.lastActive, one.context?.percent ?? null, one.context?.soon ?? false])), here?.own, view?.session, label, how?.word, resumeOn],
   )
   useEffect(() => {
     hosted?.header(items)
@@ -797,6 +819,7 @@ export function Sessions({
                 watched={one.n === view?.n}
                 onStanding={(next) => stood(one, next)}
                 onSaid={(heard) => said(one, heard)}
+                {...(shown ? { commands } : {})}
               />
             </div>
           )
@@ -805,6 +828,19 @@ export function Sessions({
       </div>
 
       {cover && (view || installing) && <Cover strip state={cover} name={NAME} onRetry={knock} />}
+
+      {/* The context meter, and Compact and Clear, for the session on screen: one thin line, once
+          the conversation exists. Read by the server from its transcript and its own status line;
+          nothing is typed into it but a person's press here. */}
+      {terminal && view && view.session && !ended && !cover && standingNow?.at === 'live' && (
+        <ContextLine
+          key={`${view.n}:${view.session}`}
+          context={Object.hasOwn(contexts, view.session) ? (contexts[view.session] ?? null) : (here?.sessions.find((one) => one.id === view.session)?.context ?? null)}
+          ready={Object.hasOwn(readies, view.n) ? (readies[view.n] ?? null) : 'It is not known yet whether Claude is waiting at its prompt.'}
+          answer={commanded[view.n] ?? null}
+          onCommand={(which) => commands.current?.(which) ?? false}
+        />
+      )}
 
       {/* The project's folder was renamed while this session ran. It goes on working there, under the
           old name; restarting it in the new folder is the person's to press, never done by itself. */}

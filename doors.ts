@@ -10,6 +10,7 @@ import { PLACE_TOKEN, WHERE, assign, detach, follow, homeOf, ownOf, projectRoot,
 import { enable, enabled, hookCommand, settingsFile } from './hook.ts'
 import { here } from './here.ts'
 import { isSkillPath, serveFrom, skillAt, skillDeclarations } from './skills.ts'
+import { contextWords, costSaid, percentOf, type Context } from './meter.ts'
 
 /**
  * The HTTP doors, as one function: `answer` takes a request and returns a
@@ -155,6 +156,12 @@ export interface Row {
    */
   as?: 'background' | 'copy'
   /**
+   * How full its context window is, its model, cost and compactions, as its transcript and — for
+   * one started here — its own status line say (meter.ts). Only on the place's own rows; absent
+   * when nothing is known.
+   */
+  context?: Context
+  /**
    * Among the project's others: the places of the SAME EPIC that already
    * hold this session — under other parts, or on another kehikko — in words.
    * Those are the ones most likely to be wanted, and they are listed first.
@@ -204,6 +211,30 @@ export interface Listing {
    * anything: there is no number of sessions at which an open is refused.
    */
   running: { id: string; label: string; projectPath: string; place: string | null; here: boolean; startedAt: number; state?: State; since?: number }[]
+}
+
+/**
+ * A session's context as the MCP tool says it: the figures, and one line in words. What cannot be
+ * known is said as such: `window` comes from the model unless `windowFromClaudeCode`, and the split
+ * of the window by kind (system prompt, tools, MCP tools, messages) is `/context`'s and not here.
+ */
+export function contextSaid(context: Context) {
+  return {
+    said: `${contextWords(context).line}${context.soon ? ' — compacts soon' : ''}`,
+    tokens: context.tokens,
+    window: context.window,
+    windowFromClaudeCode: context.windowSure,
+    percent: context.percent,
+    compactsAtAbout: context.compactAt,
+    compactsAtPercent: percentOf(context.compactAt, context.window),
+    compactsSoon: context.soon,
+    ...(context.afterCompact ? { afterCompact: true } : {}),
+    model: context.model,
+    ...(context.cost ? { cost: { usd: Number(context.cost.usd.toFixed(4)), said: costSaid(context.cost.usd), live: context.cost.live } } : {}),
+    ...(context.compacted ? { compacted: { times: context.compacted.times, last: { ...context.compacted.last, at: context.compacted.last.at === null ? null : new Date(context.compacted.last.at).toISOString() } } } : {}),
+    ...(context.split ? { lastRequest: context.split } : {}),
+    at: context.at === null ? null : new Date(context.at).toISOString(),
+  }
 }
 
 /** A state in words an agent reads without the key to `needs-you`. */
@@ -363,7 +394,13 @@ export async function listing(
       install: { line: install.line, lands: install.lands },
       asked: running.known ? 'yes' : running.why,
     },
-    sessions: here.map(row),
+    sessions: await Promise.all(
+      here.map(async (id) => {
+        const one = row(id)
+        const context = one.missing ? null : await runs.contextOf(root.value, id).catch(() => null)
+        return context ? { ...one, context } : one
+      }),
+    ),
     current: (() => {
       const entry = Object.hasOwn(read.value.places, key) ? read.value.places[key] : undefined
       return entry?.current && here.includes(entry.current) ? entry.current : null
@@ -420,6 +457,11 @@ function tools() {
         + 'it is idle. `runningElsewhere` is on a session Claude Code is running in a process this module did not start: '
         + 'kind `background` is attached to when it is opened here (no second process), anything else is open in a '
         + 'terminal or an editor and its person is asked before a copy is started. '
+        + '`context`, when its transcript (or, for one started from the module, its own status line) says it, is how full its '
+        + 'context window is: `tokens` of `window` and `percent`, as Claude Code’s own status line counts them; about where '
+        + 'Claude Code compacts it by itself and `compactsSoon` near there; the model; the `cost` so far when Claude Code '
+        + 'reported one (`live` from its status line); and how often it was `compacted`. How the window splits into system '
+        + 'prompt, tools and messages is Claude Code’s own /context, and is not here. '
         + `Read from ${WHERE}. Give the absolute project directory as `
         + 'project, and an epic slug to see only that epic’s places. Give `place` — the epic, the picked parts and '
         + 'the kehikko — to be told in words what opening the module there will do: a place with sessions opens one at '
@@ -480,6 +522,9 @@ async function call(name: string, args: Record<string, unknown>): Promise<string
   const runs = theRuns()
   const live = runs.sessions()
   const running = await runs.running()
+  /* Each listed session's context, read from its transcript (only what was appended since the last look). */
+  const ids = [...new Set([...recordedIds(read.value), ...recorded.map((one) => one.id), ...live.map((run) => run.settled ?? run.id)])].slice(0, 300)
+  const contexts = new Map(await Promise.all(ids.map(async (id) => [id, await runs.contextOf(root.value, id).catch(() => null)] as const)))
   const session = (id: string) => {
     const kept = Object.hasOwn(read.value.sessions, id) ? read.value.sessions[id] : undefined
     const at = held.get(id)?.lastActive
@@ -493,6 +538,7 @@ async function call(name: string, args: Record<string, unknown>): Promise<string
       ...(run?.state ? { state: run.state, doing: DOING[run.state], since: new Date(run.stateSince).toISOString() } : {}),
       ...(elsewhere ? { runningElsewhere: { kind: elsewhere.called || elsewhere.kind, since: elsewhere.since ? new Date(elsewhere.since).toISOString() : null, pid: elsewhere.pid, cwd: elsewhere.cwd } } : {}),
       ...(held.has(id) || run ? {} : { missing: true }),
+      ...(contexts.get(id) ? { context: contextSaid(contexts.get(id)!) } : {}),
     }
   }
   /* The project's sessions that are not one place's, as that place would offer them. */
@@ -680,6 +726,16 @@ export async function answer(
     return said ? { status: 200, body: null, raw: { bytes: JSON.stringify(said), type: 'application/json' } } : { status: 204, body: null }
   }
 
+  /* A session's own status line, through `statusline.sh` (see meter.ts): Claude Code's status
+     line JSON, for the context meter. A program's door like `/api/context`: it must carry the
+     session's place token, and of what it sends only numbers, the session and the model's name
+     are kept. 204 or one 403 that does not say why. */
+  if (path === '/api/status') {
+    if (method !== 'POST') return bad('this door takes POST', 405)
+    const took = theRuns().heardStatus((query.get('session') ?? '').slice(0, 64), ticket, body)
+    return took ? { status: 204, body: null } : bad('that is not a session’s own status line', 403)
+  }
+
   /* Every other door under /api, the read included: see "Reads carry the ticket too". */
   const refused = refuseTicket(ticket, TICKET)
   if (refused) return refused
@@ -834,6 +890,7 @@ export const stream: Stream = (method, path, query, emit, ticket) => {
     notice: (notice) => emit(notice, 'notice'),
     activity: (items) => emit({ items }, 'activity'),
     sessions: (project, assigned) => emit({ project, ...(assigned ?? {}) }, 'sessions'),
+    context: (said) => emit(said, 'context'),
   })
   /* A page that stops following has nothing on screen any more, as far as `/kehikot-here` knows. */
   const close = () => {

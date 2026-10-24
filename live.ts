@@ -9,12 +9,14 @@ import { PROJECT_ID, projectFile, readProjectFile } from 'kehikot-module-protoco
 import type { RunSockets } from 'kehikot-module-protocol/run'
 import { mintTicket, sameTicket } from 'kehikot-module-protocol/serve'
 
-import { typedByPerson } from './input.ts'
+import { emptyPrompt, promptAfter, typedByPerson, type Prompt } from './input.ts'
+import { Gauges } from './gauges.ts'
+import { contextOf, readStatus, type Context, type Status } from './meter.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, sortedParts, type Kehikko } from './place.ts'
 import { cutOffs, cutOffWords, midTurn, movedOn, type CutOff } from './cutoff.ts'
-import { PROGRAM, headOf, home, recordFile, sessionName, type Active, type Able, type Program, type Running, type State } from './program.ts'
-import { assign, attach, born, byToken, follow, homeOf, markSession, markSessions, note, projectRoot, readPlaces, readSettings, recordedIds, sighted, tokenFor, type NamedPlace, type PlaceEntry, type Places, type SessionEntry } from './record.ts'
-import { removePlugin, sessionPlugin } from './skills.ts'
+import { PROGRAM, headOf, home, recordFile, sessionName, type Active, type ActiveStatus, type Able, type Program, type Running, type State } from './program.ts'
+import { PLACE_TOKEN, assign, attach, born, byToken, follow, homeOf, markSession, markSessions, note, projectRoot, readPlaces, readSettings, recordedIds, sighted, tokenFor, type NamedPlace, type PlaceEntry, type Places, type SessionEntry } from './record.ts'
+import { removePlugin, sessionPlugin, statusScriptIn, writeOwnStatusLine } from './skills.ts'
 import { freshToken, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, removeConfig, sweepKept, writeConfig, writeKeptConfig, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
 import { context, type HookAnswer, type Started } from './context.ts'
@@ -289,6 +291,21 @@ export const tellLine = (event: string, script: string = TELL): string => `/bin/
 const LABEL_TRIES = 8
 /** How often a running session's process is asked which conversation it is showing (see `track`). */
 const TRACK_EVERY = 10_000
+
+/**
+ * How often the context of each session somebody has on screen is looked at again: one `stat` of
+ * its transcript, and a read of what was appended when it grew (`Gauges` in gauges.ts). What its
+ * own status line posts is said at once, between.
+ */
+const METER_EVERY = 2_500
+
+/** What Compact and Clear type at the prompt: Claude Code's own commands, exactly as a person types them. */
+export const COMMANDS = { compact: '/compact', clear: '/clear' } as const
+export type Command = keyof typeof COMMANDS
+/** How long after a command's text its Enter is typed: Claude Code's command menu settles on what was typed first (measured on 2.1.310). */
+const ENTER_AFTER = 250
+/** A sighting of the prompt has to be this much later than a line sent to it to count as the program having taken that line. */
+const TAKEN_AFTER = 500
 
 /**
  * The one sentence this module ever sends a conversation, and only one that a restart cut off
@@ -622,6 +639,13 @@ export interface Run {
   owned: boolean
   /** The folder its doors file and plugin are kept in while it may be woken (`keptDirOf`). */
   kept: string | null
+  /** What `agents --json` last said its process is doing (`status`), and when that was asked. */
+  status: ActiveStatus | null
+  statusAt: number
+  /** When its program was last seen at its prompt: its turn ended (`Stop`), or `agents --json` said `idle`. 0 for never. */
+  idleAt: number
+  /** What is typed at its prompt and not sent, counted (`promptAfter` in input.ts). */
+  prompt: Prompt
 }
 
 /** A conversation's place, as this module's record says it: what `/api/kehikot/place` answers. */
@@ -996,6 +1020,14 @@ export interface Follower {
   activity?(rows: ActivityRow[]): void
   /** A project's record changed under the page: one was reported started, or one was connected (`assigned`). */
   sessions?(project: string, assigned?: { key: string; session: string }): void
+  /** A running session's context changed (meter.ts): what the View menu's line for it says. */
+  context?(said: Metered): void
+}
+
+/** A session's context, as it is said to a page: the session, and its context or null for none known. */
+export interface Metered {
+  session: string
+  context: Context | null
 }
 
 /** What the feed's `sessions` event says: the project whose record changed, and — from `/kehikot-here` — where which conversation was connected. */
@@ -1023,6 +1055,8 @@ export interface RunsOptions {
   every?: number | null
   /** How often background sessions with a view here are asked about (see `watch`); null for never, when a test calls `watch` itself. */
   watchEvery?: number | null
+  /** How often the context of the sessions on screen is looked at again (`METER_EVERY`); null for never, when a test calls `meters` itself. */
+  meterEvery?: number | null
   now?: () => number
   log?: (line: string) => void
   /** Asks the host for a session's doors (`hostDoors`); a test stands one in. */
@@ -1094,6 +1128,12 @@ export class Runs {
    * kept folder (`writeKeptPlace`), for when this process is another one. The newest few hundred.
    */
   private readonly issued = new Map<string, Started>()
+  /** Every session's transcript, read as it grows, for its context (meter.ts). */
+  private readonly gauges = new Gauges()
+  /** What each session's own status line last said (statusline.sh), by session: the newest few hundred. */
+  private readonly statuses = new Map<string, Status>()
+  /** What each run's viewers were last told of its context and whether Compact and Clear can be pressed. */
+  private readonly metered = new WeakMap<Run, string>()
 
   constructor(private readonly options: RunsOptions) {
     this.program = options.program ?? PROGRAM
@@ -1107,6 +1147,8 @@ export class Runs {
     const every = options.every === undefined ? Math.min(REST_EVERY, this.quiet) : options.every
     if (every !== null) setInterval(() => this.rest(), every).unref?.()
     this.watchEvery = options.watchEvery === undefined ? WATCH_EVERY : options.watchEvery
+    const meterEvery = options.meterEvery === undefined ? METER_EVERY : options.meterEvery
+    if (meterEvery !== null) setInterval(() => this.meters(), meterEvery).unref?.()
   }
 
   /** Whether an asking about background sessions is due or under way. */
@@ -1343,10 +1385,12 @@ export class Runs {
     }
     const plugin = able.plugins ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log, into: join(kept, 'plugin'), token }) : null
     const name = able.names ? placeName(projectPath, place) : ''
+    /* Its status line, which says its context here (statusline.sh). Written into the plugin at every start and wake, so a woken one runs the person's line as their settings say it now. */
+    const status = plugin && able.tells ? this.statusLineFor(projectPath, plugin) : null
     const args = [
       ...program.backgroundArgs(settled, name || undefined, saved, line),
       /* Saved options are the session's own: a flag here would carry it on as a copy. Last: `--mcp-config` takes every word after it. */
-      ...(saved ? [] : [...(plugin ? ['--plugin-dir', plugin] : []), ...(config ? ['--mcp-config', config] : [])]),
+      ...(saved ? [] : [...(status && program.settingsArgs ? program.settingsArgs(status) : []), ...(plugin ? ['--plugin-dir', plugin] : []), ...(config ? ['--mcp-config', config] : [])]),
     ]
     const woke = await program.background(file, args, projectPath, program.environment())
     if (!woke.ok) return woke
@@ -1358,6 +1402,22 @@ export class Runs {
     }
     this.markBackground(projectPath, session)
     return { ok: true, active: woke.active, session, kept, token, doors }
+  }
+
+  /**
+   * The settings that give a session started here its status line (`statusline.sh` in its
+   * plugin), with the person's own command written beside it for the script to run first — or
+   * null, and the session is started without, when theirs is one that cannot be run that way or
+   * the command could not be written (their line would be lost).
+   */
+  private statusLineFor(projectPath: string, plugin: string): Record<string, unknown> | null {
+    const made = this.program.statusLine?.(projectPath, statusScriptIn(plugin))
+    if (!made) return null
+    if (!writeOwnStatusLine(plugin, made.own)) {
+      this.log('claude: the session’s status line could not be written; it starts with the person’s own, and its context is read from its transcript')
+      return null
+    }
+    return made.settings
   }
 
   /** Record that a conversation runs in the background with this module's saved options. Nothing for one the record does not hold yet. */
@@ -1439,6 +1499,8 @@ export class Runs {
     if (this.watchBusy || (this.views().length === 0 && this.projects.size === 0)) return
     this.watchBusy = true
     try {
+      /* When it was asked, not when it answered: a line sent while the asking was under way is not taken by what it says. */
+      const asked = this.now()
       const running = await this.running()
       if (!running.known) {
         if (this.watchFailed === 0) this.log(`claude: could not ask what the background sessions are doing (${running.why === 'too-old' ? 'this copy has no `agents --json`' : 'the asking failed'}) — asking less often until it works`)
@@ -1448,8 +1510,18 @@ export class Runs {
       if (this.watchFailed > 0) this.log('claude: asking what the background sessions are doing works again')
       this.watchFailed = 0
       for (const run of this.views()) {
-        const listed = running.active.find((one) => one.kind === 'background' && one.session === run.joined!.session)
+        /* By its handle as well: after /clear the background session is the same job on a new conversation. */
+        const handle = run.joined!.handle
+        const listed = running.active.find((one) => one.kind === 'background' && (one.session === run.joined!.session || (handle !== null && one.handle === handle)))
+        if (listed && listed.session !== run.joined!.session) await this.movedOn(run, listed)
+        this.placed(run, listed ?? null, asked)
         this.become(run, listed?.state ?? null)
+      }
+      /* Where each session this module runs in a terminal of its own is: by its process. */
+      for (const run of this.runs.values()) {
+        if (run.what !== 'session' || run.ended || run.joined) continue
+        const listed = running.active.find((one) => one.pid !== null && one.pid === run.pty.pid)
+        if (listed) this.placed(run, listed, asked)
       }
       await this.see(running)
       for (const projectPath of this.projects) await this.readCutOffs(projectPath).catch(() => {})
@@ -1564,6 +1636,157 @@ export class Runs {
       kehikkoKey: at.kehikko && 'key' in at.kehikko ? at.kehikko.key : null,
       at: this.now(),
     })
+  }
+
+  /* ---------------------------------------------------------------- *
+   * The context meter, and Compact and Clear
+   * ---------------------------------------------------------------- */
+
+  /** Where a run's process is, as `agents --json` said it when it was asked at `at`. */
+  private placed(run: Run, listed: Active | null, at: number): void {
+    const before = this.readiness(run)
+    run.status = listed?.status ?? null
+    run.statusAt = at
+    if (run.status === 'idle') run.idleAt = Math.max(run.idleAt, at)
+    if (this.readiness(run) !== before) void this.meter(run)
+  }
+
+  /**
+   * A background session this run is a view of is on another conversation now: `/clear` typed in
+   * it starts a new one in the same job (the handle stays; the session id is new — measured on
+   * 2.1.310). Recorded as the place's session, as `track` does for a session in a terminal here;
+   * the conversation it left stays listed, and can be opened again.
+   */
+  private async movedOn(run: Run, listed: Active): Promise<void> {
+    const was = run.settled ?? run.joined?.session ?? run.id
+    const now = listed.session
+    if (!(await this.program.settled(run.projectPath, now, 0))) return
+    run.joined = { ...listed, handle: listed.handle ?? run.joined?.handle ?? null }
+    run.settled = now
+    const known = (await this.program.sessions(run.projectPath, [now])).find((one) => one.id === now)
+    run.label = known?.label ?? ''
+    this.log(`claude: the background session ${listed.handle ?? '?'} is now on ${now} (it was on ${was}) — recorded as its place's session`)
+    if (run.at) {
+      const written = attach(run.projectPath, run.at, now, { label: known?.label, lastActive: known?.lastActive })
+      if (!written.ok) this.log(`claude: ${written.error}`)
+    }
+    if (run.owned) this.markBackground(run.projectPath, now)
+    for (const viewer of run.viewers) viewer.say({ exists: true, session: now, label: run.label })
+    this.changed()
+    void this.meter(run)
+  }
+
+  /** A session's context, from its transcript (read as it grows) and its own status line. Null when neither says anything. */
+  async contextOf(projectPath: string, session: string): Promise<Context | null> {
+    if (!this.program.isId(session)) return null
+    const file = await recordFile(projectPath, session)
+    return contextOf(await this.gauges.read(file), this.statuses.get(session) ?? null)
+  }
+
+  /**
+   * Why Compact and Clear cannot be pressed for this run now, or null when they can. They are
+   * typed at its prompt, so only when its program is waiting there and nothing is typed at it —
+   * never into a turn that is under way, a question on screen, or a line the person has not sent.
+   * Decided from the newest of what its hooks said (a session in a terminal here) and what
+   * `agents --json` says of its process, which has to be later than the last line sent to it.
+   */
+  readiness(run: Run): string | null {
+    if (run.what !== 'session' || run.ended) return 'The session is not running.'
+    if (!run.settled) return 'Nothing has been said in this conversation yet.'
+    if (run.prompt.chars > 0) return 'Something is typed at Claude’s prompt and not sent. Send it or clear it first.'
+    const said: { at: number; idle: boolean; why: string }[] = []
+    const busy = 'Claude is working. Compact and Clear wait until it is back at its prompt.'
+    const asking = 'Claude is waiting for an answer on screen.'
+    if (run.secret !== null && run.state !== null) {
+      said.push({ at: run.stateSince, idle: run.state === 'finished', why: run.state === 'needs-you' ? asking : busy })
+    }
+    if (run.status !== null) {
+      said.push({ at: run.statusAt, idle: run.status === 'idle', why: run.status === 'waiting' ? asking : run.status === 'shell' ? 'A shell command is running in it.' : busy })
+    }
+    const newest = said.sort((a, b) => b.at - a.at)[0]
+    if (!newest) return 'It is not known yet whether Claude is waiting at its prompt.'
+    if (!newest.idle) return newest.why
+    if (newest.at <= run.prompt.sentAt + TAKEN_AFTER) return 'Claude has not been seen at its prompt since a line was sent to it.'
+    return null
+  }
+
+  /** Say a run's context, and whether Compact and Clear can be pressed, to its viewers when it changed — and to `viewer` regardless. */
+  private async meter(run: Run, viewer?: Viewer): Promise<void> {
+    if (run.what !== 'session' || run.ended) return
+    const session = run.settled
+    const context = session ? await this.contextOf(run.projectPath, session).catch(() => null) : null
+    if (run.ended || run.settled !== session) return
+    const said = { session: session ?? run.id, context, ready: this.readiness(run) }
+    const text = JSON.stringify(said)
+    if (viewer) viewer.say({ meter: said })
+    const was = this.metered.get(run)
+    if (was === text) return
+    this.metered.set(run, text)
+    for (const one of run.viewers) if (one !== viewer) one.say({ meter: said })
+    const before = was ? (JSON.parse(was) as { session: string; context: Context | null }) : null
+    if (!before || before.session !== said.session || JSON.stringify(before.context) !== JSON.stringify(context)) {
+      for (const follower of this.followers) follower.context?.({ session: said.session, context })
+    }
+  }
+
+  /** Look at the context of every session somebody has a view of again. Called on a clock (`METER_EVERY`). */
+  meters(): Promise<void[]> {
+    return Promise.all([...this.runs.values()].filter((run) => run.what === 'session' && !run.ended && run.viewers.size > 0).map((run) => this.meter(run)))
+  }
+
+  /**
+   * Compact or Clear, on a person's press in the page: Claude Code's own `/compact` or `/clear`,
+   * typed at the session's prompt through the pty the person's keys go to — the attach of a
+   * background one — exactly as a person types it. Only when it can be (`readiness`); the reason
+   * otherwise. Reached from the page's own socket and nothing else: no door and no MCP tool.
+   */
+  command(run: Run, which: Command): true | string {
+    if (!Object.hasOwn(COMMANDS, which)) return 'That is not something here.'
+    const why = this.readiness(run)
+    if (why) return why
+    const text = COMMANDS[which]
+    const now = this.now()
+    run.prompt = { chars: 0, sentAt: now + ENTER_AFTER }
+    run.touched = true
+    run.stirredAt = now
+    run.attendedAt = now
+    run.pty.write(text)
+    setTimeout(() => {
+      if (!run.ended) run.pty.write('\r')
+    }, ENTER_AFTER).unref?.()
+    this.log(`claude: ${text} typed into ${run.settled}, on a person's press in the page`)
+    void this.meter(run)
+    return true
+  }
+
+  /**
+   * A session's own status line saying where it is (`POST /api/status`, from statusline.sh):
+   * believed only with the place token this module wrote into that session's plugin, for a
+   * session that token's conversation is — and of it only numbers, the session and the model's
+   * name are kept (`readStatus`). False for anything else; the caller answers every such thing alike.
+   */
+  heardStatus(session: string, token: string | null, raw: unknown): boolean {
+    if (!token || !PLACE_TOKEN.test(token) || !this.program.isId(session)) return false
+    const status = readStatus(raw, this.now())
+    if (!status || status.session !== session || !this.holds(token, session)) return false
+    this.statuses.delete(session)
+    this.statuses.set(session, status)
+    while (this.statuses.size > 512) this.statuses.delete(this.statuses.keys().next().value!)
+    for (const run of this.runs.values()) {
+      if (run.what === 'session' && !run.ended && (run.settled === session || run.id === session)) void this.meter(run)
+    }
+    return true
+  }
+
+  /** Whether `session` is the conversation behind `token`: its run here, or the record that gave it the token. */
+  private holds(token: string, session: string): boolean {
+    for (const run of this.runs.values()) {
+      if (run.what === 'session' && !run.ended && run.token === token && (run.settled === session || run.id === session)) return true
+    }
+    const started = this.startedOf(token)
+    if (!started) return false
+    const read = readPlaces(started.projectPath)
+    return read.ok && Object.hasOwn(read.value.sessions, session) && read.value.sessions[session]?.token === token
   }
 
   /** The run a session id names — by the id it was opened under or the one it settled as. */
@@ -2013,11 +2236,13 @@ export class Runs {
       !joined && (await this.program.supports(found.file)).plugins
         ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log, token })
         : null
+    /* Its own status line, which also says its context here (statusline.sh): only beside its plugin, which holds the script and the token. */
+    const status = !joined && plugin && token && able.tells ? this.statusLineFor(projectPath, plugin) : null
     const args = joined
       ? this.program.attach(joined.handle!)
       : [
           ...(settled ? this.program.resume(settled, name || undefined) : this.program.fresh(id, name || undefined)),
-          ...(tells ? this.program.reports(tellLine) : []),
+          ...(tells ? this.program.reports(tellLine, status ?? {}) : status && this.program.settingsArgs ? this.program.settingsArgs(status) : []),
           /* Every module's skills, for this one process: nothing is written into the person's config. */
           ...(plugin ? ['--plugin-dir', plugin] : []),
           /* Last: the flag takes every word after it until the next flag. */
@@ -2088,6 +2313,10 @@ export class Runs {
       plugin,
       owned,
       kept,
+      status: joined?.status ?? null,
+      statusAt: this.now(),
+      idleAt: joined?.status === 'idle' ? this.now() : 0,
+      prompt: emptyPrompt(),
     }
     this.runs.set(id, run)
     /* A view of it now says it: the row listed for it while nobody had one goes. */
@@ -2268,6 +2497,7 @@ export class Runs {
       for (const chunk of since) viewer.output(chunk)
       run.viewers.add(viewer)
       this.resize(run, cols, rows)
+      void this.meter(run, viewer)
     })
   }
 
@@ -2323,8 +2553,10 @@ export class Runs {
     if (run.state === state) return
     run.state = state
     run.stateSince = this.now()
+    if (state === 'finished' && run.secret !== null) run.idleAt = Math.max(run.idleAt, run.stateSince)
     this.markWorking(run.projectPath, run.settled, state)
     this.tell(run)
+    void this.meter(run)
     if (state !== 'needs-you' && state !== 'finished') return
     if (run.looking.size > 0) return
     const ration = run.notices
@@ -2527,6 +2759,10 @@ export class Runs {
       run.touched = true
       run.stirredAt = this.now()
       run.attendedAt = run.stirredAt
+      /* What is at its prompt now, counted: what Compact and Clear wait on (see `readiness`). */
+      const before = run.what === 'session' ? this.readiness(run) : null
+      run.prompt = promptAfter(run.prompt, data, this.now())
+      if (run.what === 'session' && this.readiness(run) !== before) void this.meter(run)
       /* The program reports a question being asked and never one being
          answered (program.ts). A person typing into a session that was
          waiting for them is that answer. A lone Esc is the exception: it
@@ -2612,6 +2848,10 @@ export class Runs {
       plugin: null,
       owned: false,
       kept: null,
+      status: null,
+      statusAt: 0,
+      idleAt: 0,
+      prompt: emptyPrompt(),
     }
     this.runs.set(INSTALL, run)
     this.log(`claude: installing, on a press in the page — ${line}`)
@@ -2931,8 +3171,9 @@ function hold(ws: Connection, runs: Runs, log: (line: string) => void): Held {
 
     /* Every frame after the first is an envelope: `d` is what the emulator
        sent (typing, and its own replies), `r` a resize, `w` whether the view
-       is the one on screen, and anything else is dropped rather than typed
-       into somebody's session. */
+       is the one on screen, `c` a person's press of Compact or Clear (one of
+       two words, typed only when the session is at its prompt), and anything
+       else is dropped rather than typed into somebody's session. */
     let said: unknown
     try {
       said = JSON.parse(text)
@@ -2943,6 +3184,10 @@ function hold(ws: Connection, runs: Runs, log: (line: string) => void): Held {
     const frame = said as Record<string, unknown>
     if (typeof frame.d === 'string') return runs.type(run, frame.d)
     if (typeof frame.w === 'boolean') return runs.look(run, viewer, frame.w)
+    if (frame.c === 'compact' || frame.c === 'clear') {
+      const done = runs.command(run, frame.c)
+      return viewer.say({ commanded: { which: frame.c, ok: done === true, ...(done === true ? {} : { why: done }) } })
+    }
     if (typeof frame.r === 'object' && frame.r !== null) {
       const asked = frame.r as { cols?: unknown; rows?: unknown }
       runs.resize(run, size(asked.cols, 20, 500, 80), size(asked.rows, 5, 200, 24))

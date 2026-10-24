@@ -293,7 +293,7 @@ describe('asking what is running', () => {
     try {
       expect(await PROGRAM.active(STAND_IN)).toEqual({
         known: true,
-        active: [{ session: A, kind: 'interactive', called: 'interactive', handle: null, pid: process.pid, cwd: '/p', startedAt: 1791893581186, name: 'project-ea', state: null }],
+        active: [{ session: A, kind: 'interactive', called: 'interactive', handle: null, pid: process.pid, cwd: '/p', startedAt: 1791893581186, name: 'project-ea', state: null, status: 'idle' }],
       })
       writeFileSync(join(CONFIG, 'sessions', `${process.pid}.json`), JSON.stringify(entry({ kind: 'background', id: 'df6bd259', sessionId: B, state: 'working' })))
       const said = await PROGRAM.active(STAND_IN)
@@ -328,7 +328,10 @@ describe('asking what is running', () => {
     expect(readActive(null)).toBeNull()
     expect(readActive('x')).toBeNull()
     /* A background entry that was just started has no pid, name or status yet. */
-    expect(readActive({ id: '5e2cbccb', cwd: '/p', kind: 'background', startedAt: 1, sessionId: B, state: 'blocked' })).toEqual({ session: B, kind: 'background', called: 'background', handle: '5e2cbccb', pid: null, cwd: '/p', startedAt: 1, name: '', state: 'needs-you' })
+    expect(readActive({ id: '5e2cbccb', cwd: '/p', kind: 'background', startedAt: 1, sessionId: B, state: 'blocked' })).toEqual({ session: B, kind: 'background', called: 'background', handle: '5e2cbccb', pid: null, cwd: '/p', startedAt: 1, name: '', state: 'needs-you', status: null })
+    /* Where its process is: one of the four words, or nothing. */
+    expect(readActive(entry({ status: 'busy' }))?.status).toBe('busy')
+    expect(readActive(entry({ status: 'thinking' }))?.status).toBeNull()
     /* An interactive session has no handle even if it claims one: it cannot be attached to. */
     expect(readActive(entry({ id: 'abcd1234' }))?.handle).toBeNull()
     for (const not of ['--dangerously-skip-permissions', '-x', 'two words', 'a;b', '', 'x'.repeat(65), 7]) {

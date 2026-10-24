@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type MutableRefObject } from 'react'
 import { letGo } from './let-go.ts'
 import { settleSize } from './settle-size.ts'
 import { FitAddon } from '@xterm/addon-fit'
@@ -8,7 +8,8 @@ import '@xterm/xterm/css/xterm.css'
 import { probeServer, ticket } from 'kehikot-module-protocol/client'
 
 import { typedByPerson } from '../../input.ts'
-import type { Elsewhere } from '../../live.ts'
+import type { Command, Elsewhere } from '../../live.ts'
+import type { Context } from '../../meter.ts'
 import type { Kehikko } from '../../place.ts'
 import type { State } from '../../program.ts'
 
@@ -85,6 +86,10 @@ export interface Said {
   moved?: string | null
   /** The folder the program was started in, and still has as its project root. */
   cwd?: string
+  /** The session's context (meter.ts), and why Compact and Clear cannot be pressed now — null when they can. */
+  meter?: { session: string; context: Context | null; ready: string | null }
+  /** The server's answer to Compact or Clear: typed, or why not. */
+  commanded?: { which: Command; ok: boolean; why?: string }
 }
 
 /**
@@ -113,9 +118,15 @@ export function TerminalView({
   watched = shown,
   onStanding,
   onSaid,
+  commands,
 }: {
   theme: 'light' | 'dark'
   target: Target
+  /**
+   * Where the view puts what sends Compact or Clear over its socket — the one the person's keys go
+   * through — for the line under it. Given only to the view on screen. False when the socket is not open.
+   */
+  commands?: MutableRefObject<((which: Command) => boolean) | null>
   /** Whether this is the view on screen. The others are hidden by the parent and keep following. */
   shown: boolean
   /**
@@ -326,6 +337,22 @@ export function TerminalView({
   useEffect(() => {
     if (term.current) term.current.options.theme = palette(theme)
   }, [theme])
+
+  /* Compact and Clear, for the line under this view: a frame on this view's own socket, and the keyboard back to the terminal. */
+  useEffect(() => {
+    if (!commands) return
+    const send = (which: Command) => {
+      const live = line.current
+      if (!live || live.readyState !== WebSocket.OPEN) return false
+      live.send(JSON.stringify({ c: which }))
+      term.current?.focus()
+      return true
+    }
+    commands.current = send
+    return () => {
+      if (commands.current === send) commands.current = null
+    }
+  }, [commands])
 
   /* On screen, or behind another view: said to the server as it changes. */
   useEffect(() => {

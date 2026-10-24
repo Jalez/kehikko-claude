@@ -212,10 +212,11 @@ a Claude session in no folder is not what was asked for.
 
 ### What is on screen
 
-Claude Code, and nothing that costs a row while a conversation is connected and running. The bar
-above it while none is connected (above). A strip appears along the bottom only when nothing is
-running to take the space from: the session ended (**Resume**), the install did not finish, or this
-module's server has gone.
+Claude Code, and under it one thin line once the conversation exists: how full its context window
+is, with **Compact** and **Clear** beside it (see [How full the context is](#how-full-the-context-is-the-line-under-the-session)).
+The bar above it while none is connected (above). A strip appears along the bottom only when nothing
+is running to take the space from: the session ended (**Resume**), the install did not finish, or
+this module's server has gone.
 
 A host that draws headers (protocol 1.1.0, `kehikot.header`) is given one **View** menu — a `switch`,
 *This kehikko’s conversations* — listing every conversation connected to this place, and nothing else:
@@ -241,7 +242,90 @@ None of them is marked `agents: true`: no agent presses them. With nothing conne
 
 What a session is doing is one glyph before its title in that menu: `●` working, `◆` needs you, `○`
 finished — three shapes, so it does not rest on colour. A session that has not said what it is doing
-has no mark.
+has no mark. How full its context is follows its title, `41%`, and `82% soon` near where Claude Code
+compacts by itself.
+
+### How full the context is: the line under the session
+
+Asked for as *"In claude code, can we get the current conversations context etc without prompting it
+in the chat? Perhaps shown in the frame of the module?"* — and then *"And then being also able to
+reset it?"*. Nothing is typed into the conversation to know it:
+
+> Context ▬▬▬▬▬▬▭ 82% — compacts soon · 164k / 200k · Sonnet 4.5 · $0.42 · compacted   **Compact** **Clear**
+
+- **Context used**: the tokens in the window out of the window, as a share and a small meter, and
+  *compacts soon* in words from Claude Code's own warning level (20 000 below where it compacts by
+  itself); *compacting* past it. The meter's colour never says anything the words do not.
+- **The model**, **the cost so far** when Claude Code has said it, and **compacted** (with how many
+  times) when a compaction is in what was read. The narrower the frame, the fewer of these: the
+  share and the buttons always, the figure from 300 px, the model from 420, the cost from 480.
+- **Pressing it** opens a breakdown: the tokens in use, the window and where it came from, about where
+  Claude Code compacts by itself and warns, the model, the last request's own numbers (new input,
+  read from the cache, written to the cache, output), the cost and where it came from, and the last
+  compaction (by `/compact` or by itself, when, from how much to how much). Escape closes it.
+- **What it cannot show**: how the window splits into system prompt, tools, MCP tools and messages.
+  Claude Code's `/context` counts each part by asking the model API; the transcript and the status
+  line carry totals only. The breakdown says so rather than guess.
+
+**Where the figures come from** (`meter.ts`, read in the 2.1.310 binary and measured against it):
+
+1. **The transcript**, which this module already finds for every session, read only from where it
+   was last read to (`gauges.ts`: one `stat` while nothing changed, the last megabyte the first
+   time). The last assistant row's `usage` — `input_tokens + cache_creation_input_tokens +
+   cache_read_input_tokens` — is what is in the window, exactly what Claude Code's status line calls
+   `context_window.total_input_tokens` and divides for `used_percentage`. A subagent's row, a
+   synthetic one and an API error are not the conversation's. A `compact_boundary` row says what a
+   compaction compacted to, which is the figure until the next request. A `cost-state` row is the
+   cost Claude Code wrote when the session was cleared or its process stopped; it is shown, marked
+   *last stop*, only when no request came after it.
+2. **The session's own status line**, for a session this module starts. Claude Code hands a status
+   line command its JSON (`context_window.context_window_size`, `cost.total_cost_usd`,
+   `model.display_name`, …); the session's `--settings` names `statusline.sh` in its plugin as its
+   status line, and that runs **the person's own status line command first and prints it byte for
+   byte** — same JSON on stdin, same environment and folder, run by bash as Claude Code runs it, its
+   output and exit status passed through — then posts the JSON here in the background
+   (`POST /api/status`, with the session's place token; of it only numbers, the session and the
+   model's name are kept). The person's command is read from their settings — the project's local
+   ones, its shared ones, then their own `settings.json`, the order Claude Code reads them in — and
+   written beside the script when the session starts or wakes; their `padding` and refresh are kept.
+   Nothing is written into `~/.claude` or the project. One theirs that cannot be run that way (an
+   `args` list, another shell) is left alone: that session is started without, and read from its
+   transcript. A person with no status line gets one that prints nothing; Claude Code then keeps an
+   empty row under its prompt (measured).
+   A session this module did not start has only the transcript: its window is then the model's
+   (Claude Code 2.1.310's catalog: 1M for the Opus 4.7-and-later, Sonnet 5 and Haiku 5.5 families,
+   200k for the rest), and a session already past 200k is on 1M; a `[1m]` choice is not written in
+   the transcript, and the breakdown says the window came from the model.
+
+**Where Claude Code compacts** (2.1.310, `B7`/`MQ`): the window less the room kept for an answer (the
+model's maximum output, at most 20 000) less 13 000 — 167 000 of 200 000 (84%), 967 000 of
+1 000 000. Said as *about*: a person's `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` or `autoCompactWindow`
+moves it and is not read here.
+
+**It updates as the transcript grows**: the session on screen is looked at every 2.5 s (a `stat`;
+what was appended, when it grew), and what its status line posts is said at once.
+
+**Compact** types Claude Code's own `/compact` at the session's prompt, and **Clear** its `/clear`,
+exactly as a person types them — through the pty the person's keys go to (for a background session,
+its `attach`), over the page's own socket. Never anything else, and:
+
+- **Only on a person's press.** Neither is a header item, so no agent can press one, and no door or
+  MCP tool reaches them.
+- **Only while the session waits at its prompt.** While a turn is under way, a question is on screen,
+  a shell command runs, or a line is typed at the prompt and not sent, both wait, with the reason in
+  words (on the buttons, in the breakdown, and in the line when one is pressed). Waiting is decided
+  from the newest of what the session's hooks said and what `claude agents --json` says of its
+  process (`status`: `idle`, `busy`, `waiting`, `shell`) — for a background session the latter
+  only, since its job's `state` can be *working* at an idle prompt — and that has to be later than
+  the last line sent to it. A line typed at the prompt is counted, not read (`promptAfter` in
+  `input.ts`).
+- **Clear asks for a second press**, and says first: *Clear starts this session over as a new
+  conversation. This one is kept: reopen it from the View menu or with /resume.* The old one stays in
+  the place's list; the new one becomes the place's current conversation — for a session in a
+  terminal here by its process (`track`), for a background one by its job, whose handle stays while
+  its session id changes (`movedOn`, measured on 2.1.310).
+- **Afterwards** the line follows the transcript: a compaction's figure, or the new conversation —
+  *nothing sent yet*, then a low figure at its first request.
 
 ### A session outlives the page
 
@@ -399,12 +483,13 @@ switch kehikko. A line filed under the session's epic is the most that exists.
 ### What it never does
 
 - It never sends a prompt of anybody's. The person types. Its one sentence, to a conversation a
-  restart cut off, is above.
+  restart cut off, is above; and Claude Code's own `/compact` or `/clear`, typed on a person's press
+  of **Compact** or **Clear** while the session waits at its prompt (above).
 - It never passes a flag that widens what Claude may do. A new session is `claude --session-id <uuid>`
   and a resumed one `claude --resume <uuid>`, in the project's folder — followed, for a copy that can
   take them, by `--name <the place>` and by `--settings` and the hooks above, which is the whole
-  command. The settings hold hooks and
-  nothing else: nothing about permissions, models or tools. The only other command lines there are:
+  command. The settings hold hooks and the status line (`statusline.sh`, which prints the person's
+  own) and nothing else: nothing about permissions, models or tools. The only other command lines there are:
   `claude --help`, once per binary; `claude agents --json`, which reads; and `claude attach <handle>`,
   with the handle Claude Code itself printed, checked to be one word that cannot be a flag.
 - It runs the conversations it starts or resumes in the background (`claude --bg`, see above). It
@@ -415,7 +500,9 @@ switch kehikko. A line filed under the session's epic is the most that exists.
   prompt, and the rows Claude Code appends to describe it — its name and title, the last prompt as
   Claude Code noted it, the pull requests it linked, and where it was continued (`tailOf` in
   `program.ts`) — and, for what a restart cut off, the summary lines of its task notifications,
-  whether the person typed after them, and whether its last turn ended (`cutoff.ts`).
+  whether the person typed after them, and whether its last turn ended (`cutoff.ts`); and, for the
+  context meter, numbers: each request's token counts and model id, each compaction's trigger, time
+  and counts, and the cost Claude Code wrote (`meter.ts`). Nothing anybody wrote is read for it.
 - It never reads the screen to decide anything, and never reads what a hook is handed.
 
 ## Each conversation knows its own place
@@ -712,12 +799,13 @@ itself honours) — the list of a project's sessions, their first prompt, and wh
 | `POST /api/assign` | "Make this the kehikko’s own": the record says the conversation on screen is its place's own. Ticketed |
 | `POST /api/detach` | "Disconnect from this kehikko": take a session off a place; the session is not ended. Ticketed |
 | `POST /api/showing` | what a page has on screen: its project, its place, and whether its kehikko has a Claude container — what `/kehikot-here` assigns to. Ticketed; forgotten when the page's feed closes |
+| `POST /api/status?session` | a session's own status line (`statusline.sh`, from the plugin a session started here is given): Claude Code's status line JSON, for the context meter. Carries the session's place token in `x-module-ticket`, and is believed only for that token's conversation; only numbers, the session and the model's name are kept. 204 or one 403 that does not say why |
 | `POST /api/context?event&session` | a session's own hook (`context.sh`, from the plugin a session started here is given): what it is told of its place and its kehikko's modules (`hookSpecificOutput`), or 204 for nothing; and the conversation filed under the place it was started at when it belongs nowhere yet. Carries the session's place token in `x-module-ticket`; nothing of the prompt |
 | `POST /api/here?session&say` | `/kehikot-here`, from the skill: assign a conversation Claude Code lists as running to the place on screen in its project. No ticket (the conversation has none); answers plain text beginning `Kehikot:` |
 | `GET /kehikot/skills/kehikot-here.md` | the skill's SKILL.md, as `text/markdown` (protocol 2.5.0, `declares.skills`). Public: it holds nothing of anybody's |
 | `GET /api/feed` | server-sent events: each running session's state as it changes, `sessions` when a project's record changed (with `key` and `session` when `/kehikot-here` connected one: the page on that place puts it on screen), the notices for a framed page to pass on, and the whole activity list (`activity`: on arrival and on every change) that the page hands the host as `activity.set` (protocol 1.5.0; `activity:report`). Sent only to a host whose greeting says it answers the method. Colours match the host's dots: needs you yellow, finished green, working grey. Ticketed (in the query: an `EventSource` sends no header) |
 | `POST /api/state?event&session` | a session's own program saying what it is doing. Not the page's: it must carry that session's secret, reads no body, and answers 204 or one 403 that does not say why |
-| `POST /mcp` | one tool, `sessions { projectPath, epic?, place? }`: the places of a project and their sessions, `missing: true` on one that is not on this computer, `state` and `since` on a running one that has said what it is doing, and `runningElsewhere` on one Claude Code runs in a process this module did not start. With `place: { epic, parts, kehikko }` it answers in words what opening the module there does — for a place with no session: *no conversation connected*, a new one starts and `/kehikot-here` connects another; nothing is offered from the project (`readOnlyHint: true`). The door asks to be registered as `kehikko-claude` (`mcp.as`) |
+| `POST /mcp` | one tool, `sessions { projectPath, epic?, place? }`: the places of a project and their sessions, `missing: true` on one that is not on this computer, `state` and `since` on a running one that has said what it is doing, `runningElsewhere` on one Claude Code runs in a process this module did not start, and `context` on one whose transcript says it: `tokens` of `window`, `percent`, about where it compacts and `compactsSoon`, the model, the `cost` when Claude Code reported it, and how often it was `compacted` (no split by kind: that is `/context`'s). With `place: { epic, parts, kehikko }` it answers in words what opening the module there does — for a place with no session: *no conversation connected*, a new one starts and `/kehikot-here` connects another; nothing is offered from the project (`readOnlyHint: true`). The door asks to be registered as `kehikko-claude` (`mcp.as`) |
 
 **One report, not two.** The module's single report is `activity.set`: the whole list of sessions with their state, a label (the session's first prompt, the words the notice used) and place. A host that answers `activity.set` derives the one-time notice ("Finished: “<first prompt>”", "Waiting for you: …") from the list's transitions, dedupes it and keeps quiet for a place that is on screen, so this module sends it no `events.emit` at all. The greeting carries no host name, version or build, only `answers`, so that is the signal: `answers` includes `activity.set` means no notice from here; `answers` lacking it, or absent (hosts before 1.4.0, which draw no dots), means the notice is still sent, unwatched-only, once per transition and rationed, because it is then the only signal. The trade-off: a host that answers `activity.set` but does not yet derive notices (app 0.1.20 exactly) shows the dots and gets no log rows from this module until it is updated to 0.1.21, which the updater offers.
 
@@ -725,7 +813,9 @@ An agent host that reads `mcp.as` (protocol 1.3.0) names the server `kehikko-cla
 `mcp__kehikko-claude__sessions`; the id alone would have derived `claude`.
 
 There is no door that starts a session, types into one or installs anything — a skill included —
-and no MCP tool that does. A session is started by the socket's first frame, from this module's own page.
+and no MCP tool that does. A session is started by the socket's first frame, from this module's own page;
+what is typed into one arrives on that socket, and Compact and Clear are a frame on it (`{ c: "compact" | "clear" }`,
+one of two words, typed only while the session waits at its prompt).
 
 What the socket will start is narrower than Terminal's shell: this one program, in a folder that
 exists, on a session id this module minted just now or Claude Code already holds for that folder on
@@ -779,6 +869,8 @@ already running elsewhere and how one of those is opened without starting anothe
 | `input.ts` | which of what a page's emulator sends is a person typing, and which is the emulator answering the program. Pure; shared by the page and the server |
 | `live.ts` | the running sessions and what each is doing, the headless emulators, the socket and its fence, the notices, and the two things ended without anybody choosing |
 | `tell.sh` | what a session's program runs to say what it is doing: one request to this server, and nothing else |
+| `meter.ts`, `gauges.ts` | how full a session's context is, its model, cost and compactions: from its transcript (read as it grows) and its own status line. `meter.ts` is pure; shared by the page and the server |
+| `statusline.sh` | a session's status line: the person's own, unchanged, then its JSON to this server |
 | `context.ts`, `context.sh` | what a session started here is told of its place and its kehikko's modules, at its start and when they change, and its filing under the place it was started at |
 | `doors.ts` | the HTTP doors and the MCP tool |
 | `here.ts` | `/kehikot-here`: which conversation is believed, which place it goes to, and what is said |
@@ -786,6 +878,7 @@ already running elsewhere and how one of those is opened without starting anothe
 | `src/view/places.ts` | what the page does when the canvas names a place. Pure |
 | `src/view/conversations.ts` | which conversations are connected here, the bar's words and the View menu. Pure |
 | `src/view/bar.tsx` | the bar above Claude Code while none is connected |
+| `src/view/meter.tsx` | the context line under the session, its breakdown, and Compact and Clear |
 | `src/view/elsewhere.tsx` | the question, when a session is open in another process |
 | `src/view/terminal-view.tsx` | xterm, and a viewer's socket |
 | `src/app.tsx` | the state, and what is drawn |

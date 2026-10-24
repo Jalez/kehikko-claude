@@ -1,7 +1,7 @@
 import { answered, ask, follow, ticket } from 'kehikot-module-protocol/client'
 
 import type { Listing } from '../doors.ts'
-import type { ActivityRow, Notice, SessionsChanged, Stated } from '../live.ts'
+import type { ActivityRow, Metered, Notice, SessionsChanged, Stated } from '../live.ts'
 
 /**
  * This module's own `/api`, as the page calls it. `ask` carries the ticket —
@@ -45,7 +45,7 @@ export interface Api {
    * list (on arrival and on every change). Returns the function that
    * stops following.
    */
-  feed?(notices: boolean, heard: { state(stated: Stated): void; notice(notice: Notice): void; activity?(items: ActivityRow[]): void; sessions?(event?: SessionsChanged): void }, project?: string | null, page?: string): () => void
+  feed?(notices: boolean, heard: { state(stated: Stated): void; notice(notice: Notice): void; activity?(items: ActivityRow[]): void; sessions?(event?: SessionsChanged): void; context?(said: Metered): void }, project?: string | null, page?: string): () => void
 }
 
 export const api: Api = {
@@ -80,7 +80,7 @@ export const api: Api = {
     return answered(await ask<{ ok: true; settings: { resumeCutOff: boolean } }>('./api/settings', { body: { projectPath, resumeCutOff } })).settings
   },
   feed(notices, heard, project, page) {
-    return follow<Stated | Notice | { items: ActivityRow[] } | SessionsChanged>(
+    return follow<Stated | Notice | { items: ActivityRow[] } | SessionsChanged | Metered>(
       './api/feed',
       (event, name) => name === 'notice'
           ? heard.notice(event as Notice)
@@ -88,10 +88,12 @@ export const api: Api = {
             ? heard.activity?.((event as { items: ActivityRow[] }).items)
             : name === 'sessions'
               ? heard.sessions?.(event as SessionsChanged)
-              : heard.state(event as Stated),
+              : name === 'context'
+                ? heard.context?.(event as Metered)
+                : heard.state(event as Stated),
       /* An EventSource sends no header, so the ticket rides the query (see `stream` in doors.ts). */
       /* The activity list is of the project the page is framed in only: a host files it under that one. */
-      { query: { ticket: ticket() ?? '', notices: notices ? '1' : '0', ...(project ? { project } : {}), ...(page ? { page } : {}) }, events: ['notice', 'activity', 'sessions'] },
+      { query: { ticket: ticket() ?? '', notices: notices ? '1' : '0', ...(project ? { project } : {}), ...(page ? { page } : {}) }, events: ['notice', 'activity', 'sessions', 'context'] },
     )
   },
 }

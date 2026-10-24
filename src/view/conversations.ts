@@ -34,8 +34,9 @@ import { MARKS, ago } from './places.ts'
  * ## The View menu
  *
  * A `switch` (protocol 1.1.0, `kehikot.header`): every conversation
- * connected here, the kehikko's own first, each with what it is doing, when
- * it was last active and whether it is the own one. Choosing one resumes it
+ * connected here, the kehikko's own first, each with what it is doing, how
+ * full its context window is, when it was last active and whether it is the
+ * own one. Choosing one resumes it
  * in the container. Two runs go with it, for the one on screen: "Make this
  * the kehikko's own" (when it is not) and "Disconnect from this kehikko"
  * (a `confirm` run: the host arms it, and no agent may press it). The host
@@ -78,6 +79,12 @@ export const DISCONNECT_LABEL = 'Disconnect from this kehikko'
 
 const cut = (text: string, most: number) => (text.length > most ? `${text.slice(0, Math.max(1, most - 1)).trimEnd()}…` : text)
 
+/** How full a conversation's context is, in a menu line: `41%`, or `82% soon` near where Claude Code compacts by itself. */
+export function contextShort(context: Row['context']): string {
+  if (!context || context.percent === null) return ''
+  return `${context.percent}%${context.soon ? ' soon' : ''}`
+}
+
 /** The conversations connected here that this computer can open: the own one first, then the most recently active. */
 export function connected(listing: Pick<Listing, 'sessions' | 'own'> | null): Row[] {
   if (!listing) return []
@@ -91,9 +98,9 @@ export function connected(listing: Pick<Listing, 'sessions' | 'own'> | null): Ro
  * One conversation as a line of the menu, at most 48 characters: its mark, its title, and — kept
  * whole however long the title is — when it was last active and whether it is the own one.
  */
-export function optionLabel(row: Pick<Row, 'label' | 'lastActive' | 'state'>, own: boolean, now: number, extra: readonly string[] = []): string {
+export function optionLabel(row: Pick<Row, 'label' | 'lastActive' | 'state' | 'context'>, own: boolean, now: number, extra: readonly string[] = []): string {
   const mark = row.state ? `${MARKS[row.state].glyph} ` : ''
-  const tail = [...extra, row.lastActive ? ago(row.lastActive, now) : '', own ? 'own' : ''].filter(Boolean).join(' · ')
+  const tail = [contextShort(row.context), ...extra, row.lastActive ? ago(row.lastActive, now) : '', own ? 'own' : ''].filter(Boolean).join(' · ')
   const room = LABEL - mark.length - (tail ? tail.length + 3 : 0)
   return cut(`${mark}${cut(row.label || 'No prompt yet', room)}${tail ? ` · ${tail}` : ''}`, LABEL)
 }
