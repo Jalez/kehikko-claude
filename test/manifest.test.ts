@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { DOOR_NAME, MODULE_ID, known, manifestSchema, moduleFolder, partsDeclaration } from 'kehikot-module-protocol'
+import { DOOR_NAME, MODULE_ID, PACKAGE_VERSION, known, loadsSkills, manifestSchema, moduleFolder, partsDeclaration } from 'kehikot-module-protocol'
 
 import { ID, MANIFEST, NOTICES, PREFERRED_PORT } from '../manifest.ts'
 
@@ -44,6 +44,14 @@ describe('the manifest', () => {
     expect(MANIFEST.extensions.emits).toEqual([NOTICES])
     expect(known(NOTICES)).toBe(true)
     expect(MANIFEST.extensions.consumes).toEqual([])
+  })
+
+  test('says it runs agent sessions and loads the kehikko-bound skills into them (protocol 2.21.0)', () => {
+    /* Built with 2.21.0 or later, a manifest that does not say so is not routed the skills. */
+    expect(MANIFEST.declares.agentSessions).toEqual({ loadsSkills: true })
+    expect(loadsSkills(manifestSchema.parse(MANIFEST))).toBe(true)
+    const [major, minor] = PACKAGE_VERSION.split('.').map(Number)
+    expect(major! > 2 || (major === 2 && minor! >= 21)).toBe(true)
   })
 
   test('says what its MCP door is to be registered as, in a shape the protocol takes', () => {

@@ -116,6 +116,10 @@ export const MANIFEST: Manifest = manifestSchema.parse({
   declares: {
     protocol: `>=${PROTOCOL} <${PROTOCOL + 1}`,
     uses: ['events:emit', 'activity:report'],
+    /* This module runs Claude Code sessions and loads the kehikko-bound skills of the modules on a
+       session's kehikko into them (protocol 2.21.0). A host routes those skills to a module that
+       says so; one built with 2.21.0 that says nothing is not treated as a skill loader. */
+    agentSessions: { loadsSkills: true },
     storage: true,
     prompt: false,
     /* "Resume conversations cut off by a restart", in the host's Settings too (protocol 2.15.0). See `settings.ts`. */
