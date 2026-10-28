@@ -1,6 +1,7 @@
 import { MANIFEST_KIND, PROTOCOL, manifestSchema, type Manifest } from 'kehikot-module-protocol'
 import pkg from './package.json'
 import { SETTINGS } from './settings.ts'
+import { EVENTS } from './events.ts'
 
 export const ID = 'kehikot.claude'
 /** The module's version: package.json's, the one place it is written. A release is tagged with it. */
@@ -68,10 +69,13 @@ export const PREFERRED_PORT = 8010
  *   the thing behind it runs a program as the person. Without an origin of
  *   its own the page would be opaque and the socket cross-origin, and the
  *   only fix for that is the permissive header that must never appear here.
- * - **An MCP door with one tool that reads.** Which sessions belong to which
- *   place. No tool starts, stops, installs or types into anything: an agent
- *   that could type into a person's session would be the inversion of what
- *   this module is for.
+ * - **An MCP door with a tool that reads, and one that tags.** Which sessions
+ *   belong to which place (`sessions`), and `tell_finished`, with which a
+ *   session's own agent says its finished work was research. No tool starts,
+ *   stops, installs or types into anything: an agent that could type into a
+ *   person's session would be the inversion of what this module is for.
+ * - **`events`** (protocol 2.31.0): "Research complete", a case of a finished
+ *   item (research.ts).
  * - **`skills`** (protocol 2.5.0): `/kehikot-here`, which a person types in a Claude Code
  *   conversation to assign it to the kehikko on screen (see skills.ts and `here.ts`). Offered, not
  *   installed: a host shows it and installs it on the person's press. Added to this manifest
@@ -112,14 +116,17 @@ export const MANIFEST: Manifest = manifestSchema.parse({
     transport: 'http',
     as: 'kehikko-claude',
     about:
-      'Which Claude Code sessions a person keeps for which place (epic, picked parts, kehikko), and whether'
-      + ' a running one is working, waiting for them or finished. Read-only: starts, ends and types nothing.',
+      'Which Claude Code sessions a person keeps for which place, and whether one is working, waiting or finished;'
+      + ' tell_finished says a finished turn was research. Starts and types nothing.',
   },
   extensions: { emits: [NOTICES], consumes: [] },
   reacts: ['parts'],
   /* Another module may ask for one of a place's conversations to be shown (`view.goto { show }`,
      protocol 2.28.0): Test runs, going to the session that queued a run. See `showStep`. */
   shows: ['agent-session'],
+  /* "Research complete" (protocol 2.31.0): a finished turn or subagent that was research names it,
+     and the host may give it a sound of its own. A case of `done`; an older host ignores it. See research.ts. */
+  events: EVENTS,
   declares: {
     protocol: `>=${PROTOCOL} <${PROTOCOL + 1}`,
     uses: ['events:emit', 'activity:report'],

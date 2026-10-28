@@ -13,11 +13,13 @@
 #     SESSION, which this module put in the environment when it started the
 #     pty. Of what the program supplies on standard input — the prompt, the
 #     tool's input, the last answer — nothing is carried, and nothing is read
-#     but one thing at one moment: on `Stop`, how many background tasks the
+#     but two things at their moments: on `Stop`, how many background tasks the
 #     program says are still running. That is counted here, from the
 #     `background_tasks` list of the payload (the tasks that are running or
 #     pending: no other kind is listed), and only the NUMBER, up to 99, leaves
-#     this script. No word of the payload is sent, stored or shown.
+#     this script. On `SubagentStart` and `SubagentStop`, the subagent's id and
+#     type, each checked for its spelling. No word of the payload is sent,
+#     stored or shown.
 #   - Nothing is interpolated into a command. The three values come from this
 #     module's own environment, each is checked for its exact spelling before
 #     it is used, and the secret never appears on a command line: it goes to
@@ -76,6 +78,20 @@ if [ "$event" = Stop ] && [ ! -t 0 ]; then
 fi
 extra=
 [ -n "$background" ] && extra="&background=$background"
+
+# On SubagentStart and SubagentStop only: the subagent's id and type, each checked for its exact
+# spelling, and nothing else of the payload. The module reads what the subagent was asked to do
+# (its description) from the sidecar Claude Code keeps beside its record, never from here. A key
+# inside a quoted string is escaped (\"agent_id\"), so only the payload's own key matches.
+if { [ "$event" = SubagentStart ] || [ "$event" = SubagentStop ]; } && [ ! -t 0 ]; then
+  body=$(/usr/bin/head -c 262144 2>/dev/null | /usr/bin/tr -d '\n\r')
+  agent=$(printf '%s' "$body" | /usr/bin/sed -n 's/.*"agent_id": *"\([A-Za-z0-9_-]\{1,64\}\)".*/\1/p')
+  kind=$(printf '%s' "$body" | /usr/bin/sed -n 's/.*"agent_type": *"\([A-Za-z0-9:._-]\{1,64\}\)".*/\1/p')
+  case $agent in '' | *[!A-Za-z0-9_-]*) exit 0 ;; esac
+  case $kind in *[!A-Za-z0-9:._-]*) kind= ;; esac
+  extra="&agent=$agent"
+  [ -n "$kind" ] && extra="$extra&type=$kind"
+fi
 
 printf 'header = "x-module-ticket: %s"\n' "$secret" |
   "$curl" -q --config - --silent --max-time 2 --connect-timeout 1 --noproxy '*' --output /dev/null \

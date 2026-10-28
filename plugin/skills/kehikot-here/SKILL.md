@@ -25,3 +25,5 @@ What to do:
    - anything else: "Kehikot: the Claude module at {{origin}} did not assign this conversation (curl exit N, HTTP CODE: ERROR). Try /kehikot-here again in a moment; if it keeps failing, update Claude from Kehikot's Updates menu. [skill {{version}}]" — with curl's numbers and error message from the report.
 
 Never run either command again on your own, with another session id, or with other words: only the person assigns a conversation, by typing the command.
+
+Once this conversation has a place: when you or a subagent finish researching something (investigating, comparing, auditing, reading up), say so with `tell_finished({ event: "research-complete", label })` on the Claude module's MCP server (kehikko-claude), and the person gets a "Research complete" notice.

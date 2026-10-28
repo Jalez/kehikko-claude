@@ -9,6 +9,7 @@ import { PROGRAM, headOf, home, type Program, type Recorded, type Running, type 
 import { PLACE_TOKEN, WHERE, assign, detach, follow, homeOf, ownOf, projectRoot, readPlaces, readSettings, recordedIds, rekey, sessionsAt, writeSettings, type Places } from './record.ts'
 import { enable, enabled, hookCommand, settingsFile } from './hook.ts'
 import { here } from './here.ts'
+import { EVENT_IDS } from './research.ts'
 import { isSkillPath, serveFrom, skillAt, skillDeclarations } from './skills.ts'
 import { contextWords, costSaid, percentOf, type Context } from './meter.ts'
 
@@ -497,7 +498,46 @@ function tools() {
       },
       annotations: { title: 'Sessions by place', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
+    {
+      name: 'tell_finished',
+      description:
+        'Say that what this conversation just finished was research, so its person gets a "Research complete" notice in '
+        + 'Kehikot’s Inbox, with its own sound. Call it when you or a subagent finish a research task — investigating, '
+        + 'comparing, auditing, reading up, finding out how something works — with event "research-complete" and a label of a '
+        + 'few words saying what was researched ("Protocol audit"). From the session’s own agent it is told when the turn '
+        + 'ends; from a subagent, when that subagent finishes. A subagent whose description reads as research is noticed '
+        + 'without this. Only this conversation’s own item is tagged; nothing else is started, typed or changed.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          event: { type: 'string', enum: [...EVENT_IDS], description: 'The kind of finished work: "research-complete".' },
+          label: { type: 'string', maxLength: 120, description: 'A few words saying what was researched, e.g. "Protocol audit".' },
+        },
+        required: ['event', 'label'],
+      },
+      annotations: { title: 'Tell the person it finished', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
   ]
+}
+
+/**
+ * `tell_finished`: the session's agent (or one of its subagents) says a finished piece of work was
+ * one of this module's Inbox events (research.ts). Known by the place token on this door's URL,
+ * which only the conversation's own doors carry: nothing here can tag another conversation.
+ */
+function tellFinished(args: Record<string, unknown>, token: string | null): string {
+  const event = typeof args.event === 'string' ? args.event : ''
+  if (!EVENT_IDS.includes(event)) throw new Error(`event is one of: ${EVENT_IDS.join(', ')}.`)
+  const label = typeof args.label === 'string' ? args.label : ''
+  if (!label.trim()) throw new Error('label is a few words saying what was researched, e.g. "Protocol audit".')
+  const said = token ? theRuns().tellFinished(token, event, label) : null
+  if (said === null) {
+    throw new Error(
+      'This conversation is not one Kehikot’s Claude module is running with its doors (it was not started from the Claude container, '
+      + 'or it has ended), so there is no item of its own to tag. Nothing was told.',
+    )
+  }
+  return said
 }
 
 /** A place an agent named, or the sentence saying why it is not one. */
@@ -615,7 +655,7 @@ interface Rpc {
   params?: { name?: string; arguments?: Record<string, unknown> }
 }
 
-async function mcp(rpc: Rpc): Promise<Reply> {
+async function mcp(rpc: Rpc, token: string | null = null): Promise<Reply> {
   const reply = (result: unknown) => ok({ jsonrpc: '2.0', id: rpc.id ?? null, result })
   const text = (s: string, isError = false) => reply({ content: [{ type: 'text', text: s }], ...(isError ? { isError } : {}) })
 
@@ -632,7 +672,9 @@ async function mcp(rpc: Rpc): Promise<Reply> {
   if (rpc.method === 'tools/list') return reply({ tools: tools() })
   if (rpc.method === 'tools/call') {
     try {
-      return text(await call(String(rpc.params?.name ?? ''), rpc.params?.arguments ?? {}))
+      const name = String(rpc.params?.name ?? '')
+      if (name === 'tell_finished') return text(tellFinished(rpc.params?.arguments ?? {}, token))
+      return text(await call(name, rpc.params?.arguments ?? {}))
     } catch (e) {
       /* A refusal is an answer the agent reads, not a transport failure it retries. */
       return text(e instanceof Error ? e.message : String(e), true)
@@ -659,7 +701,7 @@ export async function answer(
     if (!body || typeof body.method !== 'string') {
       return { status: 400, body: { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'not a request' } } }
     }
-    return mcp(body as Rpc)
+    return mcp(body as Rpc, query.get('kehikot-place'))
   }
 
   /* The skills this module offers (protocol 2.5.0): each one's SKILL.md, as text. Public: it is
@@ -682,7 +724,15 @@ export async function answer(
     if (method !== 'POST') return bad('this door takes POST', 405)
     /* `background` is a count, digits only and at most three: anything else is no count. */
     const counted = query.get('background') ?? ''
-    const took = theRuns().heard(query.get('session') ?? '', ticket, query.get('event') ?? '', /^\d{1,3}$/.test(counted) ? Number(counted) : null)
+    /* A subagent's id and type, on SubagentStart and SubagentStop only (research.ts): checked again in `heard`. */
+    const agent = query.get('agent')
+    const took = theRuns().heard(
+      query.get('session') ?? '',
+      ticket,
+      query.get('event') ?? '',
+      /^\d{1,3}$/.test(counted) ? Number(counted) : null,
+      agent ? { id: agent.slice(0, 64), type: query.get('type')?.slice(0, 64) ?? null } : null,
+    )
     return took ? { status: 204, body: null } : bad('that is not a running session’s own report', 403)
   }
 
