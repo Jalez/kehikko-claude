@@ -5,6 +5,8 @@ import { open, readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { delimiter, join } from 'node:path'
 
+import { personEnv } from 'kehikot-module-protocol/serve'
+
 /**
  * The program this module opens, and everything that is specific to it.
  *
@@ -964,8 +966,16 @@ const NESTED = [
   'CLAUDE_EFFORT',
 ]
 
+/**
+ * A session's environment: the person's (`personEnv`, without the host's own `bun` this module was
+ * started with first on its PATH and `BUN_BE_BUN`), without the variables that say it is nested.
+ * A session given the host's `bun` without `BUN_BE_BUN` boots the host on every `bun` it calls.
+ *
+ * A background session's environment is the daemon's, not this one: the daemon started by a
+ * `--bg` from here gets it, one already running keeps what it was started with.
+ */
 function environment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const out = { ...env }
+  const out: NodeJS.ProcessEnv = personEnv(env)
   for (const name of NESTED) delete out[name]
   return out
 }

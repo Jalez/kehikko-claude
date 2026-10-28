@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 
 import { spawnSync } from 'node:child_process'
 
@@ -114,6 +114,37 @@ describe('starting and resuming', () => {
   test('the session’s environment does not say it is inside another session', () => {
     const env = PROGRAM.environment({ PATH: '/bin', CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'x', CLAUDE_CONFIG_DIR: '/kept', ANTHROPIC_API_KEY: 'kept' })
     expect(env).toEqual({ PATH: '/bin', CLAUDE_CONFIG_DIR: '/kept', ANTHROPIC_API_KEY: 'kept' })
+  })
+
+  test('a session runs the person’s bun, never the one the host put first on this module’s PATH (#37)', () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'claude-person-env-'))
+    try {
+      /* The host's shim and Bun's own node shim, each a `bun` that is this module's runtime. */
+      const hostShim = join(scratch, 'kehikot-bun-1')
+      const bunNode = join(scratch, 'bun-node-502-x')
+      for (const dir of [hostShim, bunNode]) {
+        mkdirSync(dir)
+        symlinkSync(process.execPath, join(dir, 'bun'))
+      }
+      symlinkSync(process.execPath, join(bunNode, 'node'))
+      const person = join(scratch, 'person')
+      mkdirSync(person)
+      writeFileSync(join(person, 'bun'), '#!/bin/sh\necho person-bun\n')
+      chmodSync(join(person, 'bun'), 0o755)
+      const env = PROGRAM.environment({
+        PATH: [bunNode, hostShim, person, '/usr/bin', '/bin'].join(delimiter),
+        KEHIKOT_HOST_PATH: hostShim,
+        BUN_BE_BUN: '1',
+        CLAUDECODE: '1',
+      })
+      expect(env.BUN_BE_BUN).toBeUndefined()
+      expect(env.KEHIKOT_HOST_PATH).toBeUndefined()
+      expect(env.PATH).toBe([person, '/usr/bin', '/bin'].join(delimiter))
+      const ran = spawnSync('/bin/sh', ['-c', 'command -v bun; bun --version'], { env, encoding: 'utf8' })
+      expect(ran.stdout).toBe(`${join(person, 'bun')}\nperson-bun\n`)
+    } finally {
+      rmSync(scratch, { recursive: true, force: true })
+    }
   })
 })
 
