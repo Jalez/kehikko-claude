@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -8,6 +8,8 @@ import { answer } from '../doors.ts'
 import { RESUME_LINE, Runs, TICKET, headless, type Pty, type Run, type Viewer } from '../live.ts'
 import { PROGRAM, recordDirs, type Active, type Backgrounded, type Program, type Recorded } from '../program.ts'
 import { born, readPlaces, readSettings, writeSettings, type NamedPlace } from '../record.ts'
+import { skillDeclarations } from '../skills.ts'
+import { placeKey } from '../place.ts'
 import { resumeToggle } from '../src/view/conversations.ts'
 import { SHELL_CUT, AGENT_CUT, FAILED, asked as said, notified, turnEnded, typed } from './transcripts.ts'
 
@@ -86,13 +88,13 @@ function machine() {
     refuse,
     records: (projectPath: string, id: string) => held.set(projectPath, [...(held.get(projectPath) ?? []).filter((one) => one.id !== id), { id, label: '', lastActive: Date.now(), next: [] }]),
     /** One process of this module: its own runs, the same machine under it. */
-    module(options: { backgrounds?: boolean; grace?: number } = {}) {
+    module(options: { backgrounds?: boolean; grace?: number; plugins?: boolean; configBase?: string } = {}) {
       const ptys: FakePty[] = []
       const logged: string[] = []
       const program: Program = {
         ...PROGRAM,
         find: () => ({ file: '/fake/bin/claude', looked: [], usual: [] }),
-        supports: async () => ({ ok: true, missing: null, tells: false, lists: true, names: false, configures: false, plugins: false, backgrounds: options.backgrounds ?? true }),
+        supports: async () => ({ ok: true, missing: null, tells: false, lists: true, names: false, configures: options.plugins ?? false, plugins: options.plugins ?? false, backgrounds: options.backgrounds ?? true }),
         active: async () => ({ known: true, active: [...background.values()] }),
         settled: async (projectPath, id) => (held.get(projectPath)?.some((one) => one.id === id) ? id : null),
         sessions: async (projectPath) => held.get(projectPath) ?? [],
@@ -125,6 +127,7 @@ function machine() {
         every: null,
         watchEvery: null,
         log: (line) => logged.push(line),
+        ...(options.configBase ? { configBase: options.configBase, doors: async () => [], place: async () => null } : {}),
         screen: headless,
         spawn: (file, args) => {
           const pty = new FakePty(file, args)
@@ -489,5 +492,111 @@ esac
     expect(await PROGRAM.remove!(file, '44e0eb81')).toBe(true)
     writeFileSync(file, `#!/bin/sh\necho 'Workspace not trusted. Run \`claude\` in /p once and accept the trust prompt, then retry.' >&2\n`, { mode: 0o755 })
     expect(await PROGRAM.background!(file, [], bin)).toEqual({ ok: false, why: 'Workspace not trusted. Run `claude` in /p once and accept the trust prompt, then retry.' })
+  })
+})
+
+/**
+ * The person's machine as their log showed it: every skill this module offers is one they installed
+ * through Kehikot (`~/.claude/skills/<name>/.kehikot-skill.json`), so a session had no skill of its
+ * own to be given — and was given no plugin at all, so neither its hooks nor its status line ran,
+ * and nothing told it its place. Each way a conversation is started here must still give it the
+ * plugin and its hooks, and its first prompt must file it.
+ */
+describe('with every skill already installed in the person’s own config', () => {
+  const config = process.env.CLAUDE_CONFIG_DIR!
+  /* The scratch config is shared with every other test, which expects no `skills` folder in it: made here, and taken away again. */
+  let had = false
+  const installed = () => {
+    had = existsSync(join(config, 'skills'))
+    for (const one of skillDeclarations()) {
+      mkdirSync(join(config, 'skills', one.name), { recursive: true })
+      writeFileSync(join(config, 'skills', one.name, '.kehikot-skill.json'), JSON.stringify({ version: one.version }))
+    }
+  }
+  const uninstalled = () => {
+    for (const one of skillDeclarations()) rmSync(join(config, 'skills', one.name), { recursive: true, force: true })
+    if (!had) rmSync(join(config, 'skills'), { recursive: true, force: true })
+  }
+  const pluginOf = (args: string[]) => (args.includes('--plugin-dir') ? args[args.indexOf('--plugin-dir') + 1]! : null)
+  const hooked = (plugin: string | null) => {
+    expect(plugin).not.toBeNull()
+    expect(Object.keys(JSON.parse(readFileSync(join(plugin!, 'hooks', 'hooks.json'), 'utf8')).hooks)).toEqual(['SessionStart', 'UserPromptSubmit'])
+    expect(existsSync(join(plugin!, 'context.sh'))).toBe(true)
+    return readFileSync(join(plugin!, 'kehikot', 'token'), 'utf8')
+  }
+
+  test('a new conversation in the background is given its plugin, and its first prompt files it as the kehikko’s own', async () => {
+    installed()
+    try {
+      const m = machine()
+      const dir = project()
+      const one = m.module({ plugins: true, configBase: project() })
+      const run = (await one.runs.open(open(dir, null), new Watcher())) as Run
+      expect(isRun(run)).toBe(true)
+      const token = hooked(pluginOf(m.calls.bg[0]!))
+      expect(token).toBe(run.token!)
+      /* What context.sh posts at the first prompt, once Claude Code holds a record of it. */
+      m.records(dir, run.id)
+      const answer = await one.runs.context('UserPromptSubmit', run.id, token)
+      expect(answer?.hookSpecificOutput.additionalContext).toContain('belongs to project')
+      expect(entryOf(dir, run.id)).toMatchObject({ home: placeKey(HERE), token })
+      expect(one.logged.some((line) => line.includes('filed under the place it was started at, as its kehikko’s own (it had none) — no /kehikot-here needed'))).toBe(true)
+    } finally {
+      uninstalled()
+    }
+  })
+
+  test('a recorded conversation resumed into the background is given its plugin too', async () => {
+    installed()
+    try {
+      const m = machine()
+      const dir = project()
+      m.records(dir, A)
+      const one = m.module({ plugins: true, configBase: project() })
+      await one.runs.open(open(dir, A), new Watcher())
+      expect(m.calls.bg[0]!.slice(0, 2)).toEqual(['--resume', A])
+      const token = hooked(pluginOf(m.calls.bg[0]!))
+      await one.runs.context('SessionStart', A, token)
+      expect(entryOf(dir, A)?.home).toBe(placeKey(HERE))
+    } finally {
+      uninstalled()
+    }
+  })
+
+  test('woken from its saved options, the plugin folder those options name is written again', async () => {
+    installed()
+    try {
+      const m = machine()
+      const dir = project()
+      const base = project()
+      m.records(dir, A)
+      const first = m.module({ plugins: true, configBase: base })
+      await first.runs.open(open(dir, A), new Watcher())
+      const plugin = pluginOf(m.calls.bg[0]!)
+      first.runs.endAll()
+      await settle()
+      /* Stopped (a restart of the computer): woken with no flags, and the folder it names is whole. */
+      m.background.clear()
+      rmSync(plugin!, { recursive: true, force: true })
+      const second = m.module({ plugins: true, configBase: base })
+      await second.runs.open(open(dir, A), new Watcher())
+      expect(m.calls.bg[1]).toEqual(['--resume', A])
+      hooked(plugin)
+    } finally {
+      uninstalled()
+    }
+  })
+
+  test('one opened in this terminal (no background) is given its plugin too', async () => {
+    installed()
+    try {
+      const m = machine()
+      const dir = project()
+      const one = m.module({ backgrounds: false, plugins: true, configBase: project() })
+      await one.runs.open(open(dir, null), new Watcher())
+      hooked(pluginOf(one.ptys[0]!.args))
+    } finally {
+      uninstalled()
+    }
   })
 })

@@ -174,7 +174,9 @@ async function getText(origin: string, path: string, options: GatherOptions): Pr
  * skill cannot need one.
  *
  * The folder is new for each session, 0700, in this user's temporary folder, and the caller removes
- * it (`removePlugin`) when the session ends. Null when there is nothing to offer.
+ * it (`removePlugin`) when the session ends. Null only when there is nothing to offer AND no token:
+ * a session given a token always has its folder, for the hooks that tell it its place
+ * (`writeContextHooks`) and its status line — even when every skill is one the person installed.
  */
 export async function sessionPlugin(doors: readonly SessionDoor[], options: GatherOptions = {}): Promise<string | null> {
   const log = options.log ?? (() => {})
@@ -238,7 +240,11 @@ export async function sessionPlugin(doors: readonly SessionDoor[], options: Gath
     }).map((one) => one.catch(() => [])),
   )
   for (const list of gathered) for (const one of list) take(one.skill.name, one.text, one.skill.version, one.module)
-  if (found.size === 0) return null
+  /* A session with a token is given its plugin whatever skills it holds: its hooks (`context.sh`)
+     and its status line live there, and they are how it is told its place and filed. With every
+     skill already installed in the person's own config there was no folder, so no hook ran. */
+  const hooked = options.token && PLACE_TOKEN.test(options.token) ? options.token : null
+  if (found.size === 0 && !hooked) return null
 
   const base = configDirOf(options.base)
   mkdirSync(base, { recursive: true, mode: 0o700 })
@@ -255,7 +261,7 @@ export async function sessionPlugin(doors: readonly SessionDoor[], options: Gath
     mkdirSync(join(dir, 'skills', name), { recursive: true, mode: 0o700 })
     writeFileSync(join(dir, 'skills', name, 'SKILL.md'), text, { mode: 0o600 })
   }
-  if (options.token && PLACE_TOKEN.test(options.token)) writeContextHooks(dir, options.token, options.registration ?? join(registryDir(), `${ID}.json`))
+  if (hooked) writeContextHooks(dir, hooked, options.registration ?? join(registryDir(), `${ID}.json`))
   /* Last, so a folder with its plugin.json is a whole one. */
   writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), readFileSync(join(PLUGIN_DIR, '.claude-plugin', 'plugin.json')), { mode: 0o600 })
   return dir
