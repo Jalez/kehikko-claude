@@ -1357,7 +1357,8 @@ describe('putting away only what is finished', () => {
   })
 
   test('neither is one waiting for an answer: the question exists nowhere else', async () => {
-    const { w, pty } = await left('PermissionRequest')
+    const { w, pty, hear } = await left('UserPromptSubmit')
+    hear('PermissionRequest')
     w.later(24 * 60 * 60_000)
     expect(w.runs.rest()).toEqual([])
     expect(pty.killed).toBe(false)
@@ -1704,8 +1705,11 @@ describe('the activity list a page passes to the host', () => {
     const dir = project()
     const w = world(TOLD)
     const lists_ = feedWith(w)
-    const run = (await w.runs.open(ask(dir, null, NAMED), new Watcher())) as Run
+    const viewer = new Watcher()
+    const run = (await w.runs.open(ask(dir, null, NAMED), viewer)) as Run
     await settle()
+    /* Not on screen: a question in front of the person is no Inbox line (`needsYou`). */
+    w.runs.look(run, viewer, false)
     /* Nothing said, so nothing listed — and nothing sent: the list did not change. */
     expect(lists_).toEqual([[]])
     w.runs.heard(B, secretOf(w.ptys[0]!), 'UserPromptSubmit')
@@ -1722,9 +1726,11 @@ describe('the activity list a page passes to the host', () => {
     const dir = project()
     const w = world(TOLD)
     const lists_ = feedWith(w)
-    const first = (await w.runs.open(ask(dir, null, NAMED), new Watcher())) as Run
+    const away = new Watcher()
+    const first = (await w.runs.open(ask(dir, null, NAMED), away)) as Run
     const second = (await w.runs.open(ask(dir, null, OTHER), new Watcher())) as Run
     await settle()
+    w.runs.look(first, away, false)
     const [one, two] = [first.id, second.id]
     w.runs.heard(one, secretOf(w.ptys[0]!), 'Stop')
     w.later(5)
@@ -1774,7 +1780,7 @@ describe('the activity list a page passes to the host', () => {
 
   test('more than 16 picked parts leave the parts out; more than 64 sessions are cut, finished last', () => {
     const many = (n: number): Run =>
-      ({ what: 'session', ended: false, state: 'finished', id: `s${n}`, settled: `s${n}`, label: '', at: { epic: 'e', parts: Array.from({ length: n }, (_, i) => `p${i}`), kehikko: { id: 3 } }, stateSince: n, background: 0 }) as unknown as Run
+      ({ what: 'session', ended: false, state: 'finished', id: `s${n}`, settled: `s${n}`, label: '', at: { epic: 'e', parts: Array.from({ length: n }, (_, i) => `p${i}`), kehikko: { id: 3 } }, stateSince: n, background: 0, turned: true, seen: false, looking: new Set() }) as unknown as Run
     expect(activityRows([many(16)])[0]!.place).toEqual({ epic: 'e', parts: Array.from({ length: 16 }, (_, i) => `p${i}`) })
     expect(activityRows([many(17)])[0]!.place).toEqual({ epic: 'e' })
     const sixty = Array.from({ length: 70 }, (_, i) => ({ ...many(1), id: `x${i}`, settled: `x${i}`, stateSince: i, state: i === 0 ? 'needs-you' : 'finished' }) as unknown as Run)
@@ -1855,6 +1861,9 @@ describe('the activity list, by project', () => {
     if (!isRun(a) || !isRun(b)) throw new Error('not opened')
     a.state = 'working'
     b.state = 'needs-you'
+    b.turned = true
+    b.looking.clear()
+    b.seen = false
     expect(activityRows([a, b], one).map((row) => row.id)).toEqual([a.id])
     expect(activityRows([a, b], null).length).toBe(2)
   })
@@ -1906,15 +1915,18 @@ describe('the state of a background session a place is attached to', () => {
     expect(feed.got.length).toBe(1)
   })
 
-  test('blocked is needs-you: an attention row', async () => {
-    const { w, run } = await attached('working')
+  test('blocked is needs-you: an attention row while nobody has it on screen', async () => {
+    const { w, run, viewer } = await attached('working')
+    w.runs.look(run, viewer, false)
     now(w, 'blocked')
     await w.runs.watch()
     expect(run.state).toBe('needs-you')
     expect(w.runs.activity()).toMatchObject([{ id: A, state: 'attention' }])
-    /* And it is what a newly opened view is told, too. */
-    const { w: w2 } = await attached('blocked')
-    expect(w2.runs.activity()).toMatchObject([{ id: A, state: 'attention' }])
+    /* A newly opened view is told it too — and opening it is seeing it: the Inbox line goes. */
+    const { w: w2, run: run2, viewer: viewer2 } = await attached('blocked')
+    expect(run2.state).toBe('needs-you')
+    expect(viewer2.said.some((one) => one.state === 'needs-you')).toBe(true)
+    expect(w2.runs.activity()).toEqual([])
   })
 
   test('a word the program has not been known to say is no state at all: no row', async () => {
