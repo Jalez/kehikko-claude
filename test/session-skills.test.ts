@@ -136,7 +136,25 @@ describe('the skills a session is given', () => {
     expect(log).toEqual(['claude: skill trio from kehikot.factory left out — it needs kehikot.review on this kehikko'])
   })
 
-  test('with nothing to offer there is no folder; and removing one removes it', async () => {
+  test('every skill already installed by the person: a session with a token still gets its folder — hooks, script and token, and no skills', async () => {
+    /* What the person's log showed: "skill kehikot-here is already installed … not listed twice", and
+       then no plugin at all, so no hook ran and nothing told the session its place. */
+    const claudeDir = dir()
+    for (const one of skillDeclarations()) {
+      mkdirSync(join(claudeDir, 'skills', one.name), { recursive: true })
+      writeFileSync(join(claudeDir, 'skills', one.name, '.kehikot-skill.json'), JSON.stringify({ version: one.version }))
+    }
+    const token = 'T0kenT0kenT0kenT0kenT0kenT0kenT0ken_-x'
+    const plugin = (await sessionPlugin([], { ...options({ claudeDir }), token, registration: join(dir(), 'none.json') }))!
+    expect(plugin).toBeTruthy()
+    expect(existsSync(join(plugin, 'skills'))).toBe(false)
+    expect(Object.keys(JSON.parse(readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8')).hooks)).toEqual(['SessionStart', 'UserPromptSubmit'])
+    expect(statSync(join(plugin, 'context.sh')).mode & 0o777).toBe(0o700)
+    expect(readFileSync(join(plugin, 'kehikot', 'token'), 'utf8')).toBe(token)
+    expect(existsSync(join(plugin, '.claude-plugin', 'plugin.json'))).toBe(true)
+  })
+
+  test('with nothing to offer and no token there is no folder; and removing one removes it', async () => {
     const claudeDir = dir()
     mkdirSync(join(claudeDir, 'skills', 'kehikot-here'), { recursive: true })
     writeFileSync(join(claudeDir, 'skills', 'kehikot-here', '.kehikot-skill.json'), JSON.stringify({ version: skillDeclarations()[0]!.version }))
