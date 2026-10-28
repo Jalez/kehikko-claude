@@ -600,3 +600,153 @@ describe('with every skill already installed in the person’s own config', () =
     }
   })
 })
+
+/* ------------------------------------------------------------------ *
+ * "Needs you": the program asked something, and the person has not seen it
+ * ------------------------------------------------------------------ */
+
+describe('needs you only for a question the person has not seen', () => {
+  /** A follower, as a framed page is: the activity list and the notices. */
+  function page(runs: Runs) {
+    const lists: ReturnType<Runs['activity']>[] = []
+    const got: { state: string }[] = []
+    runs.subscribe({ notices: true, state: () => {}, notice: (notice) => got.push(notice), activity: (rows) => lists.push(rows) })
+    const attention = () => (lists.at(-1) ?? []).filter((row) => row.state === 'attention')
+    return { lists, got, attention }
+  }
+  /** What `claude agents --json` says the background job is doing now. */
+  const says = (m: ReturnType<typeof machine>, id: string, state: Active['state']) => m.background.set(id, { ...m.background.get(id)!, state })
+
+  /** A new conversation, run in the background as this module runs one, at its empty prompt and on nobody's screen. */
+  async function fresh() {
+    const m = machine()
+    const dir = project()
+    const one = m.module()
+    const viewer = new Watcher()
+    const run = (await one.runs.open(open(dir, null), viewer)) as Run
+    one.runs.look(run, viewer, false)
+    const id = run.id
+    return { m, dir, one, viewer, run, id, ...page(one.runs) }
+  }
+  /** The person sent a prompt: the program recorded the conversation, and it is filed at its place. */
+  async function prompted(f: Awaited<ReturnType<typeof fresh>>) {
+    f.m.records(f.dir, f.id)
+    await f.one.runs.settle(f.run)
+    expect(f.run.settled).toBe(f.id)
+    says(f.m, f.id, 'working')
+    await f.one.runs.watch()
+  }
+
+  test('an empty new session needs nobody, even when its program calls it blocked at its prompt', async () => {
+    const f = await fresh()
+    expect(f.attention()).toEqual([])
+    /* Claude Code says a job is blocked before any turn — on a new project MCP server to approve, say. */
+    says(f.m, f.id, 'needs-you')
+    await f.one.runs.watch()
+    expect(f.run.state).toBeNull()
+    expect(f.attention()).toEqual([])
+    expect(f.got).toEqual([])
+  })
+
+  test('after its first real question it does, once, in the Inbox and as a notice', async () => {
+    const f = await fresh()
+    await prompted(f)
+    says(f.m, f.id, 'needs-you')
+    await f.one.runs.watch()
+    expect(f.attention()).toMatchObject([{ id: f.id, state: 'attention' }])
+    expect(f.got.map((one) => one.state)).toEqual(['needs-you'])
+  })
+
+  test('a question asked before the record was read is taken once it is: the next asking', async () => {
+    const f = await fresh()
+    says(f.m, f.id, 'needs-you')
+    await f.one.runs.watch()
+    expect(f.attention()).toEqual([])
+    f.m.records(f.dir, f.id)
+    await f.one.runs.settle(f.run)
+    await f.one.runs.watch()
+    expect(f.attention()).toHaveLength(1)
+  })
+
+  test('answering it withdraws it', async () => {
+    const f = await fresh()
+    await prompted(f)
+    says(f.m, f.id, 'needs-you')
+    await f.one.runs.watch()
+    expect(f.attention()).toHaveLength(1)
+    f.one.runs.type(f.run, 'y')
+    expect(f.run.state).toBe('working')
+    expect(f.attention()).toEqual([])
+  })
+
+  test('opening it withdraws it, and looking away again does not bring it back', async () => {
+    const f = await fresh()
+    await prompted(f)
+    says(f.m, f.id, 'needs-you')
+    await f.one.runs.watch()
+    expect(f.attention()).toHaveLength(1)
+    f.one.runs.look(f.run, f.viewer, true)
+    expect(f.attention()).toEqual([])
+    f.one.runs.look(f.run, f.viewer, false)
+    await f.one.runs.watch()
+    expect(f.attention()).toEqual([])
+    expect(f.run.state).toBe('needs-you')
+    expect(entryOf(f.dir, f.id)?.looked).toBeDefined()
+    /* It moves on and asks again, on nobody's screen: news again, and the mark is gone. */
+    says(f.m, f.id, 'working')
+    await f.one.runs.watch()
+    expect(entryOf(f.dir, f.id)?.looked).toBeUndefined()
+    says(f.m, f.id, 'needs-you')
+    await f.one.runs.watch()
+    expect(f.attention()).toHaveLength(1)
+  })
+
+  test('a session that ends withdraws it', async () => {
+    const f = await fresh()
+    await prompted(f)
+    says(f.m, f.id, 'needs-you')
+    await f.one.runs.watch()
+    expect(f.attention()).toHaveLength(1)
+    f.one.runs.end(f.id)
+    await settle()
+    expect(f.lists.at(-1)).toEqual([])
+  })
+
+  test('a restart does not bring back a question the person saw — and does not hide one they did not', async () => {
+    const f = await fresh()
+    await prompted(f)
+    says(f.m, f.id, 'needs-you')
+    await f.one.runs.watch()
+    f.one.runs.look(f.run, f.viewer, true)
+    f.one.runs.look(f.run, f.viewer, false)
+    expect(f.attention()).toEqual([])
+    /* The module restarts; the background conversation is still waiting. */
+    f.one.runs.endAll()
+    await settle()
+    const second = f.m.module()
+    const p = page(second.runs)
+    second.runs.know(f.dir)
+    await second.runs.watch()
+    expect(second.runs.activity(f.dir).filter((row) => row.state === 'attention')).toEqual([])
+    expect(p.got).toEqual([])
+    /* Its view again, behind another on the page: still nothing. */
+    const viewer = new Watcher()
+    const again = (await second.runs.open(open(f.dir, f.id), viewer)) as Run
+    second.runs.look(again, viewer, false)
+    await second.runs.watch()
+    expect(again.state).toBe('needs-you')
+    expect(second.runs.activity(f.dir).filter((row) => row.state === 'attention')).toEqual([])
+
+    /* One nobody saw before the restart is still said after it. */
+    const g = await fresh()
+    await prompted(g)
+    says(g.m, g.id, 'needs-you')
+    await g.one.runs.watch()
+    g.one.runs.endAll()
+    await settle()
+    const third = g.m.module()
+    third.runs.know(g.dir)
+    await third.runs.watch()
+    expect(third.runs.activity(g.dir).filter((row) => row.state === 'attention').map((row) => row.id)).toEqual([g.id])
+  })
+})

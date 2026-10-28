@@ -577,6 +577,17 @@ export interface Run {
   state: State | null
   /** Since when. Meaningless while `state` is null. */
   stateSince: number
+  /**
+   * Whether the conversation has had a turn: heard working or finishing since it started (a
+   * recorded conversation, `settled`, has had one too). A conversation with no turn yet has asked
+   * the person nothing, so nothing said of it makes it need them (`needsYou`).
+   */
+  turned: boolean
+  /**
+   * Whether a person has had it on screen since its state last changed. A question they have seen
+   * is no longer news: the Inbox line goes (`needsYou`), and no notice is handed over late.
+   */
+  seen: boolean
   /** What a report has to carry to be believed about this run. Null for one that was not asked to report. */
   secret: string | null
   /** How many notices it may still raise, and when that was last true (see `NOTICES_AT_ONCE`). */
@@ -819,6 +830,8 @@ export function activityRows(runs: Iterable<Run>, project: string | null = null,
   const rows: ActivityRow[] = []
   for (const run of runs) {
     if (run.what !== 'session' || run.ended || !run.state) continue
+    /* A question the person has already seen, or a conversation with no turn yet, is no Inbox line. */
+    if (run.state === 'needs-you' && !needsYou(run)) continue
     /* One project's only, for a follower that asked for one; a page asks for every project's
        and each row says its own (`project`). */
     if (project !== null && !sameProject(run, project)) continue
@@ -850,6 +863,8 @@ export function activityRows(runs: Iterable<Run>, project: string | null = null,
   const said = new Set(rows.map((row) => row.id))
   for (const one of unviewed) {
     if (!one.state || said.has(one.session)) continue
+    /* No turn yet, or a question seen before: not news (`needsYou`). */
+    if (one.state === 'needs-you' && (!one.turned || one.seen)) continue
     if (project !== null && one.projectPath !== project) continue
     said.add(one.session)
     const parts = one.at.parts
@@ -875,6 +890,21 @@ export function activityRows(runs: Iterable<Run>, project: string | null = null,
   }
   rows.sort((a, b) => ACTIVITY_ORDER[a.state] - ACTIVITY_ORDER[b.state] || b.since - a.since || a.id.localeCompare(b.id))
   return rows.slice(0, ACTIVITY_ITEMS)
+}
+
+/** Whether a conversation has had a turn: heard working or finishing, or recorded by the program, which it is from its first prompt on. */
+export const hadTurn = (run: Pick<Run, 'turned' | 'settled'>): boolean => run.turned || run.settled !== null
+
+/**
+ * Whether a session that says it is waiting (`needs-you`) needs the person: it has had a turn — the
+ * program asked something in a conversation, never at an empty prompt — and nobody has had it on
+ * screen since it began to wait. A conversation with no turn yet never needs anyone, and a question
+ * the person has seen is theirs to answer when they choose: the Inbox line goes, and does not come
+ * back when they look away, nor after a restart (`looked` in the record). Answering, ending the
+ * session and a new state all end it as well.
+ */
+export function needsYou(run: Pick<Run, 'state' | 'turned' | 'settled' | 'seen' | 'looking'>): boolean {
+  return run.state === 'needs-you' && hadTurn(run) && !run.seen && run.looking.size === 0
 }
 
 /** The place a conversation's Inbox line goes to: the place it is open at, else the one it belongs to, else the first that lists it. */
@@ -984,6 +1014,14 @@ export interface Unviewed {
   label: string
   state: State | null
   since: number
+  /**
+   * Whether it has had a turn, as the record says: seen working or finishing (`turned`), or called
+   * something by the conversation itself. A job at an empty prompt that its program calls blocked
+   * has asked nobody anything (`needsYou`).
+   */
+  turned: boolean
+  /** A person had it on screen while it was waiting, as the record says (`looked`): not news. */
+  seen?: boolean
 }
 
 /** One page's place, as it said it (see `Runs.show`). */
@@ -1115,7 +1153,7 @@ export class Runs {
   /** What each framed page has open, by the page's own id (see `show`). */
   private readonly showing = new Map<string, Showing>()
   /** Where each project's places' sessions were followed to, kept while the record and what is running are unchanged. */
-  private readonly heads = new Map<string, { stamp: string; heads: Map<string, string> }>()
+  private readonly heads = new Map<string, { stamp: string; heads: Map<string, string>; said: Set<string> }>()
   /** Each watched project's look at what was cut off while this module was not running (`recover`), once per project. */
   private readonly recovering = new Map<string, Promise<void>>()
   /** The Inbox lines the projects' records hold besides the sessions' states (`recordRows`), by project. */
@@ -1444,13 +1482,22 @@ export class Runs {
   private markWorking(projectPath: string, id: string | null, state: State | null): void {
     if (!id || state === null) return
     const working = state === 'working'
+    /* A question seen is not news until it is asked again: moving on clears the mark (`saw`). */
+    const moved = state !== 'needs-you'
     const written = markSession(projectPath, id, (entry) => {
+      let looked = moved && entry.looked !== undefined
+      if (looked) delete entry.looked
+      /* Working or finishing is a turn: kept, so that a background job is known to have had one (`Unviewed`). */
+      if (moved && !entry.turned) {
+        entry.turned = true
+        looked = true
+      }
       if (working) {
-        if (entry.working) return false
+        if (entry.working) return looked
         entry.working = new Date(this.now()).toISOString()
         return true
       }
-      if (!entry.working) return false
+      if (!entry.working) return looked
       delete entry.working
       return true
     })
@@ -1563,7 +1610,7 @@ export class Runs {
         const places = read.value
         const entries = Object.entries(places.places).sort(([a], [b]) => a.localeCompare(b))
         if (entries.length === 0) continue
-        const heads = await this.headsOf(projectPath, places, running)
+        const { heads, said } = await this.headsOf(projectPath, places, running)
         /* The place whose current session it is first, then every other place that lists it. */
         const claims: [PlaceEntry, string][] = [
           ...entries.flatMap(([, entry]) => (entry.current ? [[entry, entry.current] as [PlaceEntry, string]] : [])),
@@ -1582,6 +1629,8 @@ export class Runs {
             label: listed.name || places.sessions[head]?.label || places.sessions[id]?.label || '',
             state,
             since: was && was.state === state ? was.since : this.now(),
+            turned: said.has(head) || Boolean(places.sessions[head]?.turned || places.sessions[head]?.label),
+            ...(state === 'needs-you' && places.sessions[head]?.looked ? { seen: true } : {}),
           })
         }
       }
@@ -1606,17 +1655,20 @@ export class Runs {
    * kept until the record or what is running changes — a conversation is carried on only by a
    * process starting on it, which changes what is running.
    */
-  private async headsOf(projectPath: string, places: Places, running: Extract<Running, { known: true }>): Promise<Map<string, string>> {
+  private async headsOf(projectPath: string, places: Places, running: Extract<Running, { known: true }>): Promise<{ heads: Map<string, string>; said: Set<string> }> {
     const ids = recordedIds(places)
     const live = new Set<string>(running.active.map((one) => one.session))
     for (const run of this.runs.values()) if (run.settled) live.add(run.settled)
     const stamp = JSON.stringify([ids, [...live].sort()])
     const kept = this.heads.get(projectPath)
-    if (kept?.stamp === stamp) return kept.heads
+    if (kept?.stamp === stamp) return kept
     const held = new Map((await this.program.sessions(projectPath, ids)).map((one) => [one.id, one]))
     const heads = new Map(ids.map((id) => [id, headOf(id, held, live)]))
-    this.heads.set(projectPath, { stamp, heads })
-    return heads
+    /* The conversations whose record holds something said in them: they have had a turn (`Unviewed`). */
+    const said = new Set([...held.values()].filter((one) => one.label || one.firstPrompt || one.lastPrompt).map((one) => one.id))
+    const found = { stamp, heads, said }
+    this.heads.set(projectPath, found)
+    return found
   }
 
   /** Say a session's state to every page following: one this module has no run for. */
@@ -1627,6 +1679,8 @@ export class Runs {
   /** A background session nobody has a view of came to need the person, or finished its turn: noticed once. */
   private noticeOf(one: Unviewed): void {
     if (one.state !== 'needs-you' && one.state !== 'finished') return
+    /* Not news: no turn yet, or a question seen before (`needsYou`). */
+    if (one.state === 'needs-you' && (!one.turned || one.seen)) return
     const at = one.at
     this.noticed += 1
     this.raise({
@@ -2327,6 +2381,8 @@ export class Runs {
       attendedAt: this.now(),
       state: null,
       stateSince: this.now(),
+      turned: false,
+      seen: false,
       secret,
       notices: { left: NOTICES_AT_ONCE, at: this.now() },
       background: 0,
@@ -2358,8 +2414,10 @@ export class Runs {
     /* A view of it now says it: the row listed for it while nobody had one goes. */
     if (settled && this.unviewed.delete(settled)) this.changed()
     /* What the program said the background session is doing when it was asked, a moment ago; asked again on a clock from here (`watch`). */
-    if (joined?.state) {
+    if (joined?.state && (joined.state !== 'needs-you' || hadTurn(run))) {
       run.state = joined.state
+      if (joined.state !== 'needs-you') run.turned = true
+      run.seen = run.looking.size > 0 || (joined.state === 'needs-you' && this.lookedAt(projectPath, settled))
       this.markWorking(projectPath, settled, joined.state)
     }
     this.keepWatching()
@@ -2528,7 +2586,10 @@ export class Runs {
     })
     /* On screen until the page says otherwise: a view connects when it is shown. */
     run.looking.add(viewer)
-    if (run.what === 'session') this.toldResumed(run)
+    if (run.what === 'session') {
+      this.toldResumed(run)
+      this.saw(run)
+    }
     /* The same viewer attaching again replaces its own wait rather than adding a second. */
     run.viewers.delete(viewer)
     const since: string[] = []
@@ -2555,9 +2616,37 @@ export class Runs {
     if (looking) {
       run.looking.add(viewer)
       this.toldResumed(run)
+      this.saw(run)
       return
     }
     if (run.looking.delete(viewer) && run.looking.size === 0) this.left(run)
+  }
+
+  /**
+   * A person has it on screen: what it is waiting for is in front of them, and its Inbox line goes.
+   * Kept in the record while it waits (`looked`), so that a restart does not bring the line back.
+   */
+  private saw(run: Run): void {
+    if (run.seen) return
+    run.seen = true
+    if (run.state !== 'needs-you') return
+    if (run.settled) {
+      const at = new Date(this.now()).toISOString()
+      const written = markSession(run.projectPath, run.settled, (entry) => {
+        if (entry.looked) return false
+        entry.looked = at
+        return true
+      })
+      if (!written.ok) this.log(`claude: ${written.error}`)
+    }
+    this.changed()
+  }
+
+  /** Whether the record says a person had this conversation on screen while it was waiting for them (`saw`). */
+  private lookedAt(projectPath: string, id: string | null): boolean {
+    if (!id) return false
+    const read = readPlaces(projectPath)
+    return read.ok && Boolean(read.value.sessions[id]?.looked)
   }
 
   /** The last person looking at it looked away. */
@@ -2596,8 +2685,17 @@ export class Runs {
    */
   private become(run: Run, state: State | null): void {
     if (run.state === state) return
+    /* A conversation with no turn yet is at an empty prompt: it has asked nothing (`needsYou`). Asked
+       again on the next report, by which time a prompt sent may have been recorded. */
+    if (state === 'needs-you' && !hadTurn(run)) {
+      /* Said once for a report; a background session's state is asked on a clock, and not logged each time. */
+      if (!run.joined) this.log(`claude: ${run.settled ?? run.id} said it is waiting before its first turn — not taken as needing anyone`)
+      return
+    }
     run.state = state
     run.stateSince = this.now()
+    if (state === 'working' || state === 'finished') run.turned = true
+    run.seen = run.looking.size > 0 || (state === 'needs-you' && this.lookedAt(run.projectPath, run.settled))
     if (state === 'finished' && run.secret !== null) run.idleAt = Math.max(run.idleAt, run.stateSince)
     this.markWorking(run.projectPath, run.settled, state)
     this.tell(run)
@@ -2691,7 +2789,7 @@ export class Runs {
       if (!this.followers.has(follower)) return
       for (const notice of this.held.splice(0)) {
         const run = this.find(notice.session)
-        if (run ? run.state === notice.state && run.looking.size === 0 : this.unviewed.get(notice.session)?.state === notice.state) follower.notice(notice)
+        if (run ? run.state === notice.state && run.looking.size === 0 && !run.seen : this.unviewed.get(notice.session)?.state === notice.state) follower.notice(notice)
       }
     }
     if (follower.notices && this.held.length) {
@@ -2871,6 +2969,8 @@ export class Runs {
       attendedAt: this.now(),
       state: null,
       stateSince: this.now(),
+      turned: false,
+      seen: false,
       secret: null,
       notices: { left: NOTICES_AT_ONCE, at: this.now() },
       background: 0,

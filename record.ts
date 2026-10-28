@@ -195,6 +195,13 @@ export interface SessionEntry {
    * this module and not running: a restart cut it off mid-turn (see `recover` in live.ts).
    */
   working?: string
+  /**
+   * When a person had it on screen while it was waiting for them: that question is not news, here or
+   * after a restart (`needsYou` in live.ts). Cleared when it is next seen working or finished.
+   */
+  looked?: string
+  /** Seen working or finishing at least once: it has had a turn, so a question from it is a real one. */
+  turned?: true
   /** When this module last woke it after a restart had cut it off; `told` once the person has had it on screen. */
   resumed?: { at: string; told?: boolean }
   /**
@@ -605,6 +612,8 @@ function describe(places: Places, id: string, about: { label?: string; lastActiv
     ...(was?.detached ? { detached: was.detached } : {}),
     ...(was?.background ? { background: was.background } : {}),
     ...(was?.working ? { working: was.working } : {}),
+    ...(was?.looked ? { looked: was.looked } : {}),
+    ...(was?.turned ? { turned: true as const } : {}),
     ...(was?.resumed ? { resumed: was.resumed } : {}),
     ...(was?.cutOff ? { cutOff: was.cutOff } : {}),
   }
@@ -761,6 +770,8 @@ function tidy(raw: unknown): Places {
         detached?: unknown
         background?: unknown
         working?: unknown
+        looked?: unknown
+        turned?: unknown
         resumed?: { at?: unknown; told?: unknown }
         cutOff?: { through?: unknown; open?: unknown }
       }
@@ -777,6 +788,8 @@ function tidy(raw: unknown): Places {
         ...(typeof entry.detached === 'string' ? { detached: entry.detached } : {}),
         ...(entry.background === true ? { background: true as const } : {}),
         ...(typeof entry.working === 'string' ? { working: entry.working } : {}),
+        ...(typeof entry.looked === 'string' ? { looked: entry.looked } : {}),
+        ...(entry.turned === true ? { turned: true as const } : {}),
         ...(typeof entry.resumed?.at === 'string' ? { resumed: { at: entry.resumed.at, ...(entry.resumed.told === true ? { told: true } : {}) } } : {}),
         ...(cut ? { cutOff: cut } : {}),
       }

@@ -424,6 +424,14 @@ Each running session is in one of three states, or in none:
 | `needs-you` | it has stopped at a question and will not go on until it is answered | `PermissionRequest`, `Elicitation`, `StopFailure` |
 | `finished` | its turn is over and it is at its prompt | `Stop` |
 
+**Needs you, in the Inbox and as a notice,** is narrower than the state: a question in a conversation
+that has had a turn (seen working or finishing, or recorded by Claude Code, which it is from its first
+prompt on), which nobody has had on screen since it was asked. A new conversation at its empty prompt
+never needs anyone, whatever Claude Code says of its job (it calls one `blocked` before any turn, on a
+project MCP server to approve). Answering, opening, a new state and the session ending all withdraw
+the line; a question seen is kept in the record (`looked`), so a restart does not bring it back. The
+page's own mark still says `needs-you`. `needsYou` in live.ts; the Codex module applies the same rule.
+
 **Told, not read.** Claude Code runs a command of the caller's choosing when those things happen — its
 hooks. This module attaches them to the sessions it starts, and to nothing else, by adding one thing to
 the command line: `--settings '<json>'`, which hands Claude Code *additional* settings for that one
