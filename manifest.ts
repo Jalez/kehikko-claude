@@ -48,8 +48,9 @@ export const PREFERRED_PORT = 8010
  *   picking Methods moves this module to the session for Methods. Nothing is
  *   narrowed and nothing left out, so there is no sentence about what is
  *   outside the focus — the session on screen is the whole answer.
- * - **`scope: 'epic'`.** Told which epic is open and told again on every
- *   switch, which is the other half of a place.
+ * - **`scope: 'kehikko'`** (protocol 2.29.0). A session is kept for a place — this kehikko, the open
+ *   epic and its picked parts — and the kehikko is the outermost of those a person sees: another
+ *   kehikko on the same epic keeps sessions of its own. Told which epic is open on every switch.
  * - **`uses: ['activity:report']`** (protocol 1.5.0): the whole list of its sessions' states, said
  *   again on every change, for the host to mark epics, parts and kehikot. A host without the
  *   method is told nothing (the client checks the greeting), and a 1.4.0 host accepts the word.
@@ -102,7 +103,10 @@ export const MANIFEST: Manifest = manifestSchema.parse({
     + 'on with (or a new one) when the project has any, and a session already open in another process is asked '
     + 'about rather than copied. Call `sessions` with `place` to be told in words what a place holds.',
   entry: '/app',
-  modes: [{ id: 'claude', label: 'Claude', scope: 'epic' }],
+  /* What its content belongs to (protocol 2.29.0): one mode per scope, the default first. */
+  modes: [
+    { id: 'claude', label: 'Claude', scope: 'kehikko', scopeSays: 'the Claude sessions kept for this kehikko, at the open epic and its picked parts' },
+  ],
   mcp: {
     url: '/mcp',
     transport: 'http',
