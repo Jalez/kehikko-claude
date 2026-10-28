@@ -114,6 +114,30 @@ describe('the report a session’s program makes', () => {
     expect(sent).not.toContain('my own sentence')
   })
 
+  test('on SubagentStart and SubagentStop it sends the subagent’s id and type, and nothing else of it', async () => {
+    const payload = (event: string) =>
+      JSON.stringify({
+        session_id: 'other',
+        hook_event_name: event,
+        agent_id: 'a1b2c3d4',
+        agent_type: 'Explore',
+        agent_transcript_path: '/somewhere/agent-a1b2c3d4.jsonl',
+        last_assistant_message: 'my findings: \"agent_id\":\"evil\" and the person’s secrets',
+      })
+    heard.length = 0
+    await ran('/bin/sh', [TELL, 'SubagentStart'], env(), payload('SubagentStart'))
+    await ran('/bin/sh', [TELL, 'SubagentStop'], env(), payload('SubagentStop'))
+    await ran('/bin/sh', [TELL, 'SubagentStop'], env(), JSON.stringify({ agent_id: 'a b;rm', agent_type: 'x' }))
+    expect(heard.map((one) => one.url)).toEqual([
+      `/api/state?event=SubagentStart&session=${SESSION}&agent=a1b2c3d4&type=Explore`,
+      `/api/state?event=SubagentStop&session=${SESSION}&agent=a1b2c3d4&type=Explore`,
+    ])
+    const sent = JSON.stringify(heard)
+    expect(sent).not.toContain('findings')
+    expect(sent).not.toContain('somewhere')
+    expect(sent).not.toContain('evil')
+  })
+
   test('another event, or a payload with no such list, sends no count', async () => {
     heard.length = 0
     await ran('/bin/sh', [TELL, 'UserPromptSubmit'], env(), JSON.stringify({ background_tasks: [{ status: 'running' }] }))

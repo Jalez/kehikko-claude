@@ -19,6 +19,7 @@ import { PLACE_TOKEN, assign, attach, born, byToken, follow, homeOf, markSession
 import { removePlugin, sessionPlugin, statusScriptIn, writeOwnStatusLine } from './skills.ts'
 import { freshToken, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, removeConfig, sweepKept, writeConfig, writeKeptConfig, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
+import { AGENT_ID, AGENT_TYPE, EVENT_IDS, FOUND_MOST, isResearch, subagentMeta, type Found, type Told } from './research.ts'
 import { context, type HookAnswer, type Started } from './context.ts'
 
 /**
@@ -575,6 +576,17 @@ export interface Run {
   attendedAt: number
   /** What the program last said it is doing, or null when it has said nothing that still holds. */
   state: State | null
+  /**
+   * What its agent said it finished with `tell_finished` (research.ts), waiting for the turn to end
+   * (`Stop`) or for a subagent that ran when it was said to (`SubagentStop`). Null for nothing.
+   */
+  told: Told | null
+  /** The tag its last turn ended with: its finished item names the event, until the next prompt. */
+  turnTag: Told | null
+  /** Its subagents running now, by agent id, with when each started (`SubagentStart`). */
+  agents: Map<string, number>
+  /** Its subagents that finished research, each an Inbox item of its own until the person opens the session. */
+  found: Found[]
   /** Since when. Meaningless while `state` is null. */
   stateSince: number
   /**
@@ -800,6 +812,11 @@ export interface ActivityRow {
   /** How pressing it is (protocol 1.7.0): absent is `normal`. */
   priority?: 'urgent' | 'normal' | 'low'
   /**
+   * The Inbox event this item is (protocol 2.31.0, research.ts): `research-complete` for a finished
+   * turn or subagent that was research. One of the manifest's `events`; absent for none.
+   */
+  event?: string
+  /**
    * The folder of the project the session runs in (protocol 1.8.0). A session keeps running
    * when the person switches project, and the page framed now is the one that reports it; a
    * host that files by project puts it under its own, and the protocol's client sends a host
@@ -829,19 +846,35 @@ const clip = (text: string, most: number): string => (text.length <= most ? text
 export function activityRows(runs: Iterable<Run>, project: string | null = null, unviewed: Iterable<Unviewed> = [], more: Iterable<ActivityRow> = []): ActivityRow[] {
   const rows: ActivityRow[] = []
   for (const run of runs) {
-    if (run.what !== 'session' || run.ended || !run.state) continue
-    /* A question the person has already seen, or a conversation with no turn yet, is no Inbox line. */
-    if (run.state === 'needs-you' && !needsYou(run)) continue
+    if (run.what !== 'session' || run.ended) continue
     /* One project's only, for a follower that asked for one; a page asks for every project's
        and each row says its own (`project`). */
     if (project !== null && !sameProject(run, project)) continue
-    const state = ACTIVITY_STATE[run.state]
     const at = run.at
     const parts = at?.parts ?? []
     const place: NonNullable<ActivityRow['place']> = {}
     if (at?.epic) place.epic = at.epic
     if (parts.length > 0 && parts.length <= PLACE_PARTS) place.parts = [...parts]
     if (at?.kehikko && 'key' in at.kehikko) place.kehikko = at.kehikko.key
+    /* Its subagents' finished research (research.ts): an item each, until the person opens the session. */
+    for (const one of run.found ?? []) {
+      rows.push({
+        id: `${run.settled ?? run.id}:agent:${one.agent}`,
+        state: 'done',
+        label: clip(one.label.replace(/\s+/g, ' ').trim() || 'Research', ACTIVITY_LABEL),
+        ...(Object.keys(place).length > 0 ? { place: { ...place, ...(place.parts ? { parts: [...place.parts] } : {}) } } : {}),
+        since: one.at,
+        detail: 'a subagent finished',
+        event: one.event,
+        project: run.projectPath,
+      })
+    }
+    if (!run.state) continue
+    /* A question the person has already seen, or a conversation with no turn yet, is no Inbox line. */
+    if (run.state === 'needs-you' && !needsYou(run)) continue
+    const state = ACTIVITY_STATE[run.state]
+    /* A finished turn its agent said was research (`tell_finished`): the event, and its words. */
+    const tag = run.state === 'finished' ? run.turnTag : null
     const detail =
       run.state === 'needs-you'
         ? 'waiting for you: a permission or an answer'
@@ -851,10 +884,11 @@ export function activityRows(runs: Iterable<Run>, project: string | null = null,
     rows.push({
       id: run.settled ?? run.id,
       state,
-      label: clip(run.label.replace(/\s+/g, ' ').trim() || 'Claude session', ACTIVITY_LABEL),
+      label: clip((tag?.label ?? run.label).replace(/\s+/g, ' ').trim() || 'Claude session', ACTIVITY_LABEL),
       ...(Object.keys(place).length > 0 ? { place } : {}),
       since: run.stateSince,
       detail: clip(detail, ACTIVITY_DETAIL),
+      ...(tag ? { event: tag.event } : {}),
       project: run.projectPath,
     })
   }
@@ -1079,7 +1113,15 @@ export interface SessionsChanged {
   session?: string
 }
 
+/** A subagent's type and description, from the sidecar beside the session's record (research.ts). */
+async function defaultSubagentOf(projectPath: string, session: string, agent: string): Promise<{ agentType: string | null; description: string | null } | null> {
+  const file = await recordFile(projectPath, session)
+  return file ? subagentMeta(file, session, agent) : null
+}
+
 export interface RunsOptions {
+  /** Where a subagent's type and description are read from (research.ts); a test gives its own. */
+  subagentOf?(projectPath: string, session: string, agent: string): Promise<{ agentType: string | null; description: string | null } | null>
   spawn: Spawn
   screen: (cols: number, rows: number) => Screen | Promise<Screen>
   program?: Program
@@ -2380,6 +2422,10 @@ export class Runs {
       printedAt: this.now(),
       attendedAt: this.now(),
       state: null,
+      told: null,
+      turnTag: null,
+      agents: new Map(),
+      found: [],
       stateSince: this.now(),
       turned: false,
       seen: false,
@@ -2586,6 +2632,7 @@ export class Runs {
     })
     /* On screen until the page says otherwise: a view connects when it is shown. */
     run.looking.add(viewer)
+    this.opened(run)
     if (run.what === 'session') {
       this.toldResumed(run)
       this.saw(run)
@@ -2615,11 +2662,61 @@ export class Runs {
     if (run.ended) return
     if (looking) {
       run.looking.add(viewer)
+      this.opened(run)
       this.toldResumed(run)
       this.saw(run)
       return
     }
     if (run.looking.delete(viewer) && run.looking.size === 0) this.left(run)
+  }
+
+  /**
+   * A person opened the session: its subagents' finished research is in front of them, and those
+   * items go — the rule every finished item of the session follows.
+   */
+  private opened(run: Run): void {
+    if (!run.found.length) return
+    run.found = []
+    this.changed()
+  }
+
+  /**
+   * The session's agent says what it finished (`tell_finished` at this module's door): `event` one
+   * of the manifest's, `label` a few words. Believed only from the conversation's own place token,
+   * which only its own doors carry — its agent and that agent's subagents. Waits for the turn to
+   * end, or for a subagent that was running when it was said to; a sentence for the agent says
+   * which. Null when the token is no running session's.
+   */
+  tellFinished(token: string, event: string, label: string): string | null {
+    if (!PLACE_TOKEN.test(token) || !EVENT_IDS.includes(event)) return null
+    const run = [...this.runs.values()].find((one) => one.what === 'session' && !one.ended && one.token === token)
+    if (!run) return null
+    const words = label.replace(/\s+/g, ' ').trim().slice(0, 120)
+    run.told = { event, label: words || run.label || 'Research', at: this.now() }
+    if (run.secret === null) return 'Noted, but this conversation does not report when its turn ends, so the person is not told.'
+    return run.agents.size
+      ? 'Noted. The person is told “Research complete” when this turn ends, or when the subagent saying this finishes.'
+      : 'Noted. The person is told “Research complete” when this turn ends.'
+  }
+
+  /** A subagent finished: an item when it was research, or said so while it ran (research.ts). */
+  private async subagentDone(run: Run, agent: string, agentType: string | null): Promise<void> {
+    const started = run.agents.get(agent)
+    run.agents.delete(agent)
+    const told = run.told && started !== undefined && run.told.at >= started ? run.told : null
+    if (told) run.told = null
+    let found: { event: string; label: string } | null = told ? { event: told.event, label: told.label } : null
+    if (!found) {
+      const session = run.settled ?? run.id
+      const meta = await (this.options.subagentOf ?? defaultSubagentOf)(run.projectPath, session, agent).catch(() => null)
+      if (meta && isResearch({ agentType: meta.agentType ?? agentType, description: meta.description })) {
+        found = { event: 'research-complete', label: meta.description ?? '' }
+      }
+    }
+    /* Nothing to say, or the person has the session on screen and saw it finish. */
+    if (!found || run.ended || run.looking.size > 0) return
+    run.found = [...run.found.filter((one) => one.agent !== agent), { agent, ...found, at: this.now() }].slice(-FOUND_MOST)
+    this.changed()
   }
 
   /**
@@ -2663,9 +2760,32 @@ export class Runs {
    * the caller answers every such thing the same way, so that what is running
    * cannot be learned by asking.
    */
-  heard(session: string, secret: string | null, event: string, background: number | null = null): boolean {
+  heard(session: string, secret: string | null, event: string, background: number | null = null, agent: { id: string; type: string | null } | null = null): boolean {
     const run = this.runs.get(session)
     if (!run || run.what !== 'session' || run.ended || !run.secret || !sameTicket(secret, run.secret)) return false
+    /* A subagent started or finished (research.ts): nothing about the session's own state. */
+    if (event === 'SubagentStart' || event === 'SubagentStop') {
+      if (!agent || !AGENT_ID.test(agent.id)) return true
+      if (event === 'SubagentStart') {
+        run.agents.set(agent.id, this.now())
+        /* Bounded: a subagent whose stop was never heard is forgotten with the oldest. */
+        if (run.agents.size > 64) run.agents.delete(run.agents.keys().next().value!)
+      } else void this.subagentDone(run, agent.id, agent.type && AGENT_TYPE.test(agent.type) ? agent.type : null)
+      return true
+    }
+    /* A new prompt: what the last turn was tagged with, or was about to be, is over. */
+    if (event === 'UserPromptSubmit') {
+      run.told = null
+      if (run.turnTag) {
+        run.turnTag = null
+        this.changed()
+      }
+    }
+    /* The turn ended: what its agent said it finished is the finished item's. */
+    if (event === 'Stop' && run.told) {
+      run.turnTag = run.told
+      run.told = null
+    }
     const state = this.program.signal(event)
     /* The count of background tasks still running, which only a turn's end carries (`Stop`): a whole
        number the hook script counted, bounded here again. Any other report leaves it as it was. */
@@ -2968,6 +3088,10 @@ export class Runs {
       printedAt: this.now(),
       attendedAt: this.now(),
       state: null,
+      told: null,
+      turnTag: null,
+      agents: new Map(),
+      found: [],
       stateSince: this.now(),
       turned: false,
       seen: false,

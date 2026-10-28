@@ -1045,9 +1045,17 @@ const SIGNALS: Record<string, State> = {
   Stop: 'finished',
 }
 
+/**
+ * The subagent events, heard beside the state signals and saying nothing of the session's state:
+ * a subagent started, and one finished (research.ts). `tell.sh` carries the agent's id and type
+ * from them and nothing else. Measured on 2.1.312: `SubagentStart` gives `agent_id` and
+ * `agent_type`; `SubagentStop` gives those, the subagent's transcript path and its last answer.
+ */
+export const SUBAGENT_EVENTS = ['SubagentStart', 'SubagentStop'] as const
+
 function reports(command: (event: string) => string, more: Record<string, unknown> = {}): string[] {
   const hooks = Object.fromEntries(
-    Object.keys(SIGNALS).map((event) => [event, [{ hooks: [{ type: 'command', command: command(event), timeout: 5 }] }]]),
+    [...Object.keys(SIGNALS), ...SUBAGENT_EVENTS].map((event) => [event, [{ hooks: [{ type: 'command', command: command(event), timeout: 5 }] }]]),
   )
   return [TELLS, JSON.stringify({ ...more, hooks })]
 }
