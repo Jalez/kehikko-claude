@@ -232,9 +232,18 @@ those). Choosing another resumes it in the container. Beside it, in the host's R
 on screen:
 
 - **Make this the kehikko’s own** — only when it is not; rewrites the record (`own`).
-- **Disconnect from this kehikko** — a `confirm` run (the host's two-press arm). The record no longer
-  lists it here; the conversation itself is not ended, and the place opens what it has left — another
-  of its conversations, or a new one with the bar.
+- **Connected to this kehikko** — a checkbox in the View menu, checked for the one on screen. Unchecking it
+  is "Disconnect from this kehikko" (below).
+- **Disconnect from this kehikko** — a run in the Run menu, not confirmed (it is kept and can be connected
+  again). The record no longer lists it here; the conversation itself is not ended, and the place opens what
+  it has left — another of its conversations, or a new one. A strip above Claude Code says it was kept and
+  where to connect it again, until dismissed.
+- **Connect a conversation to this kehikko** — a jump in the Go menu, present while the project has
+  conversations that belong to no place (never assigned, or disconnected). Choosing one connects it here and
+  shows it. Typing `/kehikot-here` in a conversation does the same.
+
+The protocol draws a switch's options as plain choices, so there is no action per row: Disconnect acts on the
+conversation on screen, and choosing another row first is one press. None of these is for agents.
 
 None of them is marked `agents: true`: no agent presses them. With nothing connected, the header is
 `[]` and the bar says why. The host lays the menus out at every width (words, icons under 300 px, one
@@ -810,7 +819,7 @@ itself honours) — the list of a project's sessions, their first prompt, and wh
 | `GET`/`POST /api/kehikot/settings` | the same setting for the host (protocol 2.15.0, `settings.get` / `settings.set`), for a project the host holds, in the same file and format. `resumeCutOff` is `personOnly`: a change is taken only with the page's ticket or a pass the host vouches for (asked of `KEHIKOT_ORIGINS` only); an agent is refused |
 | `POST /api/restart` | end a running session whose project's folder was renamed under it, so its views resume it in the new folder, because a person pressed that. Refused while it is working. Ticketed |
 | `POST /api/assign` | "Make this the kehikko’s own": the record says the conversation on screen is its place's own. Ticketed |
-| `POST /api/detach` | "Disconnect from this kehikko": take a session off a place; the session is not ended. Ticketed |
+| `POST /api/detach` | "Disconnect from this kehikko": take a session off a place; the session is not ended and is listed under `others` with `unplaced`. Ticketed |
 | `POST /api/showing` | what a page has on screen: its project, its place, and whether its kehikko has a Claude container — what `/kehikot-here` assigns to. Ticketed; forgotten when the page's feed closes |
 | `POST /api/status?session` | a session's own status line (`statusline.sh`, from the plugin a session started here is given): Claude Code's status line JSON, for the context meter. Carries the session's place token in `x-module-ticket`, and is believed only for that token's conversation; only numbers, the session and the model's name are kept. 204 or one 403 that does not say why |
 | `POST /api/context?event&session` | a session's own hook (`context.sh`, from the plugin a session started here is given): what it is told of its place and its kehikko's modules (`hookSpecificOutput`), or 204 for nothing; and the conversation filed under the place it was started at when it belongs nowhere yet. Carries the session's place token in `x-module-ticket`; nothing of the prompt |
