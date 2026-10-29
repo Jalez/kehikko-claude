@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { DOOR_NAME, MODULE_ID, PACKAGE_VERSION, known, loadsSkills, manifestSchema, moduleFolder, partsDeclaration } from 'kehikot-module-protocol'
+import { DOOR_NAME, EVENT_SOUNDS, holdsLiveSessions, known, loadsSkills, manifestSchema, MODULE_ID, moduleFolder, PACKAGE_VERSION, partsDeclaration } from 'kehikot-module-protocol'
 
 import { ID, MANIFEST, NOTICES, PREFERRED_PORT } from '../manifest.ts'
 
@@ -12,6 +12,16 @@ describe('the manifest', () => {
     expect(MODULE_ID.test(ID)).toBe(true)
     expect(MANIFEST.id).toBe(ID)
     expect(moduleFolder(ID)).toBe('claude')
+  })
+
+  test('says a restart ends the sessions it holds, so a host never restarts it on its own account (protocol 2.33.0)', () => {
+    expect(MANIFEST.holds).toEqual(['live-sessions'])
+    expect(holdsLiveSessions(MANIFEST)).toBe(true)
+  })
+
+  test('names the built-in sound "Research complete" plays until the person chooses one (protocol 2.33.0)', () => {
+    expect(MANIFEST.events?.find((one) => one.id === 'research-complete')?.sound).toBe('answer')
+    expect(EVENT_SOUNDS).toHaveProperty('answer')
   })
 
   test('declares storage, because this module takes writes on its own origin', () => {
