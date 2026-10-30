@@ -12,7 +12,7 @@ import { ID, NOTICES } from '../manifest.ts'
 import type { State } from '../program.ts'
 import { api as realApi, type Api } from './api.ts'
 import { NoConversationBar } from './view/bar.tsx'
-import { CONNECT, CONNECTED, DISCONNECT, MAKE_OWN, NOT_CONNECTED, RESUME, VIEW, connected, disconnectedLine, resumeToggle, showStep, viewHeader } from './view/conversations.ts'
+import { CONNECT, CONNECTED, DISCONNECT, MAKE_OWN, NOT_CONNECTED, RESUME, VIEW, connected, disconnectedLine, resumeToggle, showStep, STATUS_LINE, statusLineToggle, viewHeader } from './view/conversations.ts'
 import { ElsewhereQuestion } from './view/elsewhere.tsx'
 import { ContextLine } from './view/meter.tsx'
 import {
@@ -278,8 +278,8 @@ export function Sessions({
   const [commanded, setCommanded] = useState<Record<number, { which: Command; ok: boolean; why?: string; at: number }>>({})
   /** What sends Compact or Clear through the socket of the view on screen (`TerminalView`). */
   const commands = useRef<((which: Command) => boolean) | null>(null)
-  /** This project's "Resume conversations cut off by a restart", by project; absent until read. */
-  const [resume, setResume] = useState<{ project: string; on: boolean } | null>(null)
+  /** This project's settings ("Resume conversations cut off by a restart", "Status line in sessions"), by project; absent until read. */
+  const [settings, setSettings] = useState<{ project: string; resumeCutOff: boolean; statusLine: boolean } | null>(null)
   const count = useRef(0)
   /** The kehikot whose older entries this page has already asked the server to bring across to their key. */
   const brought = useRef(new Map<string, Promise<void>>())
@@ -672,17 +672,19 @@ export function Sessions({
     let live = true
     void api
       .settings(settingsOf)
-      .then((said) => live && setResume({ project: settingsOf, on: said.resumeCutOff }))
+      .then((said) => live && setSettings({ project: settingsOf, resumeCutOff: said.resumeCutOff, statusLine: said.statusLine }))
       .catch(() => {})
     return () => {
       live = false
     }
   }, [settingsOf])
-  const resumeOn = resume && resume.project === settingsOf ? resume.on : null
+  const held = settings && settings.project === settingsOf ? settings : null
+  const resumeOn = held ? held.resumeCutOff : null
+  const statusLineOn = held && typeof held.statusLine === 'boolean' ? held.statusLine : null
   const items = useMemo<HeaderItemInput[]>(
-    () => (usable ? [...viewHeader({ rows: worded, own: here ? here.own : undefined, viewing: view?.session ?? null, viewingLabel: label, how: how?.word ?? null, now: Date.now(), unplaced }), ...resumeToggle(resumeOn)] : []),
+    () => (usable ? [...viewHeader({ rows: worded, own: here ? here.own : undefined, viewing: view?.session ?? null, viewingLabel: label, how: how?.word ?? null, now: Date.now(), unplaced }), ...resumeToggle(resumeOn), ...statusLineToggle(statusLineOn)] : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [usable, JSON.stringify(worded.map((one) => [one.id, one.label, one.state ?? '', one.lastActive, one.context?.percent ?? null, one.context?.soon ?? false])), JSON.stringify(unplaced.map((one) => [one.id, one.label, one.state ?? '', one.lastActive])), here?.own, view?.session, label, how?.word, resumeOn],
+    [usable, JSON.stringify(worded.map((one) => [one.id, one.label, one.state ?? '', one.lastActive, one.context?.percent ?? null, one.context?.soon ?? false])), JSON.stringify(unplaced.map((one) => [one.id, one.label, one.state ?? '', one.lastActive])), here?.own, view?.session, label, how?.word, resumeOn, statusLineOn],
   )
   useEffect(() => {
     hosted?.header(items)
@@ -698,12 +700,12 @@ export function Sessions({
         open(value)
         return true
       }
-      if (item === RESUME) {
-        if (typeof value !== 'boolean' || !at || !api.setResume) return 'Say whether conversations cut off by a restart are resumed.'
+      if (item === RESUME || item === STATUS_LINE) {
+        if (typeof value !== 'boolean' || !at || !api.setSetting) return item === RESUME ? 'Say whether conversations cut off by a restart are resumed.' : 'Say whether sessions started here show the status line.'
         const project = at.projectPath
         void api
-          .setResume(project, value)
-          .then((said) => setResume({ project, on: said.resumeCutOff }))
+          .setSetting(project, item === RESUME ? { resumeCutOff: value } : { statusLine: value })
+          .then((said) => setSettings({ project, resumeCutOff: said.resumeCutOff, statusLine: said.statusLine }))
           .catch(() => {})
         return true
       }

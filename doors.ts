@@ -106,8 +106,8 @@ const settings = settingsDoor({
     const root = projectRoot(project)
     if (!root.ok) return root.error
     if (!(await hostCheck.has(root.value))) return `${root.value} is not a project open in Kehikot.`
-    if (key !== 'resumeCutOff') return `Claude has no setting called "${key.slice(0, 64)}".`
-    const written = writeSettings(root.value, { ...readSettings(root.value), resumeCutOff: value === true })
+    if (key !== 'resumeCutOff' && key !== 'statusLine') return `Claude has no setting called "${key.slice(0, 64)}".`
+    const written = writeSettings(root.value, { [key]: value === true })
     return written.ok ? null : written.error
   },
 })
@@ -829,7 +829,8 @@ export async function answer(
     return written.ok ? ok({ ok: true, moved: written.value.moved }) : bad(written.error)
   }
 
-  /* This project's settings for this module: "Resume conversations cut off by a restart". A
+  /* This project's settings for this module: "Resume conversations cut off by a restart" and
+     "Status line in sessions". A
      person's, through the page's ticket; no MCP tool reads or changes them. */
   if (path === '/api/settings' && method === 'GET') {
     const root = projectRoot(query.get('projectPath'))
@@ -837,8 +838,14 @@ export async function answer(
     return ok({ ok: true, settings: readSettings(root.value) })
   }
   if (path === '/api/settings' && method === 'POST') {
-    if (typeof body?.resumeCutOff !== 'boolean') return bad('say whether conversations cut off by a restart are resumed: true or false')
-    const written = writeSettings(typeof body?.projectPath === 'string' ? body.projectPath : null, { resumeCutOff: body.resumeCutOff })
+    const said: { resumeCutOff?: boolean; statusLine?: boolean } = {}
+    for (const key of ['resumeCutOff', 'statusLine'] as const) {
+      if (body?.[key] === undefined) continue
+      if (typeof body[key] !== 'boolean') return bad(key === 'resumeCutOff' ? 'say whether conversations cut off by a restart are resumed: true or false' : 'say whether sessions started here show the status line: true or false')
+      said[key] = body[key]
+    }
+    if (Object.keys(said).length === 0) return bad('say whether conversations cut off by a restart are resumed, or whether sessions show the status line: true or false')
+    const written = writeSettings(typeof body?.projectPath === 'string' ? body.projectPath : null, said)
     return written.ok ? ok({ ok: true, settings: written.value }) : bad(written.error)
   }
 

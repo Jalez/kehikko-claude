@@ -10,19 +10,26 @@
 # It is the `statusLine` of the session's own `--settings` (`statusLine` in program.ts), copied
 # into the plugin folder this module assembles for the session, beside `kehikot/token`,
 # `kehikot/origin` and `kehikot/registration` (see context.sh). `kehikot/statusline` holds the
-# person's own status line command, as their settings say it, when they have one.
+# person's own status line command, as their settings say it, when they have one; `kehikot/compose`
+# holds the runtime this module runs under, when it is to print its own line instead (with
+# "Status line in sessions" on, the default).
 #
 #   - The person's line first, and byte for byte: their command is given exactly the JSON
 #     Claude Code gave this one, in the same environment and folder, run by bash as Claude Code
 #     runs a status line command; what it prints goes straight out, and its exit status is this
-#     script's. With no command of theirs, nothing is printed.
+#     script's. With no command of theirs, this module's own line (`statusline-line.mjs`: context,
+#     the weekly and five-hour allowance, the model) when `kehikot/compose` names a runtime that
+#     runs it, and nothing otherwise; a failure of it prints nothing.
 #   - Then the JSON is posted, in the background, with nothing of its output on the status line:
 #     the token goes to curl on a pipe, never on a command line; only to this computer (the
 #     origin must be loopback, and no proxy is used); at most two seconds; every failure is
 #     silence. Of what it sends, this module keeps numbers, the session id and the model's name.
 
-here=$(/usr/bin/dirname "$0")/kehikot
+dir=$(/usr/bin/dirname "$0")
+here=$dir/kehikot
 own=$(/bin/cat "$here/statusline" 2>/dev/null)
+compose=
+[ -n "$own" ] || compose=$(/bin/cat "$here/compose" 2>/dev/null)
 shell=/bin/bash
 [ -x "$shell" ] || shell=/bin/sh
 
@@ -31,6 +38,7 @@ held=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/kehikot-status.XXXXXX" 2>/dev/null) || h
 if [ -z "$held" ]; then
   # Nowhere to keep the JSON: the person's line still runs, as it would without this module.
   if [ -n "$own" ]; then exec "$shell" -c "$own"; fi
+  if [ -n "$compose" ] && [ -x "$compose" ]; then cd "$dir" 2>/dev/null && exec "$compose" ./statusline-line.mjs 2>/dev/null; fi
   exec /bin/cat >/dev/null
 fi
 /bin/cat >"$held"
@@ -39,6 +47,9 @@ said=0
 if [ -n "$own" ]; then
   "$shell" -c "$own" <"$held"
   said=$?
+elif [ -n "$compose" ] && [ -x "$compose" ]; then
+  # From the plugin folder, so that a runtime reads no bunfig.toml or .env of the project's.
+  (cd "$dir" 2>/dev/null && exec "$compose" ./statusline-line.mjs) <"$held" 2>/dev/null
 fi
 
 (

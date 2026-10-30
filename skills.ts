@@ -274,6 +274,10 @@ export const CONTEXT_SCRIPT = join(import.meta.dirname, 'context.sh')
 export const STATUS_SCRIPT = join(import.meta.dirname, 'statusline.sh')
 const STATUS_FILE = 'statusline.sh'
 
+/** The line `statusline.sh` prints when the person has no status line of their own (see `statusline-line.mjs`). */
+export const LINE_SCRIPT = join(import.meta.dirname, 'statusline-line.mjs')
+const LINE_FILE = 'statusline-line.mjs'
+
 /** Where a session's status line script is in its plugin folder. */
 export const statusScriptIn = (dir: string): string => join(dir, STATUS_FILE)
 
@@ -287,6 +291,23 @@ export function writeOwnStatusLine(dir: string, own: string | null): boolean {
     const file = join(dir, 'kehikot', 'statusline')
     if (own === null) rmSync(file, { force: true })
     else writeFileSync(file, own, { mode: 0o600 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Have `statusline.sh` print this module's own line when the person has none (`runtime`: the
+ * program that runs `statusline-line.mjs`, this module's own) — or not (`null`). 0600, beside the
+ * token; written at every start and wake, so a woken session follows the setting as it is now.
+ * Never throws: false says it could not be written.
+ */
+export function writeComposer(dir: string, runtime: string | null): boolean {
+  try {
+    const file = join(dir, 'kehikot', 'compose')
+    if (runtime === null) rmSync(file, { force: true })
+    else writeFileSync(file, runtime, { mode: 0o600 })
     return true
   } catch {
     return false
@@ -308,6 +329,7 @@ function writeContextHooks(dir: string, token: string, registration: string): vo
   writeFileSync(join(dir, 'hooks', 'hooks.json'), `${JSON.stringify({ hooks }, null, 2)}\n`, { mode: 0o600 })
   writeFileSync(join(dir, 'context.sh'), readFileSync(CONTEXT_SCRIPT), { mode: 0o700 })
   writeFileSync(join(dir, STATUS_FILE), readFileSync(STATUS_SCRIPT), { mode: 0o700 })
+  writeFileSync(join(dir, LINE_FILE), readFileSync(LINE_SCRIPT), { mode: 0o600 })
   mkdirSync(join(dir, 'kehikot'), { mode: 0o700 })
   writeFileSync(join(dir, 'kehikot', 'token'), token, { mode: 0o600 })
   writeFileSync(join(dir, 'kehikot', 'origin'), served, { mode: 0o600 })

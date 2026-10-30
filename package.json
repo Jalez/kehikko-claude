@@ -1,6 +1,6 @@
 {
   "name": "kehikko-claude",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "private": true,
   "type": "module",
   "description": "Claude, a module a Kehikot host frames: a terminal holding the Claude Code session that belongs to the place you are looking at.",

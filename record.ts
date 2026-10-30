@@ -215,6 +215,8 @@ export interface SessionEntry {
 export interface Settings {
   /** Wake a conversation a restart cut off mid-turn, and tell it so (default on). */
   resumeCutOff: boolean
+  /** Give a session started here this module's own status line when the person has none (default on). */
+  statusLine: boolean
 }
 
 export interface Places {
@@ -648,28 +650,36 @@ export function markSessions(projectPath: string | null | undefined, edits: Read
 }
 
 const SETTINGS = 'settings'
-const DEFAULTS: Settings = { resumeCutOff: true }
+const DEFAULTS: Settings = { resumeCutOff: true, statusLine: true }
+
+/** Settings as written: each key a boolean, the default where it is not one. */
+function settingsOf(raw: { resumeCutOff?: unknown; statusLine?: unknown } | null | undefined): Settings {
+  return {
+    resumeCutOff: typeof raw?.resumeCutOff === 'boolean' ? raw.resumeCutOff : DEFAULTS.resumeCutOff,
+    statusLine: typeof raw?.statusLine === 'boolean' ? raw.statusLine : DEFAULTS.statusLine,
+  }
+}
 
 /** A project's settings for this module, the defaults where the file says nothing. */
 export function readSettings(projectPath: string | null | undefined): Settings {
   const file = fileFor(projectPath, false, SETTINGS)
   if (!file.ok || !existsSync(file.value)) return { ...DEFAULTS }
   try {
-    const raw = JSON.parse(readFileSync(file.value, 'utf8')) as { resumeCutOff?: unknown }
-    return { resumeCutOff: typeof raw.resumeCutOff === 'boolean' ? raw.resumeCutOff : DEFAULTS.resumeCutOff }
+    return settingsOf(JSON.parse(readFileSync(file.value, 'utf8')) as { resumeCutOff?: unknown; statusLine?: unknown })
   } catch {
     return { ...DEFAULTS }
   }
 }
 
-/** Write a project's settings, whole. A person's press in the page is the only caller. */
-export function writeSettings(projectPath: string | null | undefined, settings: Settings): Result<Settings> {
+/** Write a project's settings, whole: a key not given is kept as the file says it. A person's press in the page is the only caller. */
+export function writeSettings(projectPath: string | null | undefined, settings: Partial<Settings>): Result<Settings> {
   const file = fileFor(projectPath, true, SETTINGS)
   if (!file.ok) return file
+  const whole = settingsOf({ ...readSettings(projectPath), ...settings })
   const temporary = `${file.value}.${process.pid}.tmp`
-  writeFileSync(temporary, `${JSON.stringify({ resumeCutOff: settings.resumeCutOff === true }, null, 2)}\n`)
+  writeFileSync(temporary, `${JSON.stringify(whole, null, 2)}\n`)
   renameSync(temporary, file.value)
-  return { ok: true, value: { resumeCutOff: settings.resumeCutOff === true } }
+  return { ok: true, value: whole }
 }
 
 /**

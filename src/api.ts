@@ -8,6 +8,12 @@ import type { ActivityRow, Metered, Notice, SessionsChanged, Stated } from '../l
  * on the read as well, since the read says what somebody has been working on
  * (see doors.ts) — and turns every failure into one sentence.
  */
+/** This project's settings for this module (`record.ts` `Settings`). */
+export interface ModuleSettings {
+  resumeCutOff: boolean
+  statusLine: boolean
+}
+
 export interface Api {
   /** What this place holds: its sessions, the project's others, what is running, and whether the program is there. */
   place(projectPath: string, key: string, projectId?: string | null): Promise<Listing>
@@ -34,10 +40,10 @@ export interface Api {
   showing?(page: string, at: { projectPath: string; key: string; kehikkoName: string; partNames: string[]; onScreen: boolean } | null): Promise<void>
   /** Take a session off a place ("Disconnect from this kehikko"). The session itself is kept. */
   detach(projectPath: string, key: string, session: string): Promise<void>
-  /** This project's settings for this module: whether conversations a restart cut off are resumed. */
-  settings?(projectPath: string): Promise<{ resumeCutOff: boolean }>
-  /** A person's press: change it. */
-  setResume?(projectPath: string, resumeCutOff: boolean): Promise<{ resumeCutOff: boolean }>
+  /** This project's settings for this module: whether conversations a restart cut off are resumed, and whether sessions started here get the module's status line. */
+  settings?(projectPath: string): Promise<ModuleSettings>
+  /** A person's press: change one. */
+  setSetting?(projectPath: string, change: Partial<ModuleSettings>): Promise<ModuleSettings>
   /**
    * Follow what changes while the page is open: every running session's
    * state, and — when `notices` says a host is there to pass them to — the
@@ -76,10 +82,10 @@ export const api: Api = {
     answered(await ask('./api/detach', { body: { projectPath, key, session } }))
   },
   async settings(projectPath) {
-    return answered(await ask<{ ok: true; settings: { resumeCutOff: boolean } }>('./api/settings', { query: { projectPath }, ticket: true })).settings
+    return answered(await ask<{ ok: true; settings: ModuleSettings }>('./api/settings', { query: { projectPath }, ticket: true })).settings
   },
-  async setResume(projectPath, resumeCutOff) {
-    return answered(await ask<{ ok: true; settings: { resumeCutOff: boolean } }>('./api/settings', { body: { projectPath, resumeCutOff } })).settings
+  async setSetting(projectPath, change) {
+    return answered(await ask<{ ok: true; settings: ModuleSettings }>('./api/settings', { body: { projectPath, ...change } })).settings
   },
   feed(notices, heard, project, page) {
     return follow<Stated | Notice | { items: ActivityRow[] } | SessionsChanged | Metered>(
