@@ -2,7 +2,8 @@
 #
 # What a session this module started runs as its status line: the person's own status line,
 # unchanged, and then — out of the way — Claude Code's status line JSON to this module, which is
-# where the context meter's exact window and live cost come from (see meter.ts).
+# where the context meter's exact window and live cost come from (see meter.ts), and the
+# subscription allowance's `rate_limits` (see usage.ts).
 #
 #   /bin/sh statusline.sh        (Claude Code runs it; its JSON is on stdin)
 #

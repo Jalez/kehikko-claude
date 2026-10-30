@@ -2935,6 +2935,45 @@ describe('the context meter, from the transcript and the session’s own status 
     }
   })
 
+  test('the subscription allowance one session’s status line says is said under every session on screen, and nothing without it', async () => {
+    const dir = project()
+    const base = mkdtempSync(join(tmpdir(), 'kehikko-claude-plugin-'))
+    made.push(base)
+    writeFileSync(join(CONFIG, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'echo mine' } }))
+    try {
+      const w = world({ tells: true, port: 4999, configures: true, plugins: true, doors: async () => [], configBase: base })
+      const here = new Watcher()
+      const run = await w.runs.open(ask(dir, null), here)
+      if (!isRun(run)) throw new Error('not opened')
+      w.records(dir, B, 'started here')
+      w.ptys[0]!.says('hi\r\n')
+      await settle()
+      /* Another session, on screen in another view. */
+      w.records(dir, A, 'measured')
+      transcript(dir, A, [usage(10_000)])
+      const there = new Watcher()
+      await w.runs.open(ask(dir, A), there)
+      await settle()
+      const limitsOf = (one: Watcher) => (one.said.filter((said) => said.meter).at(-1)?.meter as { limits?: unknown } | undefined)?.limits
+      const raw = { session_id: B, model: { id: 'claude-opus-5-5' } }
+      /* An API-key login: no rate_limits, and nothing is said of an allowance. */
+      expect(w.runs.heardStatus(B, run.token, raw)).toBe(true)
+      await settle()
+      expect(w.runs.limits()).toBeNull()
+      expect(limitsOf(there)).toBeNull()
+      expect(w.runs.heardStatus(B, run.token, { ...raw, rate_limits: { seven_day: { used_percentage: 62, resets_at: 10_000_000 }, five_hour: { used_percentage: 23.5, resets_at: 9_000 } } })).toBe(true)
+      await settle()
+      const week = { used: 62, resets: 10_000_000_000, at: expect.any(Number) }
+      expect(limitsOf(there)).toEqual({ week, hours: { used: 23.5, resets: 9_000_000, at: expect.any(Number) } })
+      expect(limitsOf(here)).toEqual(limitsOf(there))
+      /* An idle session repeating an older, smaller figure changes nothing. */
+      expect(w.runs.heardStatus(B, run.token, { ...raw, rate_limits: { seven_day: { used_percentage: 50, resets_at: 10_000_000 } } })).toBe(true)
+      expect((w.runs.limits()?.week as { used: number }).used).toBe(62)
+    } finally {
+      rmSync(join(CONFIG, 'settings.json'), { force: true })
+    }
+  })
+
   test('a person with no status line is given none: their terminal is not changed, and the context is read from the transcript', async () => {
     const dir = project()
     const base = mkdtempSync(join(tmpdir(), 'kehikko-claude-plugin-'))

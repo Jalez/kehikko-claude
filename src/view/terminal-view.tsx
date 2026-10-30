@@ -10,6 +10,7 @@ import { probeServer, ticket } from 'kehikot-module-protocol/client'
 import { typedByPerson } from '../../input.ts'
 import type { Command, Elsewhere } from '../../live.ts'
 import type { Context } from '../../meter.ts'
+import type { Limits } from '../../usage.ts'
 import type { Kehikko } from '../../place.ts'
 import type { State } from '../../program.ts'
 
@@ -87,7 +88,7 @@ export interface Said {
   /** The folder the program was started in, and still has as its project root. */
   cwd?: string
   /** The session's context (meter.ts), and why Compact and Clear cannot be pressed now — null when they can. */
-  meter?: { session: string; context: Context | null; ready: string | null }
+  meter?: { session: string; context: Context | null; ready: string | null; limits?: Limits | null }
   /** The server's answer to Compact or Clear: typed, or why not. */
   commanded?: { which: Command; ok: boolean; why?: string }
 }
