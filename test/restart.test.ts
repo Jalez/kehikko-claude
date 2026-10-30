@@ -88,7 +88,7 @@ function machine() {
     refuse,
     records: (projectPath: string, id: string) => held.set(projectPath, [...(held.get(projectPath) ?? []).filter((one) => one.id !== id), { id, label: '', lastActive: Date.now(), next: [] }]),
     /** One process of this module: its own runs, the same machine under it. */
-    module(options: { backgrounds?: boolean; grace?: number; plugins?: boolean; configBase?: string; tells?: boolean } = {}) {
+    module(options: { backgrounds?: boolean; grace?: number; plugins?: boolean; configBase?: string; tells?: boolean; now?: () => number } = {}) {
       const ptys: FakePty[] = []
       const logged: string[] = []
       const program: Program = {
@@ -127,6 +127,7 @@ function machine() {
         every: null,
         watchEvery: null,
         log: (line) => logged.push(line),
+        ...(options.now ? { now: options.now } : {}),
         ...(options.configBase ? { configBase: options.configBase, doors: async () => [], place: async () => null } : {}),
         screen: headless,
         spawn: (file, args) => {
@@ -793,5 +794,97 @@ describe('needs you only for a question the person has not seen', () => {
     third.runs.know(g.dir)
     await third.runs.watch()
     expect(third.runs.activity(g.dir).filter((row) => row.state === 'attention').map((row) => row.id)).toEqual([g.id])
+  })
+})
+
+describe('an Inbox item keeps its since while its state does: the same item is never news again', () => {
+  /*
+   * The person's words: "the notice of an instance that I have already opened keeps on reopening".
+   * The host takes a new `since` for the item having entered its state again: unseen, a toast and a
+   * chime. A finished conversation was said with a new `since` every time a view of it opened
+   * (the run said it), closed (the background sweep said it again) and after every restart of this
+   * module. Only a move to another state may start a new one.
+   */
+  const says = (m: ReturnType<typeof machine>, id: string, state: Active['state']) => m.background.set(id, { ...m.background.get(id)!, state })
+  const rowOf = (runs: Runs, dir: string, id: string) => runs.activity(dir).find((row) => row.id === id)
+
+  test('a view opening and closing, and a restart, keep it; a new turn moves it', async () => {
+    let clock = 1_000_000
+    const now = () => clock
+    const m = machine()
+    const dir = project()
+    const one = m.module({ now })
+    const viewer = new Watcher()
+    const run = (await one.runs.open(open(dir, null), viewer)) as Run
+    const id = run.id
+    m.records(dir, id)
+    await one.runs.settle(run)
+    says(m, id, 'working')
+    await one.runs.watch()
+    clock += 60_000
+    says(m, id, 'finished')
+    await one.runs.watch()
+    const finished = rowOf(one.runs, dir, id)
+    expect(finished).toMatchObject({ state: 'done', since: clock })
+    const since = finished!.since
+
+    /* The view closes (the page let it go): the background sweep says it now. */
+    clock += 60_000
+    one.runs.endAll()
+    await settle()
+    await one.runs.watch()
+    expect(rowOf(one.runs, dir, id)).toMatchObject({ state: 'done', since })
+
+    /* The module restarts: nothing in memory, the record says it. */
+    clock += 60_000
+    const second = m.module({ now })
+    second.runs.know(dir)
+    await second.runs.watch()
+    expect(rowOf(second.runs, dir, id)).toMatchObject({ state: 'done', since })
+
+    /* The person opens it from the Inbox: a view of it says it now, the same item. */
+    clock += 60_000
+    const look = new Watcher()
+    const again = (await second.runs.open(open(dir, id), look)) as Run
+    expect(again.state).toBe('finished')
+    expect(rowOf(second.runs, dir, id)).toMatchObject({ state: 'done', since })
+
+    /* A real change: a new turn, and it finishes again. That is news, with its own since. */
+    clock += 60_000
+    says(m, id, 'working')
+    await second.runs.watch()
+    clock += 60_000
+    says(m, id, 'finished')
+    await second.runs.watch()
+    expect(rowOf(second.runs, dir, id)).toMatchObject({ state: 'done', since: clock })
+    expect(entryOf(dir, id)?.stated).toEqual({ state: 'finished', since: clock })
+  })
+
+  test('a question keeps its since across a restart, so the host does not ask the person again', async () => {
+    let clock = 5_000_000
+    const now = () => clock
+    const m = machine()
+    const dir = project()
+    const one = m.module({ now })
+    const viewer = new Watcher()
+    const run = (await one.runs.open(open(dir, null), viewer)) as Run
+    one.runs.look(run, viewer, false)
+    const id = run.id
+    m.records(dir, id)
+    await one.runs.settle(run)
+    says(m, id, 'working')
+    await one.runs.watch()
+    clock += 1000
+    says(m, id, 'needs-you')
+    await one.runs.watch()
+    const asked = rowOf(one.runs, dir, id)
+    expect(asked).toMatchObject({ state: 'attention', since: clock })
+    one.runs.endAll()
+    await settle()
+    clock += 120_000
+    const second = m.module({ now })
+    second.runs.know(dir)
+    await second.runs.watch()
+    expect(rowOf(second.runs, dir, id)).toMatchObject({ state: 'attention', since: asked!.since })
   })
 })

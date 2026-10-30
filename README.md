@@ -477,6 +477,18 @@ project MCP server to approve). Answering, opening, a new state and the session 
 the line; a question seen is kept in the record (`looked`), so a restart does not bring it back. The
 page's own mark still says `needs-you`. `needsYou` in live.ts; the Codex module applies the same rule.
 
+**The same item is never news twice.** An Inbox item's `since` is when the conversation entered its
+state, and it stays put while the conversation stays in that state: whether a view of it says it or
+the background sweep does, and after this module restarts (the record keeps `stated`: the state and
+since when). The host takes a moved `since` for the thing having happened again — unseen, a toast and
+a chime — so only a new turn or a new question moves it. `entered` in live.ts.
+
+**Opened from the Inbox.** When the person opens one of this module's items — in the Inbox, on a toast,
+or with Next — the host comes to its place and says which item (`kehikot.opened`, protocol 2.35.0).
+The page puts that conversation on screen, as an ask to show it is: with several conversations at one
+place, the one the item is about, not whichever the place opened. On screen is looked at, so its
+"needs you" goes.
+
 **Told, not read.** Claude Code runs a command of the caller's choosing when those things happen — its
 hooks. This module attaches them to the sessions it starts, and to nothing else, by adding one thing to
 the command line: `--settings '<json>'`, which hands Claude Code *additional* settings for that one

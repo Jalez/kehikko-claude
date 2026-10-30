@@ -202,6 +202,12 @@ export interface SessionEntry {
   looked?: string
   /** Seen working or finishing at least once: it has had a turn, so a question from it is a real one. */
   turned?: true
+  /**
+   * The state this module last saw it in, and since when (ms). What its Inbox item's `since` is
+   * kept from, here and after a restart: the same state said again is the same item, never news
+   * (`entered` in live.ts). Replaced when it moves to another state.
+   */
+  stated?: { state: 'working' | 'needs-you' | 'finished'; since: number }
   /** When this module last woke it after a restart had cut it off; `told` once the person has had it on screen. */
   resumed?: { at: string; told?: boolean }
   /**
@@ -616,6 +622,7 @@ function describe(places: Places, id: string, about: { label?: string; lastActiv
     ...(was?.working ? { working: was.working } : {}),
     ...(was?.looked ? { looked: was.looked } : {}),
     ...(was?.turned ? { turned: true as const } : {}),
+    ...(was?.stated ? { stated: was.stated } : {}),
     ...(was?.resumed ? { resumed: was.resumed } : {}),
     ...(was?.cutOff ? { cutOff: was.cutOff } : {}),
   }
@@ -782,6 +789,7 @@ function tidy(raw: unknown): Places {
         working?: unknown
         looked?: unknown
         turned?: unknown
+        stated?: { state?: unknown; since?: unknown }
         resumed?: { at?: unknown; told?: unknown }
         cutOff?: { through?: unknown; open?: unknown }
       }
@@ -800,6 +808,10 @@ function tidy(raw: unknown): Places {
         ...(typeof entry.working === 'string' ? { working: entry.working } : {}),
         ...(typeof entry.looked === 'string' ? { looked: entry.looked } : {}),
         ...(entry.turned === true ? { turned: true as const } : {}),
+        ...((entry.stated?.state === 'working' || entry.stated?.state === 'needs-you' || entry.stated?.state === 'finished') &&
+        typeof entry.stated.since === 'number' && Number.isSafeInteger(entry.stated.since) && entry.stated.since >= 0
+          ? { stated: { state: entry.stated.state, since: entry.stated.since } }
+          : {}),
         ...(typeof entry.resumed?.at === 'string' ? { resumed: { at: entry.resumed.at, ...(entry.resumed.told === true ? { told: true } : {}) } } : {}),
         ...(cut ? { cutOff: cut } : {}),
       }
