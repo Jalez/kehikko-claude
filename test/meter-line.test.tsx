@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render } from '@testing-library/react'
 
 import { contextOf, emptyGauge, readLines } from '../meter.ts'
 import { CLEAR_ARMED, ContextLine, NO_SPLIT, type Command } from '../src/view/meter.tsx'
+import { readLimits } from '../usage.ts'
 
 /** The line under the session on screen: what it says, its breakdown, and Compact and Clear. */
 
@@ -91,5 +92,85 @@ describe('the context line', () => {
     expect(sent).toEqual([])
     expect(q('[data-context-said]')?.textContent).toBe(`Compact waits: ${why}`)
     expect(view.container.querySelector('[data-context-line]')?.getAttribute('data-ready')).toBe('no')
+  })
+})
+
+describe('the subscription usage beside the context', () => {
+  const NOW = new Date(2026, 9, 30, 14, 2).getTime()
+  const MONDAY_9 = new Date(2026, 10, 2, 9, 0).getTime()
+  const LATER = new Date(2026, 9, 30, 16, 30).getTime()
+  const limits = (week: number | null, hours: number | null, at = NOW) =>
+    readLimits({ rate_limits: { ...(week === null ? {} : { seven_day: { used_percentage: week, resets_at: MONDAY_9 / 1000 } }), ...(hours === null ? {} : { five_hour: { used_percentage: hours, resets_at: LATER / 1000 } }) } }, at)
+  const drawn = (value: ReturnType<typeof limits>, now = NOW) => {
+    const view = render(<ContextLine context={near} ready={null} limits={value} now={now} onCommand={() => true} />)
+    const q = (selector: string) => view.container.querySelector(selector) as HTMLElement | null
+    return { view, q }
+  }
+
+  test('wide, the week and its reset; the tooltip says both windows and where the figure comes from', () => {
+    const { q } = drawn(limits(62.4, 23.5))
+    expect(q('[data-usage-full]')?.textContent).toBe('Week 62% · resets Mon 09:00')
+    expect(q('[data-usage]')?.getAttribute('data-usage')).toBe('ok')
+    const title = q('[data-usage]')?.getAttribute('title') ?? ''
+    expect(title).toContain('This week: 62% used, resets Mon 09:00')
+    expect(title).toContain('5-hour session: 23% used, resets 16:30')
+    expect(title).toContain('status line')
+    expect(q('[data-usage]')?.getAttribute('aria-label')).toContain('This week: 62% used')
+  })
+
+  test('it narrows by the line’s width: the full line from 560 pixels, “W 62%” from 300, a small meter under it', () => {
+    const { q } = drawn(limits(62, 23))
+    expect(q('[data-usage-full]')?.className).toContain('hidden')
+    expect(q('[data-usage-full]')?.className).toContain('@[560px]:inline')
+    expect(q('[data-usage-short]')?.textContent).toBe('W 62%')
+    expect(q('[data-usage-short]')?.className).toContain('@[300px]:inline')
+    expect(q('[data-usage-short]')?.className).toContain('@[560px]:hidden')
+    expect(q('[data-usage-bar]')?.getAttribute('data-usage-bar')).toBe('62')
+    expect(q('[data-usage-bar]')?.className).toContain('@[300px]:hidden')
+    expect(q('[data-usage-tiny]')?.textContent).toBe('62%')
+  })
+
+  test('amber near the limit and red at it, and said in words, never by colour alone', () => {
+    const amber = drawn(limits(85, 10))
+    expect(amber.q('[data-usage]')?.getAttribute('data-usage')).toBe('near')
+    expect(amber.q('[data-usage-full]')?.textContent).toContain('near the limit')
+    expect(amber.q('[data-usage-full]')?.className).toContain('needs-you')
+    expect(amber.q('[data-usage-short]')?.textContent).toBe('W 85%!')
+    expect(amber.q('[data-usage-tiny]')?.textContent).toBe('85%!')
+    amber.view.unmount()
+    const red = drawn(limits(100, 10))
+    expect(red.q('[data-usage]')?.getAttribute('data-usage')).toBe('at')
+    expect(red.q('[data-usage-full]')?.textContent).toContain('limit reached')
+    expect(red.q('[data-usage-full]')?.className).toContain('text-destructive')
+    expect(red.q('[data-usage-bar] span')?.className).toContain('bg-destructive')
+  })
+
+  test('the five-hour window joins the line when it is near its own limit', () => {
+    const { q } = drawn(limits(40, 92))
+    expect(q('[data-usage-full]')?.textContent).toBe('Week 40% · resets Mon 09:00 · 5h 92%')
+  })
+
+  test('an old figure says when it is from', () => {
+    const at = NOW - 10 * 60_000
+    const { q } = drawn(limits(62, 23, at))
+    expect(q('[data-usage]')?.getAttribute('data-usage-stale')).toBe('yes')
+    expect(q('[data-usage-full]')?.textContent).toBe('Week 62% · resets Mon 09:00 · as of 13:52')
+    expect(q('[data-usage-short]')?.textContent).toBe('W 62% · as of 13:52')
+  })
+
+  test('nothing known — an API-key login, an older Claude Code — draws nothing, not a zero', () => {
+    const none = drawn(null)
+    expect(none.q('[data-usage]')).toBeNull()
+    expect(none.view.container.textContent).not.toContain('Week')
+    none.view.unmount()
+    /* Both windows have reset since the report. */
+    expect(drawn(limits(62, 23), MONDAY_9 + 1).q('[data-usage]')).toBeNull()
+  })
+
+  test('the usage stays while the line says a sentence in place of the context', () => {
+    const { q } = drawn(limits(62, 23))
+    fireEvent.click(q('[data-command="clear"]')!)
+    expect(q('[data-context-said]')?.textContent).toBe(CLEAR_ARMED)
+    expect(q('[data-usage-full]')?.textContent).toBe('Week 62% · resets Mon 09:00')
   })
 })

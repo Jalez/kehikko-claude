@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 
 import { contextWords, costSaid, percentOf, tokensSaid, type Context } from '../../meter.ts'
+import { limitsWords, type Level, type Limits } from '../../usage.ts'
 import { Button } from '@/components/ui/button'
 
 /**
@@ -49,6 +50,58 @@ function Bar({ context, wide = false }: { context: Context; wide?: boolean }) {
       <span className={`absolute inset-y-0 left-0 rounded-full ${context.soon ? 'bg-[var(--needs-you)]' : 'bg-foreground/60'}`} style={{ width: `${pct}%` }} />
       {/* Where Claude Code compacts by itself: a tick, named in words wherever it matters. */}
       <span className="bg-foreground/50 absolute inset-y-0 w-px" style={{ left: `${at}%` }} />
+    </span>
+  )
+}
+
+const LEVEL_FILL: Record<Level, string> = { ok: 'bg-foreground/60', near: 'bg-[var(--needs-you)]', at: 'bg-destructive' }
+const LEVEL_TEXT: Record<Level, string> = { ok: '', near: 'text-[var(--needs-you)]', at: 'text-destructive' }
+/** How often the usage meter looks at the clock again: to mark a figure stale, and to drop a window that has reset. */
+const TICK_MS = 30_000
+
+/**
+ * The subscription allowance, beside the context: how much of the week is used, as Claude Code last
+ * reported it in a session's status line (usage.ts). Nothing at all when nothing is known — an
+ * API-key login, an older Claude Code, no report yet — never a zero.
+ *
+ * Wide, `Week 62% · resets Mon 09:00`; from 300 pixels down to the full line's 560, `W 62%`; under
+ * 300, a small meter with the share beside it. Near the limit it turns amber and at it red, and
+ * says so in words too (the full line's "near the limit", and a "!" in the short forms).
+ */
+export function UsageMeter({ limits, now: fixed }: { limits: Limits | null; now?: number }) {
+  const [tick, setTick] = useState(() => Date.now())
+  useEffect(() => {
+    if (fixed !== undefined || !limits) return
+    const on = setInterval(() => setTick(Date.now()), TICK_MS)
+    return () => clearInterval(on)
+  }, [fixed, limits])
+  const now = fixed ?? tick
+  const words = limitsWords(limits, now)
+  if (!words) return null
+  const mark = words.level === 'ok' ? '' : '!'
+  return (
+    <span
+      className={`text-muted-foreground flex shrink-0 items-center gap-1 tabular-nums ${words.stale ? 'opacity-80' : ''}`}
+      tabIndex={0}
+      role="img"
+      aria-label={words.title.replace(/\n/g, '. ')}
+      title={words.title}
+      data-usage={words.level}
+      data-usage-stale={words.stale ? 'yes' : undefined}
+    >
+      <span aria-hidden className="text-border">|</span>
+      <span aria-hidden className="bg-muted relative inline-block h-1.5 w-8 shrink-0 overflow-hidden rounded-full @[300px]:hidden" data-usage-bar={Math.floor(words.used)}>
+        <span className={`absolute inset-y-0 left-0 rounded-full ${LEVEL_FILL[words.level]}`} style={{ width: `${Math.min(100, words.used)}%` }} />
+      </span>
+      <span aria-hidden className={`@[300px]:hidden ${LEVEL_TEXT[words.level]}`} data-usage-tiny>
+        {`${Math.floor(words.used)}%${mark}`}
+      </span>
+      <span aria-hidden className={`hidden @[300px]:inline @[560px]:hidden ${LEVEL_TEXT[words.level]}`} data-usage-short>
+        {`${words.short}${mark}${words.stale ? ` · ${words.stale}` : ''}`}
+      </span>
+      <span aria-hidden className={`hidden truncate @[560px]:inline ${LEVEL_TEXT[words.level]}`} data-usage-full>
+        {`${words.full}${words.hoursNear ? ` · ${words.hoursNear}` : ''}`}
+      </span>
     </span>
   )
 }
@@ -115,6 +168,8 @@ export function ContextLine({
   onCommand,
   answer = null,
   armedMs = ARMED_MS,
+  limits = null,
+  now,
 }: {
   context: Context | null
   ready: string | null
@@ -122,6 +177,10 @@ export function ContextLine({
   /** The server's answer to the last press, when it did not type it. */
   answer?: { which: Command; ok: boolean; why?: string; at: number } | null
   armedMs?: number
+  /** The subscription allowance (usage.ts), drawn beside the context; null draws nothing. */
+  limits?: Limits | null
+  /** The clock the usage meter reads, for tests. */
+  now?: number
 }) {
   const [open, setOpen] = useState(false)
   const [armed, setArmed] = useState(false)
@@ -227,6 +286,7 @@ export function ContextLine({
             ) : null}
           </button>
         )}
+        <UsageMeter limits={limits} now={now} />
         <span className="flex shrink-0 gap-1" title={ready ?? undefined}>
           <Button
             size="sm"

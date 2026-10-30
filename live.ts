@@ -12,6 +12,7 @@ import { mintTicket, sameTicket } from 'kehikot-module-protocol/serve'
 import { emptyPrompt, promptAfter, typedByPerson, type Prompt } from './input.ts'
 import { Gauges } from './gauges.ts'
 import { contextOf, readStatus, type Context, type Status } from './meter.ts'
+import { limitsNow, mergeLimits, readLimits, type Limits } from './usage.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, sortedParts, type Kehikko } from './place.ts'
 import { cutOffs, cutOffWords, midTurn, movedOn, type CutOff } from './cutoff.ts'
 import { PROGRAM, headOf, home, recordFile, sessionName, type Active, type ActiveStatus, type Able, type Program, type Running, type State } from './program.ts'
@@ -1218,6 +1219,8 @@ export class Runs {
   private readonly gauges = new Gauges()
   /** What each session's own status line last said (statusline.sh), by session: the newest few hundred. */
   private readonly statuses = new Map<string, Status>()
+  /** The subscription allowance, the newest any session's status line said (usage.ts): the account's, so one for all. In memory only. */
+  private heardLimits: Limits | null = null
   /** The sessions a status line report was not believed for, so that it is logged once. */
   private readonly unbelieved = new Set<string>()
   /** What each run's viewers were last told of its context and whether Compact and Clear can be pressed. */
@@ -1810,7 +1813,7 @@ export class Runs {
     const session = run.settled
     const context = session ? await this.contextOf(run.projectPath, session).catch(() => null) : null
     if (run.ended || run.settled !== session) return
-    const said = { session: session ?? run.id, context, ready: this.readiness(run) }
+    const said = { session: session ?? run.id, context, ready: this.readiness(run), limits: this.limits() }
     const text = JSON.stringify(said)
     if (viewer) viewer.say({ meter: said })
     const was = this.metered.get(run)
@@ -1872,10 +1875,20 @@ export class Runs {
     this.statuses.delete(session)
     this.statuses.set(session, status)
     while (this.statuses.size > 512) this.statuses.delete(this.statuses.keys().next().value!)
+    const was = JSON.stringify(this.limits())
+    this.heardLimits = mergeLimits(this.heardLimits, readLimits(raw, status.at), status.at)
+    /* The allowance is the account's: a new figure from any session is said under every session on screen. */
+    const allowance = JSON.stringify(this.limits()) !== was
     for (const run of this.runs.values()) {
-      if (run.what === 'session' && !run.ended && (run.settled === session || run.id === session)) void this.meter(run)
+      if (run.what !== 'session' || run.ended) continue
+      if (run.settled === session || run.id === session || (allowance && run.viewers.size > 0)) void this.meter(run)
     }
     return true
+  }
+
+  /** The subscription allowance as it stands now (usage.ts), or null when nothing is known. */
+  limits(): Limits | null {
+    return limitsNow(this.heardLimits, this.now())
   }
 
   /**

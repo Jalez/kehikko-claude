@@ -319,6 +319,22 @@ does (20 000 below that). That warning counts against the window less the room f
 **It updates as the transcript grows**: the session on screen is looked at every 2.5 s (a `stat`;
 what was appended, when it grew), and what its status line posts is said at once.
 
+**The subscription allowance** is beside the context: *Week 62% · resets Mon 09:00*, then *W 62%*
+under 560 pixels and a small meter with its share under 300. Its tooltip says both windows — the
+week and the five-hour session — with their resets, and where the figure came from. It is Claude
+Code's own `rate_limits` from the status line JSON (`five_hour` and `seven_day`, each a
+`used_percentage` and a `resets_at`, documented at code.claude.com/docs/en/statusline), which
+`statusline.sh` already posts; nothing is polled and no credential is read (`usage.ts`). From 80% it
+is amber and says *near the limit*, from 95% red and *at the limit* (*limit reached* at 100), and the
+short forms carry a "!": never colour alone. The five-hour window joins the line when it is near its
+own limit. The allowance is the account's, so every session on screen shows the newest figure, kept
+in this server's memory: a later window replaces the one held, and within a window a smaller share
+is an older report (an idle session repeating itself) and is passed over. A figure older than five
+minutes says *as of 14:02*; a window whose reset has passed is dropped. **Nothing is shown** when
+nothing is known: Claude Code sends it only to claude.ai Pro and Max subscribers, after a session's
+first request, and only to a status line — so only for a session this module started while the
+person has a status line of their own (see above).
+
 **Compact** types Claude Code's own `/compact` at the session's prompt, and **Clear** its `/clear`,
 exactly as a person types them — through the pty the person's keys go to (for a background session,
 its `attach`), over the page's own socket. Never anything else, and:
@@ -821,7 +837,7 @@ itself honours) — the list of a project's sessions, their first prompt, and wh
 | `POST /api/assign` | "Make this the kehikko’s own": the record says the conversation on screen is its place's own. Ticketed |
 | `POST /api/detach` | "Disconnect from this kehikko": take a session off a place; the session is not ended and is listed under `others` with `unplaced`. Ticketed |
 | `POST /api/showing` | what a page has on screen: its project, its place, and whether its kehikko has a Claude container — what `/kehikot-here` assigns to. Ticketed; forgotten when the page's feed closes |
-| `POST /api/status?session` | a session's own status line (`statusline.sh`, from the plugin a session started here is given): Claude Code's status line JSON, for the context meter. Carries the session's place token in `x-module-ticket`, and is believed only for that token's conversation; only numbers, the session and the model's name are kept. 204 or one 403 that does not say why |
+| `POST /api/status?session` | a session's own status line (`statusline.sh`, from the plugin a session started here is given): Claude Code's status line JSON, for the context meter and the subscription allowance. Carries the session's place token in `x-module-ticket`, and is believed only for that token's conversation; only numbers, the session and the model's name are kept (the allowance's shares and resets among the numbers). 204 or one 403 that does not say why |
 | `POST /api/context?event&session` | a session's own hook (`context.sh`, from the plugin a session started here is given): what it is told of its place and its kehikko's modules (`hookSpecificOutput`), or 204 for nothing; and the conversation filed under the place it was started at when it belongs nowhere yet. Carries the session's place token in `x-module-ticket`; nothing of the prompt |
 | `POST /api/here?session&say` | `/kehikot-here`, from the skill: assign a conversation Claude Code lists as running to the place on screen in its project. No ticket (the conversation has none); answers plain text beginning `Kehikot:` |
 | `GET /kehikot/skills/kehikot-here.md` | the skill's SKILL.md, as `text/markdown` (protocol 2.5.0, `declares.skills`). Public: it holds nothing of anybody's |
@@ -892,6 +908,7 @@ already running elsewhere and how one of those is opened without starting anothe
 | `live.ts` | the running sessions and what each is doing, the headless emulators, the socket and its fence, the notices, and the two things ended without anybody choosing |
 | `tell.sh` | what a session's program runs to say what it is doing: one request to this server, and nothing else |
 | `meter.ts`, `gauges.ts` | how full a session's context is, its model, cost and compactions: from its transcript (read as it grows) and its own status line. `meter.ts` is pure; shared by the page and the server |
+| `usage.ts` | the subscription allowance (week and five-hour windows) from the status line's `rate_limits`: read, merged across sessions, said in words. Pure; shared by the page and the server |
 | `statusline.sh` | a session's status line: the person's own, unchanged, then its JSON to this server |
 | `context.ts`, `context.sh` | what a session started here is told of its place and its kehikko's modules, at its start and when they change, and its filing under the place it was started at |
 | `doors.ts` | the HTTP doors and the MCP tool |

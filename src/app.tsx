@@ -7,6 +7,7 @@ import { Cover, coverFor, useFocus, useHost, useServerStanding, type CoverState 
 import type { Listing } from '../doors.ts'
 import type { Command, Elsewhere } from '../live.ts'
 import type { Context } from '../meter.ts'
+import type { Limits } from '../usage.ts'
 import { ID, NOTICES } from '../manifest.ts'
 import type { State } from '../program.ts'
 import { api as realApi, type Api } from './api.ts'
@@ -271,6 +272,8 @@ export function Sessions({
   const [contexts, setContexts] = useState<Record<string, Context | null>>({})
   /** Why Compact and Clear cannot be pressed for each view's session now, by view number; null when they can. */
   const [readies, setReadies] = useState<Record<number, string | null>>({})
+  /** The subscription allowance as the server last said it (usage.ts): the account's, the same under every session. */
+  const [limits, setLimits] = useState<Limits | null>(null)
   /** The server's answer to the last Compact or Clear pressed in each view. */
   const [commanded, setCommanded] = useState<Record<number, { which: Command; ok: boolean; why?: string; at: number }>>({})
   /** What sends Compact or Clear through the socket of the view on screen (`TerminalView`). */
@@ -506,6 +509,7 @@ export function Sessions({
       const { session, context, ready } = heard.meter
       setContexts((all) => ({ ...all, [session]: context }))
       setReadies((all) => ({ ...all, [one.n]: ready }))
+      if (heard.meter.limits !== undefined) setLimits(heard.meter.limits)
     }
     if (heard.commanded) setCommanded((all) => ({ ...all, [one.n]: { ...heard.commanded!, at: Date.now() } }))
     if (heard.elsewhere) {
@@ -889,6 +893,7 @@ export function Sessions({
           context={Object.hasOwn(contexts, view.session) ? (contexts[view.session] ?? null) : (here?.sessions.find((one) => one.id === view.session)?.context ?? null)}
           ready={Object.hasOwn(readies, view.n) ? (readies[view.n] ?? null) : 'It is not known yet whether Claude is waiting at its prompt.'}
           answer={commanded[view.n] ?? null}
+          limits={limits}
           onCommand={(which) => commands.current?.(which) ?? false}
         />
       )}
