@@ -21,7 +21,7 @@ import { removePlugin, sessionPlugin, statusScriptIn, writeComposer, writeOwnSta
 import { freshToken, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, removeConfig, sweepKept, writeConfig, writeKeptConfig, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
 import { AGENT_ID, AGENT_TYPE, EVENT_IDS, FOUND_MOST, isResearch, subagentMeta, type Found, type Told } from './research.ts'
-import { context, type HookAnswer, type Started } from './context.ts'
+import { context, toldWords, type HookAnswer, type Said, type Started } from './context.ts'
 
 /**
  * The sessions that are running, and the socket a page watches one through.
@@ -2146,6 +2146,27 @@ export class Runs {
         later: (run, ms) => setTimeout(run, ms).unref?.(),
       },
     )
+  }
+
+  /** What the conversation behind a token was last told (context.ts), in words; null when nothing is kept. */
+  toldOf(token: string): Said | null {
+    if (!PLACE_TOKEN.test(token)) return null
+    return toldWords(join(keptDirOf(token, this.options.configBase), 'told.json'))
+  }
+
+  /**
+   * What a conversation of this project was last told, for the page's "What this conversation was
+   * told": by the token of the run holding it, else the token the record gave it. Null when it was
+   * told nothing this module kept (started elsewhere, or before this was kept).
+   */
+  toldFor(projectPath: string | null, session: string): Said | null {
+    if (!this.program.isId(session)) return null
+    const run = [...this.runs.values()].find((one) => one.what === 'session' && !one.ended && (one.settled ?? one.id) === session && one.token)
+    if (run?.token) return this.toldOf(run.token)
+    const root = projectRoot(projectPath)
+    const read = root.ok ? readPlaces(root.value) : null
+    const token = read?.ok && Object.hasOwn(read.value.sessions, session) ? read.value.sessions[session]?.token : undefined
+    return token ? this.toldOf(token) : null
   }
 
   /**
