@@ -287,8 +287,8 @@ reset it?"*. Nothing is typed into the conversation to know it:
    compaction compacted to, which is the figure until the next request. A `cost-state` row is the
    cost Claude Code wrote when the session was cleared or its process stopped; it is shown, marked
    *last stop*, only when no request came after it.
-2. **The session's own status line**, for a session this module starts, when the person has a
-   status line of their own. Claude Code hands a status
+2. **The session's own status line**, for every session this module starts (foreground, `--bg`
+   and woken; see below for one with no status line of the person's). Claude Code hands a status
    line command its JSON (`context_window.context_window_size`, `cost.total_cost_usd`,
    `model.display_name`, …); the session's `--settings` names `statusline.sh` in its plugin as its
    status line, and that runs **the person's own status line command first and prints it byte for
@@ -300,9 +300,29 @@ reset it?"*. Nothing is typed into the conversation to know it:
    written beside the script when the session starts or wakes; their `padding` and refresh are kept.
    Nothing is written into `~/.claude` or the project. One theirs that cannot be run that way (an
    `args` list, another shell) is left alone: that session is started without, and read from its
-   transcript. **A person with no status line is given none**: even an empty one costs a row under
-   Claude Code's prompt (measured), a change to their terminal for nothing they asked for. Their
-   sessions are read from the transcript alone: no live cost, and the window from the model.
+   transcript. **A person with no status line of their own is given the module's** — the session
+   is the module's, so its status line row is too — and `statusline.sh` prints a line of its own
+   (`statusline-line.mjs`, run by the runtime this module runs under, from the plugin folder):
+
+       ctx 42% · week 62% (resets Mon 09:00) · 5h 18% · Opus 5.5
+
+   The same figures as the footer: `context_window.used_percentage`, the weekly window with its
+   reset, the five-hour one (its reset too when near its limit), and the model's name. One line;
+   too wide for the terminal (`COLUMNS`, which Claude Code sets for the command) the model goes
+   first, then the reset, then whole parts from the right. *near limit* (80%), *at limit* (95%) and
+   *limit reached* are said in words, amber or red beside them; no colour under `NO_COLOR`. The JSON
+   is posted here as for anybody's, so the footer's allowance meter works for everyone.
+   **Status line in sessions** (View menu, and Kehikot's settings for the module; on unless turned
+   off; a person's) turns it off for the project: a person with no status line is then given none,
+   as before 1.12, and their sessions are read from the transcript alone (no live cost, the window
+   from the model). It is read at each start and wake: a woken background session keeps the
+   `--settings` it was first started with (they are its saved options), so one started with the
+   setting off and no status line of the person's gets the module's line only when it is next
+   started anew; one started with it on and then turned off prints nothing from its next wake.
+   What Claude Code 2.1.314 does with a status line's output: trimmed, blank lines dropped, each
+   line a row, dimmed and cut at the terminal's width; an empty one shows nothing (in its default
+   rendering the row then goes, in fullscreen a blank row is kept), and any configured status line
+   hides the *? for shortcuts* hint.
    A session this module did not start has only the transcript: its window is then the model's
    (Claude Code 2.1.310's catalog: 1M for the Opus 4.7-and-later, Sonnet 5 and Haiku 5.5 families,
    200k for the rest), and a session already past 200k is on 1M; a `[1m]` choice is not written in
@@ -332,8 +352,8 @@ in this server's memory: a later window replaces the one held, and within a wind
 is an older report (an idle session repeating itself) and is passed over. A figure older than five
 minutes says *as of 14:02*; a window whose reset has passed is dropped. **Nothing is shown** when
 nothing is known: Claude Code sends it only to claude.ai Pro and Max subscribers, after a session's
-first request, and only to a status line — so only for a session this module started while the
-person has a status line of their own (see above).
+first request, and only to a status line — so only for a session this module started (see above;
+with **Status line in sessions** off, only while the person has a status line of their own).
 
 **Compact** types Claude Code's own `/compact` at the session's prompt, and **Clear** its `/clear`,
 exactly as a person types them — through the pty the person's keys go to (for a background session,
@@ -527,7 +547,7 @@ switch kehikko. A line filed under the session's epic is the most that exists.
   and a resumed one `claude --resume <uuid>`, in the project's folder — followed, for a copy that can
   take them, by `--name <the place>` and by `--settings` and the hooks above, which is the whole
   command. The settings hold hooks and the status line (`statusline.sh`, which prints the person's
-  own) and nothing else: nothing about permissions, models or tools. The only other command lines there are:
+  own, or with none of theirs the module's line) and nothing else: nothing about permissions, models or tools. The only other command lines there are:
   `claude --help`, once per binary; `claude agents --json`, which reads; and `claude attach <handle>`,
   with the handle Claude Code itself printed, checked to be one word that cannot be a flag.
 - It runs the conversations it starts or resumes in the background (`claude --bg`, see above). It
@@ -831,7 +851,7 @@ itself honours) — the list of a project's sessions, their first prompt, and wh
 | `GET /api/place?projectPath&key&projectId` | what a place holds: its sessions, the project's others, what is running, whether the program is installed. **Ticketed**, since it says what somebody worked on |
 | `POST /api/rekey` | bring the entries an older release filed under a kehikko's row number across to its key. Ticketed; the only thing that migrates |
 | `POST /api/end` | end a running session, because a person chose that one (one in the background is stopped, its conversation kept). Ticketed |
-| `GET`/`POST /api/settings?projectPath` | the project's **Resume conversations cut off by a restart** (`resumeCutOff`, on unless turned off), read and changed by a person's toggle. Ticketed; no MCP tool reads or changes it |
+| `GET`/`POST /api/settings?projectPath` | the project's **Resume conversations cut off by a restart** (`resumeCutOff`) and **Status line in sessions** (`statusLine`), each on unless turned off, read and changed (one or both keys at a time) by a person's toggle. Ticketed; no MCP tool reads or changes it |
 | `GET`/`POST /api/kehikot/settings` | the same setting for the host (protocol 2.15.0, `settings.get` / `settings.set`), for a project the host holds, in the same file and format. `resumeCutOff` is `personOnly`: a change is taken only with the page's ticket or a pass the host vouches for (asked of `KEHIKOT_ORIGINS` only); an agent is refused |
 | `POST /api/restart` | end a running session whose project's folder was renamed under it, so its views resume it in the new folder, because a person pressed that. Refused while it is working. Ticketed |
 | `POST /api/assign` | "Make this the kehikko’s own": the record says the conversation on screen is its place's own. Ticketed |
@@ -909,7 +929,8 @@ already running elsewhere and how one of those is opened without starting anothe
 | `tell.sh` | what a session's program runs to say what it is doing: one request to this server, and nothing else |
 | `meter.ts`, `gauges.ts` | how full a session's context is, its model, cost and compactions: from its transcript (read as it grows) and its own status line. `meter.ts` is pure; shared by the page and the server |
 | `usage.ts` | the subscription allowance (week and five-hour windows) from the status line's `rate_limits`: read, merged across sessions, said in words. Pure; shared by the page and the server |
-| `statusline.sh` | a session's status line: the person's own, unchanged, then its JSON to this server |
+| `statusline.sh` | a session's status line: the person's own, unchanged (or with none of theirs, `statusline-line.mjs`), then its JSON to this server |
+| `statusline-line.mjs` | the module's own status line, from Claude Code's JSON: context, the weekly and five-hour allowance, the model; fitted to the terminal's width. Plain JavaScript, for Bun or Node; types in `statusline-line.d.mts` |
 | `context.ts`, `context.sh` | what a session started here is told of its place and its kehikko's modules, at its start and when they change, and its filing under the place it was started at |
 | `doors.ts` | the HTTP doors and the MCP tool |
 | `here.ts` | `/kehikot-here`: which conversation is believed, which place it goes to, and what is said |

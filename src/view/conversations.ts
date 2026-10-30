@@ -70,6 +70,14 @@ export function resumeToggle(checked: boolean | null): HeaderItemInput[] {
   return checked === null ? [] : [{ kind: 'toggle', id: RESUME, label: RESUME_LABEL, icon: 'refresh', checked }]
 }
 
+export const STATUS_LINE = 'status-line'
+export const STATUS_LINE_LABEL = 'Status line in sessions'
+
+/** "Status line in sessions", for the View menu beside it; nothing while the setting is not known. Takes effect at a session's next start or wake. */
+export function statusLineToggle(checked: boolean | null): HeaderItemInput[] {
+  return checked === null ? [] : [{ kind: 'toggle', id: STATUS_LINE, label: STATUS_LINE_LABEL, checked }]
+}
+
 /** What the module types into a conversation to connect it. */
 export const HERE_COMMAND = '/kehikot-here'
 

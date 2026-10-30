@@ -17,7 +17,7 @@ import { isKehikkoKey, kehikkoOf, placeKey, sortedParts, type Kehikko } from './
 import { cutOffs, cutOffWords, midTurn, movedOn, type CutOff } from './cutoff.ts'
 import { PROGRAM, headOf, home, recordFile, sessionName, type Active, type ActiveStatus, type Able, type Program, type Running, type State } from './program.ts'
 import { PLACE_TOKEN, assign, attach, born, byToken, follow, homeOf, markSession, markSessions, note, ownOf, projectRoot, readPlaces, readSettings, recordedIds, sighted, tokenFor, type NamedPlace, type PlaceEntry, type Places, type SessionEntry } from './record.ts'
-import { removePlugin, sessionPlugin, statusScriptIn, writeOwnStatusLine } from './skills.ts'
+import { removePlugin, sessionPlugin, statusScriptIn, writeComposer, writeOwnStatusLine } from './skills.ts'
 import { freshToken, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, removeConfig, sweepKept, writeConfig, writeKeptConfig, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
 import { AGENT_ID, AGENT_TYPE, EVENT_IDS, FOUND_MOST, isResearch, subagentMeta, type Found, type Told } from './research.ts'
@@ -1152,6 +1152,8 @@ export interface RunsOptions {
   fetch?: typeof fetch
   /** Where `--mcp-config` files are written; this user's temporary folder by default. */
   configBase?: string
+  /** The program a session's status line runs this module's own line with (`statusline-line.mjs`): this process's own runtime by default. */
+  runtime?: string
 }
 
 /**
@@ -1497,13 +1499,26 @@ export class Runs {
 
   /**
    * The settings that give a session started here its status line (`statusline.sh` in its
-   * plugin), with the person's own command written beside it for the script to run first — or
-   * null, and the session is started without, when theirs is one that cannot be run that way or
-   * the command could not be written (their line would be lost).
+   * plugin), with the person's own command written beside it for the script to run first, or —
+   * with none of theirs and "Status line in sessions" on — this module's runtime, for the script
+   * to print the module's own line (`statusline-line.mjs`). Null, and the session is started
+   * without, when theirs is one that cannot be run that way, when they have none and the setting is
+   * off, or when the plugin could not be written (their line would be lost). Both files are written
+   * either way, so a woken session whose saved settings already hold the script follows the setting
+   * as it is now.
    */
   private statusLineFor(projectPath: string, plugin: string): Record<string, unknown> | null {
-    const made = this.program.statusLine?.(projectPath, statusScriptIn(plugin))
-    if (!made) return null
+    const compose = readSettings(projectPath).statusLine
+    const made = this.program.statusLine?.(projectPath, statusScriptIn(plugin), undefined, compose) ?? null
+    const composing = made !== null && made.own === null
+    if (!writeComposer(plugin, composing ? (this.options.runtime ?? process.execPath) : null)) {
+      this.log('claude: the session’s own status line could not be written; it starts without one, and its context is read from its transcript')
+      return null
+    }
+    if (!made) {
+      writeOwnStatusLine(plugin, null)
+      return null
+    }
     if (!writeOwnStatusLine(plugin, made.own)) {
       this.log('claude: the session’s status line could not be written; it starts with the person’s own, and its context is read from its transcript')
       return null

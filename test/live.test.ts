@@ -9,7 +9,7 @@ import { CLOSED, Runs, activityRows, sameProject, TELL_ENV, TICKET, fenced, head
 import { placeKey } from '../place.ts'
 import { RESEARCH_LINE } from '../context.ts'
 import { PROGRAM, SUBAGENT_EVENTS, readActive, type Active, type Program, type Recorded } from '../program.ts'
-import { assign, attach, detach, ignore, readPlaces, sessionsAt, type NamedPlace } from '../record.ts'
+import { assign, attach, detach, ignore, readPlaces, sessionsAt, writeSettings, type NamedPlace } from '../record.ts'
 import { freshToken, keptDirOf, writeKeptPlace, type DoorsAsked, type HostPlace, type ModuleOn, type SessionDoor } from '../doorConfig.ts'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { skillText } from '../skills.ts'
@@ -184,7 +184,7 @@ class Watcher implements Viewer {
 /** Long enough for the emulator's write queue and the promises behind an open to have run. */
 const settle = () => new Promise((done) => setTimeout(done, 25))
 
-function world(options: { found?: string | null; able?: boolean; tells?: boolean; lists?: boolean; names?: boolean; configures?: boolean; plugins?: boolean; doors?: (asked: DoorsAsked) => Promise<SessionDoor[] | null>; place?: (asked: DoorsAsked) => Promise<HostPlace | null>; fetch?: typeof fetch; configBase?: string; asking?: 'fails'; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number; watchEvery?: number | null; subagentOf?: RunsOptions['subagentOf'] } = {}) {
+function world(options: { found?: string | null; able?: boolean; tells?: boolean; lists?: boolean; names?: boolean; configures?: boolean; plugins?: boolean; doors?: (asked: DoorsAsked) => Promise<SessionDoor[] | null>; place?: (asked: DoorsAsked) => Promise<HostPlace | null>; fetch?: typeof fetch; configBase?: string; runtime?: string; asking?: 'fails'; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number; watchEvery?: number | null; subagentOf?: RunsOptions['subagentOf'] } = {}) {
   const logged: string[] = []
   const ptys: FakePty[] = []
   /* What the stand-in program holds a record for, by folder. */
@@ -231,6 +231,7 @@ function world(options: { found?: string | null; able?: boolean; tells?: boolean
     ...(options.place ? { place: options.place } : {}),
     ...(options.fetch ? { fetch: options.fetch } : {}),
     ...(options.configBase ? { configBase: options.configBase } : {}),
+    ...(options.runtime ? { runtime: options.runtime } : {}),
     ...(options.subagentOf ? { subagentOf: options.subagentOf } : {}),
     screen: headless,
     spawn: (file, args, opts) => {
@@ -2974,11 +2975,36 @@ describe('the context meter, from the transcript and the session’s own status 
     }
   })
 
-  test('a person with no status line is given none: their terminal is not changed, and the context is read from the transcript', async () => {
+  test('a person with no status line is given the module’s own: the session is the module’s, and its status line row is the module’s to use', async () => {
     const dir = project()
     const base = mkdtempSync(join(tmpdir(), 'kehikko-claude-plugin-'))
     made.push(base)
     rmSync(join(CONFIG, 'settings.json'), { force: true })
+    const w = world({ tells: true, port: 4999, configures: true, plugins: true, doors: async () => [], configBase: base, runtime: '/the/runtime' })
+    const run = await w.runs.open(ask(dir, null), new Watcher())
+    if (!isRun(run)) throw new Error('not opened')
+    const args = w.ptys[0]!.args
+    const settings = JSON.parse(args[args.indexOf('--settings') + 1]!) as Record<string, unknown>
+    expect(settings.hooks).toBeDefined()
+    expect(settings.statusLine).toEqual({ type: 'command', command: `/bin/sh '${run.plugin}/statusline.sh'`, padding: 0 })
+    /* No command of theirs to run first; the runtime that prints the module's line, and the line itself, beside the script. */
+    expect(existsSync(join(run.plugin!, 'kehikot', 'statusline'))).toBe(false)
+    expect(readFileSync(join(run.plugin!, 'kehikot', 'compose'), 'utf8')).toBe('/the/runtime')
+    expect(existsSync(join(run.plugin!, 'statusline-line.mjs'))).toBe(true)
+    /* What it posts is believed as before. */
+    w.records(dir, B, 'started here')
+    w.ptys[0]!.says('hi\r\n')
+    await settle()
+    expect(w.runs.heardStatus(B, run.token, { session_id: B, model: { id: 'claude-opus-5-5' }, rate_limits: { seven_day: { used_percentage: 62, resets_at: 10_000_000_000 } } })).toBe(true)
+    expect((w.runs.limits()?.week as { used: number } | null)?.used).toBe(62)
+  })
+
+  test('“Status line in sessions” off: a person with no status line is given none, as before, and the context is read from the transcript', async () => {
+    const dir = project()
+    const base = mkdtempSync(join(tmpdir(), 'kehikko-claude-plugin-'))
+    made.push(base)
+    rmSync(join(CONFIG, 'settings.json'), { force: true })
+    writeSettings(dir, { statusLine: false })
     const w = world({ tells: true, port: 4999, configures: true, plugins: true, doors: async () => [], configBase: base })
     const run = await w.runs.open(ask(dir, null), new Watcher())
     if (!isRun(run)) throw new Error('not opened')
@@ -2987,12 +3013,35 @@ describe('the context meter, from the transcript and the session’s own status 
     expect(settings.hooks).toBeDefined()
     expect(settings).not.toHaveProperty('statusLine')
     expect(existsSync(join(run.plugin!, 'kehikot', 'statusline'))).toBe(false)
+    expect(existsSync(join(run.plugin!, 'kehikot', 'compose'))).toBe(false)
     /* The transcript still says it. */
     w.records(dir, B, 'started here')
     transcript(dir, B, [usage(40_000)])
     w.ptys[0]!.says('hi\r\n')
     await settle()
     expect((await w.runs.contextOf(dir, B))?.tokens).toBe(41_240)
+  })
+
+  test('the person’s own status line, with the setting off too, is theirs and still reports', async () => {
+    const dir = project()
+    const base = mkdtempSync(join(tmpdir(), 'kehikko-claude-plugin-'))
+    made.push(base)
+    writeFileSync(join(CONFIG, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'echo mine' } }))
+    try {
+      for (const on of [true, false]) {
+        writeSettings(dir, { statusLine: on })
+        const w = world({ tells: true, port: 4999, configures: true, plugins: true, doors: async () => [], configBase: base })
+        const run = await w.runs.open(ask(dir, null), new Watcher())
+        if (!isRun(run)) throw new Error('not opened')
+        const args = w.ptys[0]!.args
+        expect(JSON.parse(args[args.indexOf('--settings') + 1]!).statusLine).toEqual({ type: 'command', command: `/bin/sh '${run.plugin}/statusline.sh'` })
+        expect(readFileSync(join(run.plugin!, 'kehikot', 'statusline'), 'utf8')).toBe('echo mine')
+        expect(existsSync(join(run.plugin!, 'kehikot', 'compose'))).toBe(false)
+        w.runs.endAll()
+      }
+    } finally {
+      rmSync(join(CONFIG, 'settings.json'), { force: true })
+    }
   })
 
   test('a background session started with no status line of the person’s is given no --settings at all', async () => {

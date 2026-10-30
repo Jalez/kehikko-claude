@@ -56,7 +56,8 @@ import { personEnv } from 'kehikot-module-protocol/serve'
  * that widens what the program may do. `fresh` and `resume` name a session;
  * `reports` adds, for a copy that can take it, the one other thing on the
  * command line — the program's own hooks, pointed at this module, and its
- * status line (`statusLine`, which runs the person's own first) — and that
+ * status line (`statusLine`, which runs the person's own first, or prints
+ * the module's own when they have none) — and that
  * is the whole command. A session opened here has exactly the permissions
  * the same command would have in any terminal.
  *
@@ -323,12 +324,12 @@ export interface Program {
   reports(command: (event: string) => string, more?: Record<string, unknown>): string[]
   /**
    * The settings that make a session started here run `script` as its status line, with the
-   * person's own status line command (`own`) for it to run first and print unchanged — or null
-   * when they have none, or one that cannot be run that way, and the session is then started
-   * without (its context is read from its transcript).
+   * person's own status line command (`own`) for it to run first and print unchanged. With none of
+   * theirs, `compose` says whether the script prints this module's own line (`own` null), or the
+   * session is started without one (null). Null too for one of theirs that cannot be run that way.
    * Only for a copy whose `supports()` said `tells` (`--settings`).
    */
-  statusLine?(projectPath: string, script: string, env?: NodeJS.ProcessEnv): { settings: Record<string, unknown>; own: string | null } | null
+  statusLine?(projectPath: string, script: string, env?: NodeJS.ProcessEnv, compose?: boolean): { settings: Record<string, unknown>; own: string | null } | null
   /** `--settings` and its JSON, for settings and nothing else: what a background session is given (it reports through no hook). */
   settingsArgs?(settings: Record<string, unknown>): string[]
   /** What an event the program reported says about the session, or null for one that says nothing. */
@@ -1098,14 +1099,21 @@ const shellWord = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`
 /**
  * The status line a session started here is given (`statusline.sh`, copied into its plugin):
  * the person's own settings for it kept — padding, refresh — with the command this module's,
- * which runs theirs first. Only when they have one: null when they have none, or one that cannot
- * be run that way.
+ * which runs theirs first. With none of theirs and `compose` ("Status line in sessions", on by
+ * default), the script prints this module's own line instead (`statusline-line.mjs`): the session
+ * is the module's, and its status line row is the module's to use. Null when they have none and
+ * `compose` is off, or one that cannot be run that way.
  */
-function statusLine(projectPath: string, script: string, env: NodeJS.ProcessEnv = process.env): { settings: Record<string, unknown>; own: string | null } | null {
+function statusLine(projectPath: string, script: string, env: NodeJS.ProcessEnv = process.env, compose = false): { settings: Record<string, unknown>; own: string | null } | null {
   const own = ownStatusLine(projectPath, env)
-  /* None of theirs: none is added. An empty status line still costs a row under Claude Code's
-     prompt (measured on 2.1.310), a change to their terminal for nothing they asked for; the
-     context is then read from the transcript alone. One that cannot be run as Claude Code would is left alone. */
+  /* None of theirs, and this module's own line wanted: its line, at no padding. Claude Code (2.1.314)
+     takes a status line's output trimmed, drops blank lines, and shows nothing for an empty one —
+     in its default rendering the row then collapses, in fullscreen a blank row is held — and any
+     configured status line hides the "? for shortcuts" hint. With a line that says something the
+     row is worth its place. */
+  if (own === 'none' && compose) return { settings: { statusLine: { type: 'command', command: `/bin/sh ${shellWord(script)}`, padding: 0 } }, own: null }
+  /* None of theirs and none wanted: none is added, and the context is read from the transcript
+     alone. One that cannot be run as Claude Code would is left alone. */
   if (own === 'none' || own === 'other') return null
   const kept = Object.fromEntries(Object.entries(own.line).filter(([key]) => key !== 'command' && key !== 'shell' && key !== 'type'))
   return { settings: { statusLine: { ...kept, type: 'command', command: `/bin/sh ${shellWord(script)}` } }, own: own.command }

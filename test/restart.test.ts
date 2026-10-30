@@ -10,7 +10,7 @@ import { PROGRAM, recordDirs, type Active, type Backgrounded, type Program, type
 import { born, readPlaces, readSettings, writeSettings, type NamedPlace } from '../record.ts'
 import { skillDeclarations } from '../skills.ts'
 import { placeKey } from '../place.ts'
-import { resumeToggle } from '../src/view/conversations.ts'
+import { resumeToggle, statusLineToggle } from '../src/view/conversations.ts'
 import { SHELL_CUT, AGENT_CUT, FAILED, asked as said, notified, turnEnded, typed } from './transcripts.ts'
 
 /**
@@ -88,13 +88,13 @@ function machine() {
     refuse,
     records: (projectPath: string, id: string) => held.set(projectPath, [...(held.get(projectPath) ?? []).filter((one) => one.id !== id), { id, label: '', lastActive: Date.now(), next: [] }]),
     /** One process of this module: its own runs, the same machine under it. */
-    module(options: { backgrounds?: boolean; grace?: number; plugins?: boolean; configBase?: string } = {}) {
+    module(options: { backgrounds?: boolean; grace?: number; plugins?: boolean; configBase?: string; tells?: boolean } = {}) {
       const ptys: FakePty[] = []
       const logged: string[] = []
       const program: Program = {
         ...PROGRAM,
         find: () => ({ file: '/fake/bin/claude', looked: [], usual: [] }),
-        supports: async () => ({ ok: true, missing: null, tells: false, lists: true, names: false, configures: options.plugins ?? false, plugins: options.plugins ?? false, backgrounds: options.backgrounds ?? true }),
+        supports: async () => ({ ok: true, missing: null, tells: options.tells ?? false, lists: true, names: false, configures: options.plugins ?? false, plugins: options.plugins ?? false, backgrounds: options.backgrounds ?? true }),
         active: async () => ({ known: true, active: [...background.values()] }),
         settled: async (projectPath, id) => (held.get(projectPath)?.some((one) => one.id === id) ? id : null),
         sessions: async (projectPath) => held.get(projectPath) ?? [],
@@ -439,12 +439,22 @@ describe('background work cut off or failed: a "needs you" line in the Inbox', (
 describe('the setting "Resume conversations cut off by a restart"', () => {
   test('on unless a person turned it off, and drawn as a toggle no agent can press', () => {
     const dir = project()
-    expect(readSettings(dir)).toEqual({ resumeCutOff: true })
+    expect(readSettings(dir)).toEqual({ resumeCutOff: true, statusLine: true })
     writeSettings(dir, { resumeCutOff: false })
-    expect(readSettings(dir)).toEqual({ resumeCutOff: false })
+    expect(readSettings(dir)).toEqual({ resumeCutOff: false, statusLine: true })
     expect(resumeToggle(false)).toEqual([{ kind: 'toggle', id: 'resume-cut-off', label: 'Resume conversations cut off by a restart', icon: 'refresh', checked: false }])
     expect(resumeToggle(true)[0]).not.toHaveProperty('agents')
     expect(resumeToggle(null)).toEqual([])
+  })
+
+  test('“Status line in sessions” sits beside it: on unless turned off, a toggle no agent can press', () => {
+    const dir = project()
+    expect(readSettings(dir).statusLine).toBe(true)
+    writeSettings(dir, { statusLine: false })
+    expect(readSettings(dir)).toEqual({ resumeCutOff: true, statusLine: false })
+    expect(statusLineToggle(false)).toEqual([{ kind: 'toggle', id: 'status-line', label: 'Status line in sessions', checked: false }])
+    expect(statusLineToggle(true)[0]).not.toHaveProperty('agents')
+    expect(statusLineToggle(null)).toEqual([])
   })
 
   test('its door is the page’s: without the ticket nothing is read or changed', async () => {
@@ -582,6 +592,41 @@ describe('with every skill already installed in the person’s own config', () =
       await second.runs.open(open(dir, A), new Watcher())
       expect(m.calls.bg[1]).toEqual(['--resume', A])
       hooked(plugin)
+    } finally {
+      uninstalled()
+    }
+  })
+
+  test('a background session started here is given the module’s own status line, and each wake follows the setting as it is then', async () => {
+    installed()
+    try {
+      const m = machine()
+      const dir = project()
+      const base = project()
+      m.records(dir, A)
+      const first = m.module({ plugins: true, configBase: base, tells: true })
+      await first.runs.open(open(dir, A), new Watcher())
+      const args = m.calls.bg[0]!
+      const plugin = pluginOf(args)!
+      /* Its --settings are its status line only, at no padding; the person has none of their own. */
+      expect(JSON.parse(args[args.indexOf('--settings') + 1]!)).toEqual({ statusLine: { type: 'command', command: `/bin/sh '${plugin}/statusline.sh'`, padding: 0 } })
+      expect(readFileSync(join(plugin, 'kehikot', 'compose'), 'utf8')).toBe(process.execPath)
+      expect(existsSync(join(plugin, 'kehikot', 'statusline'))).toBe(false)
+      expect(existsSync(join(plugin, 'statusline-line.mjs'))).toBe(true)
+      first.runs.endAll()
+      await settle()
+      /* Stopped; the person turns the setting off; woken from its saved options, its script prints nothing of the module's. */
+      m.background.clear()
+      writeSettings(dir, { statusLine: false })
+      const second = m.module({ plugins: true, configBase: base, tells: true })
+      await second.runs.open(open(dir, A), new Watcher())
+      expect(m.calls.bg[1]).toEqual(['--resume', A])
+      expect(existsSync(join(plugin, 'kehikot', 'compose'))).toBe(false)
+      /* And one started new with the setting off is given no --settings at all, as before. */
+      const other = project()
+      writeSettings(other, { statusLine: false })
+      await second.runs.open(open(other, null), new Watcher())
+      expect(m.calls.bg[2]!).not.toContain('--settings')
     } finally {
       uninstalled()
     }

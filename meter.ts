@@ -13,12 +13,12 @@
  *     same row. A compaction is a `system` row with `subtype: "compact_boundary"` and
  *     `compactMetadata: { trigger, preTokens, postTokens }`. A `cost-state` row holds the session's
  *     `totalCostUSD`, written when the session is cleared or its process ends — never while it runs.
- *  2. **The session's own status line**, for a session this module starts when the person has a
- *     status line of their own (none is added for one who has none: even an empty one costs a row
- *     under Claude Code's prompt): Claude Code hands the
+ *  2. **The session's own status line**, for a session this module starts (with "Status line in
+ *     sessions" off, only when the person has a status line of their own): Claude Code hands the
  *     status line command its JSON on stdin (`context_window.context_window_size`, `cost.
  *     total_cost_usd`, `model.display_name`, `exceeds_200k_tokens`, …), and `statusline.sh` posts
- *     it here after it has run the person's own status line command, unchanged. That is the only
+ *     it here after it has run the person's own status line command, unchanged, or printed the
+ *     module's own line (`statusline-line.mjs`). That is the only
  *     place the exact window and the live cost are said.
  *
  * Only these rows are parsed (`ROWS`), and of them only numbers, a model id, a trigger word and

@@ -57,26 +57,38 @@ describe('the declaration', () => {
   test('is in the manifest, parses, is the person’s, and defaults to on as the file does', () => {
     expect(MANIFEST.declares.settings).toEqual(SETTINGS)
     expect(settingsDeclarationSchema.parse(SETTINGS)).toEqual(SETTINGS)
-    expect(SETTINGS).toHaveLength(1)
+    expect(SETTINGS).toHaveLength(2)
     expect(SETTINGS[0]).toMatchObject({ key: 'resumeCutOff', type: 'boolean', default: true, scope: 'project', personOnly: true })
     expect(readSettings(project).resumeCutOff).toBe(SETTINGS[0]!.default as boolean)
+    expect(SETTINGS[1]).toMatchObject({ key: 'statusLine', label: 'Status line in sessions', type: 'boolean', default: true, scope: 'project', personOnly: true })
+    expect(readSettings(project).statusLine).toBe(SETTINGS[1]!.default as boolean)
   })
 })
 
 describe('read and change, round trip', () => {
   test('get reads the default with no file, then what the toggle wrote', async () => {
-    expect(await get()).toEqual({ ok: true, values: { resumeCutOff: true }, file: '.kehikot/claude/settings.json' } as never)
+    expect(await get()).toEqual({ ok: true, values: { resumeCutOff: true, statusLine: true }, file: '.kehikot/claude/settings.json' } as never)
     writeSettings(project, { resumeCutOff: false })
-    expect((await get()).values).toEqual({ resumeCutOff: false })
+    expect((await get()).values).toEqual({ resumeCutOff: false, statusLine: true })
+    /* One key written keeps the other. */
+    writeSettings(project, { statusLine: false })
+    expect((await get()).values).toEqual({ resumeCutOff: false, statusLine: false })
   })
 
   test("the page's ticket is the person: saved, in the format the toggle writes", async () => {
     expect((await set({ key: 'resumeCutOff', value: false }, TICKET)).outcome).toBe('saved')
-    expect(readFileSync(file(), 'utf8')).toBe(`${JSON.stringify({ resumeCutOff: false }, null, 2)}\n`)
+    expect(readFileSync(file(), 'utf8')).toBe(`${JSON.stringify({ resumeCutOff: false, statusLine: true }, null, 2)}\n`)
     expect(readSettings(project).resumeCutOff).toBe(false)
-    /* And the page's own route still reads it. */
+    expect((await set({ key: 'statusLine', value: false }, TICKET)).outcome).toBe('saved')
+    expect(readSettings(project)).toEqual({ resumeCutOff: false, statusLine: false })
+    /* And the page's own route still reads it, and changes one key at a time. */
     const page = await answer('GET', '/api/settings', new URLSearchParams({ projectPath: project }), null, TICKET)
-    expect((page!.body as { settings: unknown }).settings).toEqual({ resumeCutOff: false })
+    expect((page!.body as { settings: unknown }).settings).toEqual({ resumeCutOff: false, statusLine: false })
+    const turned = await answer('POST', '/api/settings', new URLSearchParams(), { projectPath: project, statusLine: true }, TICKET)
+    expect((turned!.body as { settings: unknown }).settings).toEqual({ resumeCutOff: false, statusLine: true })
+    expect((await answer('POST', '/api/settings', new URLSearchParams(), { projectPath: project, statusLine: 'yes' }, TICKET))?.status).toBe(400)
+    expect((await answer('POST', '/api/settings', new URLSearchParams(), { projectPath: project }, TICKET))?.status).toBe(400)
+    expect((await set({ key: 'nope', value: false }, TICKET)).outcome).toBe('refused')
   })
 
   test('a folder the host does not hold is neither read nor written', async () => {
