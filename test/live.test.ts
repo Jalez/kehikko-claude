@@ -8,7 +8,8 @@ import { listing, runOf, type Listing } from '../doors.ts'
 import { CLOSED, Runs, activityRows, sameProject, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type RunsOptions, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
 import { placeKey } from '../place.ts'
 import { RESEARCH_LINE, SELF as CONTEXT_SELF } from '../context.ts'
-import { sessionNotes } from 'kehikot-module-protocol'
+import { NOTES_VERSION, UPDATED_HEAD, sessionNotes } from 'kehikot-module-protocol'
+import { readFileSync as fsRead, writeFileSync as fsWrite } from 'node:fs'
 import { PROGRAM, SUBAGENT_EVENTS, readActive, type Active, type Program, type Recorded } from '../program.ts'
 import { assign, attach, detach, ignore, readPlaces, sessionsAt, writeSettings, type NamedPlace } from '../record.ts'
 import type { AbsentModule } from 'kehikot-module-protocol'
@@ -2669,6 +2670,29 @@ describe('a session started here knows its place and its kehikko’s modules, an
     const codex = sessionNotes({ ...input, self: { module: 'kehikot.codex', name: 'Codex', door: 'kehikko-codex' } }, 'start', null).text!
     const research = (line: string) => line.startsWith('When you or a subagent')
     expect(text.split('\n').filter((line) => !research(line))).toEqual(codex.split('\n').filter((line) => !research(line) && line !== '- Claude (door kehikko-claude) — "This.". Skills: kehikot-here.'))
+  })
+
+  test('a conversation told by older notes (a record with no version) gets the full new notes once at its next prompt, then only changes', async () => {
+    const dir = project()
+    const base = project()
+    const h = host([NOTES])
+    const w = world({ fetch, configures: true, plugins: true, doors: h.doors, place: h.place, configBase: base })
+    const run = (await w.runs.open(ask(dir, null, KEYED), new Watcher())) as Run
+    const token = run.token!
+    const first = said(await w.runs.context('SessionStart', B, token))!
+    const file = join(keptDirOf(token, base), 'told.json')
+    /* What an earlier version kept: the same record, without the notes' version. */
+    const kept = JSON.parse(fsRead(file, 'utf8'))
+    expect(kept.version).toBe(NOTES_VERSION)
+    delete kept.version
+    fsWrite(file, JSON.stringify(kept))
+    const updated = said(await w.runs.context('UserPromptSubmit', B, token))!
+    expect(updated).toBe(`${UPDATED_HEAD}\n${first}`)
+    expect(JSON.parse(fsRead(file, 'utf8')).version).toBe(NOTES_VERSION)
+    /* Once: then nothing, and then only what changed. */
+    expect(await w.runs.context('UserPromptSubmit', B, token)).toBeNull()
+    h.on.push(PAPER)
+    expect(said(await w.runs.context('UserPromptSubmit', B, token))).toStartWith('Kehikot: the kehikko "writing" changed')
   })
 
   test('what the conversation was told is kept to show: the last full notes, and each change since', async () => {
