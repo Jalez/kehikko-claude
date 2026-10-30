@@ -14,6 +14,12 @@ export interface ModuleSettings {
   statusLine: boolean
 }
 
+/** What a conversation was told: the last full notes, and each change since (context.ts `Said`). */
+export interface Told {
+  start: { at: number; text: string }
+  changes: { at: number; text: string }[]
+}
+
 export interface Api {
   /** What this place holds: its sessions, the project's others, what is running, and whether the program is there. */
   place(projectPath: string, key: string, projectId?: string | null): Promise<Listing>
@@ -40,6 +46,12 @@ export interface Api {
   showing?(page: string, at: { projectPath: string; key: string; kehikkoName: string; partNames: string[]; onScreen: boolean } | null): Promise<void>
   /** Take a session off a place ("Disconnect from this kehikko"). The session itself is kept. */
   detach(projectPath: string, key: string, session: string): Promise<void>
+  /**
+   * What a conversation of this project was last told by its hooks (its place, the modules around it
+   * and the installed ones absent from it), and each change told since: "What this conversation was
+   * told". Null when nothing was kept for it.
+   */
+  told?(projectPath: string, session: string): Promise<Told | null>
   /** This project's settings for this module: whether conversations a restart cut off are resumed, and whether sessions started here get the module's status line. */
   settings?(projectPath: string): Promise<ModuleSettings>
   /** A person's press: change one. */
@@ -80,6 +92,9 @@ export const api: Api = {
   },
   async detach(projectPath, key, session) {
     answered(await ask('./api/detach', { body: { projectPath, key, session } }))
+  },
+  async told(projectPath, session) {
+    return answered(await ask<{ ok: true; told: Told | null }>('./api/told', { query: { projectPath, session }, ticket: true })).told
   },
   async settings(projectPath) {
     return answered(await ask<{ ok: true; settings: ModuleSettings }>('./api/settings', { query: { projectPath }, ticket: true })).settings
