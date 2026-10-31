@@ -7,7 +7,7 @@ import type { DoorsAsked, HostPlace } from './doorConfig.ts'
 import { ID } from './manifest.ts'
 import { placeKey, readPlaceKey } from './place.ts'
 import type { Program } from './program.ts'
-import { PLACE_TOKEN, born, byToken, homeOf, projectRoot, readPlaces, type NamedPlace, type Places } from './record.ts'
+import { PLACE_TOKEN, born, byToken, homeOf, projectRoot, readPlaces, readSettings, type NamedPlace, type Places } from './record.ts'
 
 /**
  * What a session this module started is told of where it is, without anybody typing anything:
@@ -272,6 +272,8 @@ export async function context(asked: { event: string; session: string; token: st
       messages: answer?.messages ?? null,
       messagesMore: answer?.messagesMore ?? 0,
       messaging: answer?.messages ? { session } : null,
+      /* The person's standing permission to act on messages (protocol 2.43.0), this project's setting. */
+      actOnMessages: readSettings(projectPath).actOnMessages,
     },
     event === 'SessionStart' ? 'start' : 'prompt',
     told,

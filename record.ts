@@ -232,6 +232,10 @@ export interface Settings {
   statusLine: boolean
   /** Absolute folders beside the project that its sessions are given as more of their workspace (`--add-dir`, folders.ts). */
   folders: string[]
+  /** Type one line into an idle session's prompt when a message comes for it (protocol 2.43.0, default on). */
+  wakeOnMessages: boolean
+  /** Sessions here may act on requests from other agent sessions in the project (protocol 2.43.0, default on). */
+  actOnMessages: boolean
 }
 
 export interface Places {
@@ -667,14 +671,18 @@ export function markSessions(projectPath: string | null | undefined, edits: Read
 }
 
 const SETTINGS = 'settings'
-const DEFAULTS: Settings = { resumeCutOff: true, statusLine: true, folders: [] }
+const DEFAULTS: Settings = { resumeCutOff: true, statusLine: true, folders: [], wakeOnMessages: true, actOnMessages: true }
 
 /** Settings as written: each switch a boolean, the default where it is not one; the folders each one that could be one (`foldersOf`). */
-function settingsOf(raw: { resumeCutOff?: unknown; statusLine?: unknown; folders?: unknown } | null | undefined): Settings {
+type RawSettings = { resumeCutOff?: unknown; statusLine?: unknown; folders?: unknown; wakeOnMessages?: unknown; actOnMessages?: unknown }
+
+function settingsOf(raw: RawSettings | null | undefined): Settings {
   return {
     resumeCutOff: typeof raw?.resumeCutOff === 'boolean' ? raw.resumeCutOff : DEFAULTS.resumeCutOff,
     statusLine: typeof raw?.statusLine === 'boolean' ? raw.statusLine : DEFAULTS.statusLine,
     folders: foldersOf(raw?.folders),
+    wakeOnMessages: typeof raw?.wakeOnMessages === 'boolean' ? raw.wakeOnMessages : DEFAULTS.wakeOnMessages,
+    actOnMessages: typeof raw?.actOnMessages === 'boolean' ? raw.actOnMessages : DEFAULTS.actOnMessages,
   }
 }
 
@@ -683,7 +691,7 @@ export function readSettings(projectPath: string | null | undefined): Settings {
   const file = fileFor(projectPath, false, SETTINGS)
   if (!file.ok || !existsSync(file.value)) return { ...DEFAULTS, folders: [] }
   try {
-    return settingsOf(JSON.parse(readFileSync(file.value, 'utf8')) as { resumeCutOff?: unknown; statusLine?: unknown; folders?: unknown })
+    return settingsOf(JSON.parse(readFileSync(file.value, 'utf8')) as RawSettings)
   } catch {
     return { ...DEFAULTS, folders: [] }
   }
