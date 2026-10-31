@@ -1,5 +1,6 @@
 import { PROJECT_ID, doorContext, manifestSchema, type Manifest } from 'kehikot-module-protocol'
 import { establishBuild, hostHasProject, hostVouches, refuseTicket, sameTicket, settingsDoor, type Reply, type Stream } from 'kehikot-module-protocol/serve'
+import { foldersIssue } from './folders.ts'
 import { SETTINGS, SETTINGS_FILE } from './settings.ts'
 
 import { TICKET, elsewhereOf, sameProject, theRuns, type Elsewhere, type Run, type Runs } from './live.ts'
@@ -106,6 +107,13 @@ const settings = settingsDoor({
     const root = projectRoot(project)
     if (!root.ok) return root.error
     if (!(await hostCheck.has(root.value))) return `${root.value} is not a project open in Kehikot.`
+    if (key === 'folders') {
+      const issue = foldersIssue(value)
+      if (issue) return issue
+      const written = writeSettings(root.value, { folders: value as string[] })
+      if (written.ok) theRuns().settingsSaved(root.value)
+      return written.ok ? null : written.error
+    }
     if (key !== 'resumeCutOff' && key !== 'statusLine') return `Claude has no setting called "${key.slice(0, 64)}".`
     const written = writeSettings(root.value, { [key]: value === true })
     return written.ok ? null : written.error
@@ -846,14 +854,22 @@ export async function answer(
     return ok({ ok: true, settings: readSettings(root.value) })
   }
   if (path === '/api/settings' && method === 'POST') {
-    const said: { resumeCutOff?: boolean; statusLine?: boolean } = {}
+    const said: { resumeCutOff?: boolean; statusLine?: boolean; folders?: string[] } = {}
     for (const key of ['resumeCutOff', 'statusLine'] as const) {
       if (body?.[key] === undefined) continue
       if (typeof body[key] !== 'boolean') return bad(key === 'resumeCutOff' ? 'say whether conversations cut off by a restart are resumed: true or false' : 'say whether sessions started here show the status line: true or false')
       said[key] = body[key]
     }
+    if (body?.folders !== undefined) {
+      const issue = foldersIssue(body.folders)
+      if (issue) return bad(issue)
+      said.folders = body.folders as string[]
+    }
     if (Object.keys(said).length === 0) return bad('say whether conversations cut off by a restart are resumed, or whether sessions show the status line: true or false')
-    const written = writeSettings(typeof body?.projectPath === 'string' ? body.projectPath : null, said)
+    const project = typeof body?.projectPath === 'string' ? body.projectPath : null
+    const written = writeSettings(project, said)
+    const root = projectRoot(project)
+    if (written.ok && root.ok) theRuns().settingsSaved(root.value)
     return written.ok ? ok({ ok: true, settings: written.value }) : bad(written.error)
   }
 
@@ -870,7 +886,7 @@ export async function answer(
   if (path === '/api/restart' && method === 'POST') {
     const id = typeof body?.session === 'string' ? body.session : ''
     if (!PROGRAM.isId(id)) return bad('that is not a session id')
-    const done = theRuns().restartIn(id, body?.why === 'doors' ? 'doors' : 'moved')
+    const done = theRuns().restartIn(id, body?.why === 'doors' ? 'doors' : body?.why === 'folders' ? 'folders' : 'moved')
     return done === true ? ok({ ok: true }) : bad(done, 409)
   }
 

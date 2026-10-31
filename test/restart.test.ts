@@ -440,9 +440,9 @@ describe('background work cut off or failed: a "needs you" line in the Inbox', (
 describe('the setting "Resume conversations cut off by a restart"', () => {
   test('on unless a person turned it off, and drawn as a toggle no agent can press', () => {
     const dir = project()
-    expect(readSettings(dir)).toEqual({ resumeCutOff: true, statusLine: true })
+    expect(readSettings(dir)).toEqual({ resumeCutOff: true, statusLine: true, folders: [] })
     writeSettings(dir, { resumeCutOff: false })
-    expect(readSettings(dir)).toEqual({ resumeCutOff: false, statusLine: true })
+    expect(readSettings(dir)).toEqual({ resumeCutOff: false, statusLine: true, folders: [] })
     expect(resumeToggle(false)).toEqual([{ kind: 'toggle', id: 'resume-cut-off', label: 'Resume conversations cut off by a restart', icon: 'refresh', checked: false }])
     expect(resumeToggle(true)[0]).not.toHaveProperty('agents')
     expect(resumeToggle(null)).toEqual([])
@@ -452,7 +452,7 @@ describe('the setting "Resume conversations cut off by a restart"', () => {
     const dir = project()
     expect(readSettings(dir).statusLine).toBe(true)
     writeSettings(dir, { statusLine: false })
-    expect(readSettings(dir)).toEqual({ resumeCutOff: true, statusLine: false })
+    expect(readSettings(dir)).toEqual({ resumeCutOff: true, statusLine: false, folders: [] })
     expect(statusLineToggle(false)).toEqual([{ kind: 'toggle', id: 'status-line', label: 'Status line in sessions', checked: false }])
     expect(statusLineToggle(true)[0]).not.toHaveProperty('agents')
     expect(statusLineToggle(null)).toEqual([])
@@ -886,5 +886,53 @@ describe('an Inbox item keeps its since while its state does: the same item is n
     second.runs.know(dir)
     await second.runs.watch()
     expect(rowOf(second.runs, dir, id)).toMatchObject({ state: 'attention', since: asked!.since })
+  })
+})
+
+describe('the project’s other folders, for a conversation in the background', () => {
+  test('started with one --add-dir each; woken with no flags while they are the same; carried on with the folders now when they changed', async () => {
+    const m = machine()
+    const dir = project()
+    const one = project()
+    const two = project()
+    m.records(dir, A)
+    writeSettings(dir, { folders: [one] })
+    const first = m.module()
+    const run = (await first.runs.open(open(dir, A), new Watcher())) as Run
+    const args = m.calls.bg[0]!
+    expect(args.slice(0, 2)).toEqual(['--resume', A])
+    expect(args.filter((word, n) => args[n - 1] === '--add-dir')).toEqual([one])
+    expect(run.folders).toEqual([one])
+    await settle()
+    expect(entryOf(dir, A)).toMatchObject({ background: true, folders: [one] })
+    first.runs.endAll()
+    await settle()
+
+    /* Stopped; the same folders: woken from its saved options, with no flag. */
+    m.background.clear()
+    await m.module().runs.open(open(dir, A), new Watcher())
+    expect(m.calls.bg[1]).toEqual(['--resume', A])
+
+    /* The person changed them: the next wake gives the folders now, which carries it on with them. */
+    m.background.clear()
+    writeSettings(dir, { folders: [one, two] })
+    await m.module().runs.open(open(dir, A), new Watcher())
+    const again = m.calls.bg[2]!
+    expect(again.filter((word, n) => again[n - 1] === '--add-dir')).toEqual([one, two])
+  })
+
+  test('a running one is told the folders changed, and a restart for that is taken', async () => {
+    const m = machine()
+    const dir = project()
+    const one = project()
+    m.records(dir, A)
+    const mod = m.module()
+    const viewer = new Watcher()
+    await mod.runs.open(open(dir, A), viewer)
+    await settle()
+    writeSettings(dir, { folders: [one] })
+    mod.runs.settingsSaved(dir)
+    expect(viewer.said.at(-1)).toEqual({ session: A, folders: 'changed' })
+    expect(mod.runs.restartIn(A, 'folders')).toBe(true)
   })
 })

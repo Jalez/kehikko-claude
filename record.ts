@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join } from 'node:path'
 import { KEHIKOT_DIR, kehikotDir, moduleDir, moduleFile, within } from 'kehikot-module-protocol'
 
 import type { CutOff } from './cutoff.ts'
+import { foldersOf } from './folders.ts'
 import { ID } from './manifest.ts'
 import { isKehikkoKey, placeKey, readPlaceKey, sortedParts, type Place } from './place.ts'
 
@@ -190,6 +191,12 @@ export interface SessionEntry {
    */
   background?: true
   /**
+   * The project's other folders (`--add-dir`, folders.ts) among its saved options, when it was
+   * started or carried on in the background with any. Woken with none given while they are still
+   * the project's; carried on with the folders now when they are not.
+   */
+  folders?: string[]
+  /**
    * Since when this module has seen it working, while it still is: cleared when its turn ends,
    * when it stops for the person, and when a person ends it here. Still set at the next start of
    * this module and not running: a restart cut it off mid-turn (see `recover` in live.ts).
@@ -223,6 +230,8 @@ export interface Settings {
   resumeCutOff: boolean
   /** Give a session started here this module's own status line when the person has none (default on). */
   statusLine: boolean
+  /** Absolute folders beside the project that its sessions are given as more of their workspace (`--add-dir`, folders.ts). */
+  folders: string[]
 }
 
 export interface Places {
@@ -619,6 +628,7 @@ function describe(places: Places, id: string, about: { label?: string; lastActiv
     ...(was?.ignored ? { ignored: was.ignored } : {}),
     ...(was?.detached ? { detached: was.detached } : {}),
     ...(was?.background ? { background: was.background } : {}),
+    ...(was?.folders?.length ? { folders: was.folders } : {}),
     ...(was?.working ? { working: was.working } : {}),
     ...(was?.looked ? { looked: was.looked } : {}),
     ...(was?.turned ? { turned: true as const } : {}),
@@ -657,24 +667,25 @@ export function markSessions(projectPath: string | null | undefined, edits: Read
 }
 
 const SETTINGS = 'settings'
-const DEFAULTS: Settings = { resumeCutOff: true, statusLine: true }
+const DEFAULTS: Settings = { resumeCutOff: true, statusLine: true, folders: [] }
 
-/** Settings as written: each key a boolean, the default where it is not one. */
-function settingsOf(raw: { resumeCutOff?: unknown; statusLine?: unknown } | null | undefined): Settings {
+/** Settings as written: each switch a boolean, the default where it is not one; the folders each one that could be one (`foldersOf`). */
+function settingsOf(raw: { resumeCutOff?: unknown; statusLine?: unknown; folders?: unknown } | null | undefined): Settings {
   return {
     resumeCutOff: typeof raw?.resumeCutOff === 'boolean' ? raw.resumeCutOff : DEFAULTS.resumeCutOff,
     statusLine: typeof raw?.statusLine === 'boolean' ? raw.statusLine : DEFAULTS.statusLine,
+    folders: foldersOf(raw?.folders),
   }
 }
 
 /** A project's settings for this module, the defaults where the file says nothing. */
 export function readSettings(projectPath: string | null | undefined): Settings {
   const file = fileFor(projectPath, false, SETTINGS)
-  if (!file.ok || !existsSync(file.value)) return { ...DEFAULTS }
+  if (!file.ok || !existsSync(file.value)) return { ...DEFAULTS, folders: [] }
   try {
-    return settingsOf(JSON.parse(readFileSync(file.value, 'utf8')) as { resumeCutOff?: unknown; statusLine?: unknown })
+    return settingsOf(JSON.parse(readFileSync(file.value, 'utf8')) as { resumeCutOff?: unknown; statusLine?: unknown; folders?: unknown })
   } catch {
-    return { ...DEFAULTS }
+    return { ...DEFAULTS, folders: [] }
   }
 }
 
@@ -786,6 +797,7 @@ function tidy(raw: unknown): Places {
         ignored?: { at?: unknown }
         detached?: unknown
         background?: unknown
+        folders?: unknown
         working?: unknown
         looked?: unknown
         turned?: unknown
@@ -805,6 +817,7 @@ function tidy(raw: unknown): Places {
         ...(typeof entry.ignored?.at === 'string' ? { ignored: { at: entry.ignored.at } } : {}),
         ...(typeof entry.detached === 'string' ? { detached: entry.detached } : {}),
         ...(entry.background === true ? { background: true as const } : {}),
+        ...(foldersOf(entry.folders).length ? { folders: foldersOf(entry.folders) } : {}),
         ...(typeof entry.working === 'string' ? { working: entry.working } : {}),
         ...(typeof entry.looked === 'string' ? { looked: entry.looked } : {}),
         ...(entry.turned === true ? { turned: true as const } : {}),
