@@ -218,6 +218,16 @@ The bar above it while none is connected (above). A strip appears along the bott
 is running to take the space from: the session ended (**Resume**), the install did not finish, or
 this module's server has gone.
 
+A host that draws footers (protocol 2.38.0, `kehikot.footer`, said as `drawsFooter` in its greeting)
+draws that line and those rows itself, in the header's look, and the page draws none of them: the
+module declares the same things as footer items (`src/view/footer.ts`) — the context as a meter
+(*warn* from Claude Code's warning level, *critical* where it compacts by itself), the model, cost and
+compactions as an optional text, the subscription allowance as an optional meter at the end, then
+**Compact** and **Clear** (Clear with the host's confirm, neither pressable by an agent), and each
+bottom row as a sentence with its button as a run: **Restart in the new folder** and **Dismiss**,
+**Restart**, **Resume**, **Try again**. The breakdown has no place in a host's footer: the meter's
+tooltip carries the summary. Any other host gets no footer and the page draws its own, as above.
+
 A host that draws headers (protocol 1.1.0, `kehikot.header`) is given one **View** menu — a `switch`,
 *This kehikko’s conversations* — listing every conversation connected to this place, and nothing else:
 the own one first, then by when each was last active. Each line is its mark, its title, when it was
