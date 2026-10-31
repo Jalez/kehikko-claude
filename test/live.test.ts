@@ -2471,7 +2471,7 @@ describe('a session started here knows its place and its kehikko’s modules, an
     ],
     place: async (one: DoorsAsked): Promise<HostPlace | null> => {
       asked.push(one)
-      return { doors: [{ module: 'kehikko', name: 'kehikko', url: 'http://127.0.0.1:4180/mcp', transport: 'http' }], modules: [...on], absent: [...absent] }
+      return { doors: [{ module: 'kehikko', name: 'kehikko', url: 'http://127.0.0.1:4180/mcp', transport: 'http' }], modules: [...on], absent: [...absent], messages: null, messagesMore: 0 }
     },
   })
   const started = async (h: ReturnType<typeof host>, dir: string, place: NamedPlace = KEYED) => {

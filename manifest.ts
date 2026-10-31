@@ -55,6 +55,9 @@ export const PREFERRED_PORT = 8010
  * - **`uses: ['activity:report']`** (protocol 1.5.0): the whole list of its sessions' states, said
  *   again on every change, for the host to mark epics, parts and kehikot. A host without the
  *   method is told nothing (the client checks the greeting), and a 1.4.0 host accepts the word.
+ * - **`uses: ['agents:message']`** (protocol 2.41.0): `send_message` and `read_messages` on its door, a
+ *   thin adapter over the host's messages between agent sessions, and a session's unread ones in its
+ *   notes. A host before 2.41.0 keeps none: the door lists neither tool and the notes say nothing.
  * - **`uses: ['events:emit']`, `emits: [NOTICES]`.** The one thing it asks a
  *   host: to carry a line saying that a session a person is not looking at
  *   has finished, or has stopped to wait for them. Reading the context is not
@@ -132,7 +135,7 @@ export const MANIFEST: Manifest = manifestSchema.parse({
   holds: ['live-sessions'],
   declares: {
     protocol: `>=${PROTOCOL} <${PROTOCOL + 1}`,
-    uses: ['events:emit', 'activity:report'],
+    uses: ['events:emit', 'activity:report', 'agents:message'],
     /* This module runs Claude Code sessions and loads the kehikko-bound skills of the modules on a
        session's kehikko into them (protocol 2.21.0). A host routes those skills to a module that
        says so; one built with 2.21.0 that says nothing is not treated as a skill loader. */
