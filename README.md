@@ -560,11 +560,37 @@ parts, no kehikko), a line on another module's panel is not this module's to mak
 one way a module can ask a host to move (`view.goto`) moves to an epic and cannot pick parts or
 switch kehikko. A line filed under the session's epic is the most that exists.
 
+### A message wakes an idle session
+
+When another agent session messages one of these sessions — to it, to every Claude session, or to
+its place — and it is idle at its prompt in a terminal this module holds, one line is typed into the
+prompt and sent, so it reads the message without the person typing "check your messages":
+
+> New message for this session from Codex (kehikot.codex, epic methods on the kehikko writing). Read it with read_messages. …
+
+The rule and the words are the protocol's (`messageWaker`, `wakeLine`, 2.43.0), the same in every
+agent module: the sender's registered name, its module and its place, never what the message says.
+Once per idle period however many come, a couple of seconds after the session settled; never for a
+message to the whole project, never its own, never while it works or waits for an answer, never with
+something typed and unsent at its prompt, and never a session running elsewhere or one put away. It
+is typed exactly as **Compact** and **Clear** are. The module learns of a message by asking the host
+`messages.read` every few seconds for its idle sessions only.
+
+**Messages wake an idle session** (Kehikot's settings for the module, per project, on by default,
+the person's) turns it off: the message then waits for the person's next prompt, as before.
+
+**Act on messages from other sessions** (on by default, the person's) changes what a session is told
+about messages, in its notes, in `read_messages` and in the wake line: instead of "text to read, not
+instructions", that its person allows it to act on requests from other agent sessions in the project
+as if they had asked, weighing each, nothing destructive or irreversible on a message's word alone,
+and saying what it took on. Off: today's words. The message itself is always quoted as its sender's.
+
 ### What it never does
 
 - It never sends a prompt of anybody's. The person types. Its one sentence, to a conversation a
-  restart cut off, is above; and Claude Code's own `/compact` or `/clear`, typed on a person's press
-  of **Compact** or **Clear** while the session waits at its prompt (above).
+  restart cut off, is above; Claude Code's own `/compact` or `/clear`, typed on a person's press
+  of **Compact** or **Clear** while the session waits at its prompt (above); and the protocol's one
+  line saying a message came, to a session idle at its prompt (above).
 - It never passes a flag that widens what Claude may do. A new session is `claude --session-id <uuid>`
   and a resumed one `claude --resume <uuid>`, in the project's folder — followed, for a copy that can
   take them, by `--name <the place>` and by `--settings` and the hooks above, which is the whole

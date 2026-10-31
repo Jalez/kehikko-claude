@@ -1,4 +1,4 @@
-import { KEHIKOT_DIR, settingsDeclarationSchema, type SettingField } from 'kehikot-module-protocol'
+import { ACT_ON_MESSAGES_SETTING, KEHIKOT_DIR, WAKE_ON_MESSAGES_SETTING, settingsDeclarationSchema, type SettingField } from 'kehikot-module-protocol'
 
 /**
  * Claude's settings as a host shows them (protocol 2.15.0, `declares.settings`): the same
@@ -11,6 +11,10 @@ import { KEHIKOT_DIR, settingsDeclarationSchema, type SettingField } from 'kehik
  * project: each folder becomes one more `--add-dir`, so a session reads there as it reads in its
  * project, without asking file by file. The person's own list, each folder checked (`folderIssue`).
  * Edits and commands there ask as the person's permission mode says.
+ *
+ * "Messages wake an idle session" and "Act on messages from other sessions" (protocol 2.43.0) are
+ * the protocol's own declarations, the same in every agent module: the waker (`wakeSessions`,
+ * `wake` in live.ts) and the words a session is told about messages (context.ts, doors.ts).
  */
 
 export const SETTINGS_FILE = `${KEHIKOT_DIR}/claude/settings.json`
@@ -41,4 +45,6 @@ export const SETTINGS: SettingField[] = settingsDeclarationSchema.parse([
     default: [],
     personOnly: true,
   },
+  WAKE_ON_MESSAGES_SETTING,
+  ACT_ON_MESSAGES_SETTING,
 ])

@@ -440,9 +440,9 @@ describe('background work cut off or failed: a "needs you" line in the Inbox', (
 describe('the setting "Resume conversations cut off by a restart"', () => {
   test('on unless a person turned it off, and drawn as a toggle no agent can press', () => {
     const dir = project()
-    expect(readSettings(dir)).toEqual({ resumeCutOff: true, statusLine: true, folders: [] })
+    expect(readSettings(dir)).toEqual({ resumeCutOff: true, statusLine: true, folders: [], wakeOnMessages: true, actOnMessages: true })
     writeSettings(dir, { resumeCutOff: false })
-    expect(readSettings(dir)).toEqual({ resumeCutOff: false, statusLine: true, folders: [] })
+    expect(readSettings(dir)).toEqual({ resumeCutOff: false, statusLine: true, folders: [], wakeOnMessages: true, actOnMessages: true })
     expect(resumeToggle(false)).toEqual([{ kind: 'toggle', id: 'resume-cut-off', label: 'Resume conversations cut off by a restart', icon: 'refresh', checked: false }])
     expect(resumeToggle(true)[0]).not.toHaveProperty('agents')
     expect(resumeToggle(null)).toEqual([])
@@ -452,7 +452,7 @@ describe('the setting "Resume conversations cut off by a restart"', () => {
     const dir = project()
     expect(readSettings(dir).statusLine).toBe(true)
     writeSettings(dir, { statusLine: false })
-    expect(readSettings(dir)).toEqual({ resumeCutOff: true, statusLine: false, folders: [] })
+    expect(readSettings(dir)).toEqual({ resumeCutOff: true, statusLine: false, folders: [], wakeOnMessages: true, actOnMessages: true })
     expect(statusLineToggle(false)).toEqual([{ kind: 'toggle', id: 'status-line', label: 'Status line in sessions', checked: false }])
     expect(statusLineToggle(true)[0]).not.toHaveProperty('agents')
     expect(statusLineToggle(null)).toEqual([])
