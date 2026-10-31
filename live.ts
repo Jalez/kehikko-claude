@@ -20,6 +20,7 @@ import { PLACE_TOKEN, assign, attach, born, byToken, follow, homeOf, markSession
 import { removePlugin, sessionPlugin, statusScriptIn, writeComposer, writeOwnStatusLine } from './skills.ts'
 import { freshToken, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, removeConfig, sweepKept, writeConfig, writeKeptConfig, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
+import { extraFolders, folderFlags, sameFolders } from './folders.ts'
 import { AGENT_ID, AGENT_TYPE, EVENT_IDS, FOUND_MOST, isResearch, subagentMeta, type Found, type Told } from './research.ts'
 import { context, toldWords, type HookAnswer, type Said, type Started } from './context.ts'
 
@@ -654,6 +655,11 @@ export interface Run {
   token: string | null
   /** The doors it was started with, by module id: what "Restart to load …" compares against. */
   doors: SessionDoor[]
+  /**
+   * The project's other folders it was started with (`--add-dir`, folders.ts): what "applies when
+   * the session restarts" compares against. Absent for a run started with none.
+   */
+  folders?: string[]
   /** Its `--mcp-config` file, removed when the process ends. */
   config: string | null
   /** The plugin folder it was given with `--plugin-dir`, removed when the process ends. */
@@ -1453,12 +1459,14 @@ export class Runs {
     settled: string | null,
     place: NamedPlace,
     line?: string,
-  ): Promise<{ ok: true; active: Active; session: string; kept: string; token: string; doors: SessionDoor[] } | { ok: false; why: string }> {
+  ): Promise<{ ok: true; active: Active; session: string; kept: string; token: string; doors: SessionDoor[]; folders: string[] } | { ok: false; why: string }> {
     const program = this.program
     if (!program.background || !program.backgroundArgs) return { ok: false, why: `this ${program.name} cannot run a session in the background` }
     const read = settled ? readPlaces(projectPath) : null
     const entry = settled && read?.ok && Object.hasOwn(read.value.sessions, settled) ? read.value.sessions[settled] : undefined
-    const saved = Boolean(entry?.background)
+    /* The project's other folders now (folders.ts). A session whose saved options hold other ones is carried on with these: a flag given is what changes them. */
+    const folders = extraFolders(readSettings(projectPath).folders, projectPath)
+    const saved = Boolean(entry?.background) && sameFolders(entry?.folders ?? [], folders)
     const token = (settled ? tokenFor(projectPath, settled, freshToken) : null) ?? freshToken()
     const kept = keptDirOf(token, this.options.configBase)
     this.issue(token, { projectPath, projectId, place }, kept)
@@ -1485,7 +1493,7 @@ export class Runs {
     const args = [
       ...program.backgroundArgs(settled, name || undefined, saved, line),
       /* Saved options are the session's own: a flag here would carry it on as a copy. Last: `--mcp-config` takes every word after it. */
-      ...(saved ? [] : [...(status && program.settingsArgs ? program.settingsArgs(status) : []), ...(plugin ? ['--plugin-dir', plugin] : []), ...(config ? ['--mcp-config', config] : [])]),
+      ...(saved ? [] : [...(status && program.settingsArgs ? program.settingsArgs(status) : []), ...folderFlags(folders), ...(plugin ? ['--plugin-dir', plugin] : []), ...(config ? ['--mcp-config', config] : [])]),
     ]
     const woke = await program.background(file, args, projectPath, program.environment())
     if (!woke.ok) return woke
@@ -1495,8 +1503,8 @@ export class Runs {
       const moved = follow(projectPath, settled, session)
       if (!moved.ok) this.log(`claude: ${moved.error}`)
     }
-    this.markBackground(projectPath, session)
-    return { ok: true, active: woke.active, session, kept, token, doors }
+    this.markBackground(projectPath, session, folders)
+    return { ok: true, active: woke.active, session, kept, token, doors, folders }
   }
 
   /**
@@ -1529,10 +1537,13 @@ export class Runs {
   }
 
   /** Record that a conversation runs in the background with this module's saved options. Nothing for one the record does not hold yet. */
-  private markBackground(projectPath: string, id: string): void {
+  private markBackground(projectPath: string, id: string, folders?: readonly string[]): void {
     const written = markSession(projectPath, id, (entry) => {
-      if (entry.background) return false
+      const refold = folders !== undefined && !sameFolders(entry.folders ?? [], folders)
+      if (entry.background && !refold) return false
       entry.background = true
+      if (refold && folders.length) entry.folders = [...folders]
+      else if (refold) delete entry.folders
       return true
     })
     if (!written.ok) this.log(`claude: ${written.error}`)
@@ -2211,19 +2222,43 @@ export class Runs {
   }
 
   /**
+   * Whether the project's other folders (folders.ts) are not the ones `run` was started with: a
+   * change the person made applies when the session restarts. Never for a view of a session running
+   * in the background that this module did not start: it has what it was started with elsewhere. One
+   * this module runs in the background is carried on with the folders now when it is woken (`launch`).
+   */
+  foldersChanged(run: Run): boolean {
+    if (run.what !== 'session' || run.ended || (run.joined && !run.owned)) return false
+    return !sameFolders(extraFolders(readSettings(run.projectPath).folders, run.cwd || run.projectPath), run.folders ?? [])
+  }
+
+  /**
+   * The person saved the project's settings: each running session of that project whose other
+   * folders are now not the ones it has is told so, for the line that offers a restart, and told
+   * again when they are the same once more.
+   */
+  settingsSaved(projectPath: string): void {
+    for (const run of this.runs.values()) {
+      if (run.what !== 'session' || run.projectPath !== projectPath) continue
+      const changed = this.foldersChanged(run)
+      for (const viewer of run.viewers) viewer.say({ session: run.settled ?? run.id, folders: changed ? 'changed' : 'same' })
+    }
+  }
+
+  /**
    * End a session whose project's folder was renamed under it, so that it is resumed in the new
    * folder: only on a person's press, and never while it is working. Its viewers are closed with
    * `CLOSED.moved` and open it again, which resumes the same session with the new folder as its
    * working directory. A sentence when it is not done.
    */
-  restartIn(id: string, why: 'moved' | 'doors' = 'moved'): true | string {
+  restartIn(id: string, why: 'moved' | 'doors' | 'folders' = 'moved'): true | string {
     const run = this.find(id)
     if (!run) return 'That session is not running.'
     if (why === 'moved' && run.cwd === run.projectPath) return 'That session already runs in its project’s folder.'
-    if (run.joined && !(run.owned && why === 'doors')) return 'That is a view of a session running in the background: it runs where it was started.'
+    if (run.joined && !(run.owned && (why === 'doors' || why === 'folders'))) return 'That is a view of a session running in the background: it runs where it was started.'
     if (run.state === 'working') return 'It is working. Restart it when it is idle.'
     run.restarting = true
-    this.log(`claude: ${run.settled ?? run.id} is ended by a person to be resumed ${why === 'doors' ? 'with the doors of its kehikko now' : `in ${run.projectPath}`}`)
+    this.log(`claude: ${run.settled ?? run.id} is ended by a person to be resumed ${why === 'doors' ? 'with the doors of its kehikko now' : why === 'folders' ? 'with the project’s other folders now' : `in ${run.projectPath}`}`)
     /* One this module runs in the background is stopped (its conversation kept) and woken again by the page, with its files rewritten. */
     if (run.owned && run.joined?.handle) void this.stopOwned(run).finally(() => kill(run.pty))
     else kill(run.pty)
@@ -2329,7 +2364,7 @@ export class Runs {
       const written = attach(run.projectPath, run.at, now, { label: known?.label, lastActive: known?.lastActive })
       if (!written.ok) this.log(`claude: ${written.error}`)
     }
-    if (run.owned) this.markBackground(run.projectPath, now)
+    if (run.owned) this.markBackground(run.projectPath, now, run.folders ?? [])
     for (const viewer of run.viewers) viewer.say({ exists: true, session: now, label: run.label })
     this.changed()
     void this.meter(run)
@@ -2382,15 +2417,16 @@ export class Runs {
     const able = await this.program.supports(found.file)
     let owned = false
     let kept: string | null = null
-    let woken: { token: string; doors: SessionDoor[] } | null = null
+    let woken: { token: string; doors: SessionDoor[]; folders: string[] } | null = null
     if (joined && settled) {
       const read = readPlaces(projectPath)
-      owned = read.ok && Boolean(Object.hasOwn(read.value.sessions, settled) && read.value.sessions[settled]?.background)
-      /* Attached to again after a restart: its token, and the doors its kept file gave it, for "Restart to load …". */
+      const entry = read.ok && Object.hasOwn(read.value.sessions, settled) ? read.value.sessions[settled] : undefined
+      owned = Boolean(entry?.background)
+      /* Attached to again after a restart: its token, the doors its kept file gave it, for "Restart to load …", and the folders its saved options hold. */
       const token = owned ? tokenFor(projectPath, settled, freshToken) : null
       if (token) {
         kept = keptDirOf(token, this.options.configBase)
-        woken = { token, doors: keptDoors(kept) }
+        woken = { token, doors: keptDoors(kept), folders: entry?.folders ?? [] }
       }
     }
     if (!joined && !copyOf && !unchecked && able.backgrounds && able.lists) {
@@ -2399,7 +2435,7 @@ export class Runs {
         joined = woke.active
         owned = true
         kept = woke.kept
-        woken = { token: woke.token, doors: woke.doors }
+        woken = { token: woke.token, doors: woke.doors, folders: woke.folders }
         if (settled) settled = woke.session
         else id = woke.session
       } else {
@@ -2445,11 +2481,14 @@ export class Runs {
         : null
     /* Its own status line, which also says its context here (statusline.sh): only beside its plugin, which holds the script and the token. */
     const status = !joined && plugin && token && able.tells ? this.statusLineFor(projectPath, plugin) : null
+    /* The folders beside the project the person gave this project's sessions (folders.ts): read as the project is, without asking file by file. */
+    const folders = joined ? [] : extraFolders(readSettings(projectPath).folders, projectPath)
     const args = joined
       ? this.program.attach(joined.handle!)
       : [
           ...(settled ? this.program.resume(settled, name || undefined) : this.program.fresh(id, name || undefined)),
           ...(tells ? this.program.reports(tellLine, status ?? {}) : status && this.program.settingsArgs ? this.program.settingsArgs(status) : []),
+          ...folderFlags(folders),
           /* Every module's skills, for this one process: nothing is written into the person's config. */
           ...(plugin ? ['--plugin-dir', plugin] : []),
           /* Last: the flag takes every word after it until the next flag. */
@@ -2522,6 +2561,7 @@ export class Runs {
       ended: false,
       token: woken?.token ?? token,
       doors: woken?.doors ?? doors,
+      ...((woken?.folders ?? folders).length ? { folders: woken?.folders ?? folders } : {}),
       config,
       plugin,
       owned,
@@ -2579,7 +2619,7 @@ export class Runs {
        was given a fresh one, and its saved options name the folder kept under THAT token. Woken
        later without it, the next start would write another folder and leave the named one stale. */
     if (written.ok && run.token && run.owned) tokenFor(run.projectPath, run.settled, () => run.token!)
-    if (run.owned) this.markBackground(run.projectPath, run.settled)
+    if (run.owned) this.markBackground(run.projectPath, run.settled, run.folders ?? [])
   }
 
   private follow(run: Run): void {
@@ -2637,7 +2677,7 @@ export class Runs {
       if (!written.ok) this.log(`claude: ${written.error}`)
       else if (homeless) this.log(`claude: ${run.settled} filed under the place it was started at${hadOwn ? '' : ', as its kehikko’s own (it had none)'} — no /kehikot-here needed`)
       run.place = null
-      if (run.owned) this.markBackground(run.projectPath, run.settled)
+      if (run.owned) this.markBackground(run.projectPath, run.settled, run.folders ?? [])
       if (run.state) this.markWorking(run.projectPath, run.settled, run.state)
     } else {
       note(run.projectPath, run.settled, { label, lastActive: known?.lastActive })
@@ -2706,6 +2746,8 @@ export class Runs {
       ...(run.unchecked ? { unchecked: run.unchecked } : {}),
       /* The project's folder was renamed while it ran: the program still has the old one. */
       ...(run.what === 'session' && movedWord(run).moved ? movedWord(run) : {}),
+      /* The person changed the project's other folders since it started: they apply when it restarts. */
+      ...(this.foldersChanged(run) ? { folders: 'changed' } : {}),
     })
     /* On screen until the page says otherwise: a view connects when it is shown. */
     run.looking.add(viewer)

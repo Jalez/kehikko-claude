@@ -572,6 +572,14 @@ switch kehikko. A line filed under the session's epic is the most that exists.
   own, or with none of theirs the module's line) and nothing else: nothing about permissions, models or tools. The only other command lines there are:
   `claude --help`, once per binary; `claude agents --json`, which reads; and `claude attach <handle>`,
   with the handle Claude Code itself printed, checked to be one word that cannot be a flag.
+- The one flag that reaches past the project is the person's own: each folder in **Other folders
+  sessions may work in** (Kehikot's settings for the module, per project) is one more
+  `--add-dir <folder>`, so a session reads there as in its project instead of asking file by file.
+  Edits and commands there ask as the person's permission mode says. A folder must exist; `/`, the
+  home folder or one holding it, wide roots, system folders and `~/.claude`, `~/.codex`, `~/.gemini`,
+  `~/.ssh` and the like are refused (`folders.ts`). An agent cannot change the list. It applies when
+  a session starts or restarts: a session in the background whose saved options hold other folders
+  is carried on with the folders now when it is next woken, and a running one offers the restart.
 - It runs the conversations it starts or resumes in the background (`claude --bg`, see above). It
   stops one only on a person's **End** (`claude stop`, the conversation kept), removes one only when
   it started it a moment ago and nobody typed a character into it (`claude rm`), and never

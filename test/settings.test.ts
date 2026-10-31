@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -57,7 +57,7 @@ describe('the declaration', () => {
   test('is in the manifest, parses, is the person’s, and defaults to on as the file does', () => {
     expect(MANIFEST.declares.settings).toEqual(SETTINGS)
     expect(settingsDeclarationSchema.parse(SETTINGS)).toEqual(SETTINGS)
-    expect(SETTINGS).toHaveLength(2)
+    expect(SETTINGS.map((one) => one.key)).toEqual(["resumeCutOff", "statusLine", "folders"])
     expect(SETTINGS[0]).toMatchObject({ key: 'resumeCutOff', type: 'boolean', default: true, scope: 'project', personOnly: true })
     expect(readSettings(project).resumeCutOff).toBe(SETTINGS[0]!.default as boolean)
     expect(SETTINGS[1]).toMatchObject({ key: 'statusLine', label: 'Status line in sessions', type: 'boolean', default: true, scope: 'project', personOnly: true })
@@ -67,25 +67,25 @@ describe('the declaration', () => {
 
 describe('read and change, round trip', () => {
   test('get reads the default with no file, then what the toggle wrote', async () => {
-    expect(await get()).toEqual({ ok: true, values: { resumeCutOff: true, statusLine: true }, file: '.kehikot/claude/settings.json' } as never)
+    expect(await get()).toEqual({ ok: true, values: { resumeCutOff: true, statusLine: true, folders: [] }, file: '.kehikot/claude/settings.json' } as never)
     writeSettings(project, { resumeCutOff: false })
-    expect((await get()).values).toEqual({ resumeCutOff: false, statusLine: true })
+    expect((await get()).values).toEqual({ resumeCutOff: false, statusLine: true, folders: [] })
     /* One key written keeps the other. */
     writeSettings(project, { statusLine: false })
-    expect((await get()).values).toEqual({ resumeCutOff: false, statusLine: false })
+    expect((await get()).values).toEqual({ resumeCutOff: false, statusLine: false, folders: [] })
   })
 
   test("the page's ticket is the person: saved, in the format the toggle writes", async () => {
     expect((await set({ key: 'resumeCutOff', value: false }, TICKET)).outcome).toBe('saved')
-    expect(readFileSync(file(), 'utf8')).toBe(`${JSON.stringify({ resumeCutOff: false, statusLine: true }, null, 2)}\n`)
+    expect(readFileSync(file(), 'utf8')).toBe(`${JSON.stringify({ resumeCutOff: false, statusLine: true, folders: [] }, null, 2)}\n`)
     expect(readSettings(project).resumeCutOff).toBe(false)
     expect((await set({ key: 'statusLine', value: false }, TICKET)).outcome).toBe('saved')
-    expect(readSettings(project)).toEqual({ resumeCutOff: false, statusLine: false })
+    expect(readSettings(project)).toEqual({ resumeCutOff: false, statusLine: false, folders: [] })
     /* And the page's own route still reads it, and changes one key at a time. */
     const page = await answer('GET', '/api/settings', new URLSearchParams({ projectPath: project }), null, TICKET)
-    expect((page!.body as { settings: unknown }).settings).toEqual({ resumeCutOff: false, statusLine: false })
+    expect((page!.body as { settings: unknown }).settings).toEqual({ resumeCutOff: false, statusLine: false, folders: [] })
     const turned = await answer('POST', '/api/settings', new URLSearchParams(), { projectPath: project, statusLine: true }, TICKET)
-    expect((turned!.body as { settings: unknown }).settings).toEqual({ resumeCutOff: false, statusLine: true })
+    expect((turned!.body as { settings: unknown }).settings).toEqual({ resumeCutOff: false, statusLine: true, folders: [] })
     expect((await answer('POST', '/api/settings', new URLSearchParams(), { projectPath: project, statusLine: 'yes' }, TICKET))?.status).toBe(400)
     expect((await answer('POST', '/api/settings', new URLSearchParams(), { projectPath: project }, TICKET))?.status).toBe(400)
     expect((await set({ key: 'nope', value: false }, TICKET)).outcome).toBe('refused')
@@ -127,5 +127,47 @@ describe('who may change it', () => {
     host(false)
     expect((await set({ key: 'resumeCutOff', value: false, by: 'person', pass: PASS })).outcome).toBe('refused')
     expect(readSettings(project).resumeCutOff).toBe(true)
+  })
+})
+
+describe('other folders sessions may work in', () => {
+  const folder = (name: string) => {
+    const at = join(realpathSync(mkdtempSync(join(tmpdir(), 'kehikko-claude-folder-'))), name)
+    mkdirSync(at, { recursive: true })
+    made.push(at)
+    return at
+  }
+
+  test('is declared as a list of the person’s, empty by default', () => {
+    expect(SETTINGS.find((one) => one.key === 'folders')).toMatchObject({ type: 'list', default: [], scope: 'project', personOnly: true, label: 'Other folders sessions may work in' })
+    expect(readSettings(project).folders).toEqual([])
+  })
+
+  test('a person saves it, per project, in the same file; a bad folder and an agent are refused and nothing changes', async () => {
+    const one = folder('one')
+    const two = folder('two')
+    expect((await set({ key: 'folders', value: [one, `${two}/`, one] }, TICKET)).outcome).toBe('saved')
+    expect(readSettings(project).folders).toEqual([one, two])
+    expect(JSON.parse(readFileSync(file(), 'utf8')).folders).toEqual([one, two])
+    expect((await get()).values.folders).toEqual([one, two])
+    const other = realpathSync(mkdtempSync(join(tmpdir(), 'kehikko-claude-settings-other-')))
+    made.push(other)
+    expect(readSettings(other).folders).toEqual([])
+    const refused = await set({ key: 'folders', value: [process.env.HOME!] }, TICKET)
+    expect(refused.outcome).toBe('refused')
+    expect(refused.why).toContain('home folder')
+    expect((await set({ key: 'folders', value: [] })).outcome).toBe('refused')
+    expect(readSettings(project).folders).toEqual([one, two])
+    /* The switches are kept as they were. */
+    expect(readSettings(project)).toMatchObject({ resumeCutOff: true, statusLine: true })
+  })
+
+  test('the page’s own route takes it with the same checks', async () => {
+    const one = folder('page')
+    const saved = await answer('POST', '/api/settings', new URLSearchParams(), { projectPath: project, folders: [one] }, TICKET)
+    expect((saved!.body as { settings: { folders: string[] } }).settings.folders).toEqual([one])
+    const refused = await answer('POST', '/api/settings', new URLSearchParams(), { projectPath: project, folders: ['/'] }, TICKET)
+    expect(refused!.status).toBe(400)
+    expect(readSettings(project).folders).toEqual([one])
   })
 })

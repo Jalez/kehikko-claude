@@ -64,11 +64,11 @@ import { personEnv } from 'kehikot-module-protocol/serve'
  * ## Every command line this module ever runs, and it is the whole list
  *
  *     claude --help                                   once per binary: which flags and commands it has
- *     claude --session-id <uuid> [--name <place>] [--settings <json>] [--plugin-dir <plugin>] [--mcp-config <file>]  a new session
- *     claude --resume <uuid> [--name <place>] [--settings <json>] [--plugin-dir <plugin>] [--mcp-config <file>]      a session nothing else is running
+ *     claude --session-id <uuid> [--name <place>] [--settings <json>] [--add-dir <folder>]... [--plugin-dir <plugin>] [--mcp-config <file>]  a new session
+ *     claude --resume <uuid> [--name <place>] [--settings <json>] [--add-dir <folder>]... [--plugin-dir <plugin>] [--mcp-config <file>]      a session nothing else is running
  *     claude agents --json                            before every resume and every list: what is running. Reads; starts nothing
  *     claude attach <handle>                          a view of a session the program runs in the background
- *     claude --bg [--resume <uuid>] [<line>] [--name <place>] [--settings <json>] [--plugin-dir <plugin>] [--mcp-config <file>]
+ *     claude --bg [--resume <uuid>] [<line>] [--name <place>] [--settings <json>] [--add-dir <folder>]... [--plugin-dir <plugin>] [--mcp-config <file>]
  *                                                     a conversation of a place's, started or resumed in the background
  *     claude stop <handle>                            a background session of this module's, ended by a person
  *     claude rm <handle>                              one this module started that nobody ever typed into
