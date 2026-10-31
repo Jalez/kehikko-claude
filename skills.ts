@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { WELL_KNOWN, missingNeeds, moduleSkillsSchema, skillPath, skillTextIssue, type ModuleSkill } from 'kehikot-module-protocol'
@@ -257,6 +257,8 @@ export async function sessionPlugin(doors: readonly SessionDoor[], options: Gath
   } else dir = mkdtempSync(join(base, 'plugin-'))
   chmodSync(dir, 0o700)
   mkdirSync(join(dir, '.claude-plugin'), { mode: 0o700 })
+  mkdirSync(join(dir, 'kehikot'), { recursive: true, mode: 0o700 })
+  writeFileSync(join(dir, 'kehikot', 'pid'), String(process.pid), { mode: 0o600 })
   for (const [name, text] of found) {
     mkdirSync(join(dir, 'skills', name), { recursive: true, mode: 0o700 })
     writeFileSync(join(dir, 'skills', name, 'SKILL.md'), text, { mode: 0o600 })
@@ -330,7 +332,7 @@ function writeContextHooks(dir: string, token: string, registration: string): vo
   writeFileSync(join(dir, 'context.sh'), readFileSync(CONTEXT_SCRIPT), { mode: 0o700 })
   writeFileSync(join(dir, STATUS_FILE), readFileSync(STATUS_SCRIPT), { mode: 0o700 })
   writeFileSync(join(dir, LINE_FILE), readFileSync(LINE_SCRIPT), { mode: 0o600 })
-  mkdirSync(join(dir, 'kehikot'), { mode: 0o700 })
+  mkdirSync(join(dir, 'kehikot'), { recursive: true, mode: 0o700 })
   writeFileSync(join(dir, 'kehikot', 'token'), token, { mode: 0o600 })
   writeFileSync(join(dir, 'kehikot', 'origin'), served, { mode: 0o600 })
   writeFileSync(join(dir, 'kehikot', 'registration'), registration, { mode: 0o600 })
@@ -344,4 +346,55 @@ export function removePlugin(dir: string | null): void {
   } catch {
     /* Gone already. */
   }
+}
+
+/** Whether a process by this id is running (and is this user's to ask about). */
+function alive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as { code?: string }).code === 'EPERM'
+  }
+}
+
+/** How old a plugin folder with no process named in it must be before it is taken for left behind. */
+const UNCLAIMED = 60 * 60_000
+
+/**
+ * Remove the plugin folders a process that stopped without ending its sessions left behind: those
+ * whose `kehikot/pid` names no running process (or names none and are an hour old). Another
+ * process's live folders are left alone. Returns how many went. Never throws.
+ */
+export function sweepKits(base?: string): number {
+  const root = configDirOf(base)
+  let names: string[] = []
+  try {
+    names = readdirSync(root).filter((one) => one.startsWith('plugin-'))
+  } catch {
+    return 0
+  }
+  let gone = 0
+  for (const name of names) {
+    const dir = join(root, name)
+    let pid = NaN
+    try {
+      pid = Number(readFileSync(join(dir, 'kehikot', 'pid'), 'utf8').trim())
+    } catch {
+      /* None written. */
+    }
+    if (Number.isSafeInteger(pid) && pid > 1) {
+      if (alive(pid)) continue
+    } else {
+      try {
+        if (Date.now() - statSync(dir).mtimeMs < UNCLAIMED) continue
+      } catch {
+        continue
+      }
+    }
+    removePlugin(dir)
+    gone += 1
+  }
+  return gone
 }
