@@ -17,7 +17,7 @@ import { isKehikkoKey, kehikkoOf, placeKey, sortedParts, type Kehikko } from './
 import { cutOffs, cutOffWords, midTurn, movedOn, type CutOff } from './cutoff.ts'
 import { PROGRAM, headOf, home, recordFile, sessionName, type Active, type ActiveStatus, type Able, type Program, type Running, type State } from './program.ts'
 import { PLACE_TOKEN, assign, attach, born, byToken, follow, homeOf, isDetached, markSession, markSessions, note, ownOf, projectRoot, readPlaces, readSettings, recordedIds, sighted, stayDetached, tokenFor, type NamedPlace, type PlaceEntry, type Places, type SessionEntry } from './record.ts'
-import { heldSkills, removePlugin, sessionPlugin, statusScriptIn, writeComposer, writeOwnStatusLine } from './skills.ts'
+import { heldSkills, removePlugin, sessionPlugin, statusScriptIn, sweepKits, writeComposer, writeOwnStatusLine } from './skills.ts'
 import { freshToken, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, removeConfig, sweepKept, writeConfig, writeKeptConfig, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
 import { extraFolders, folderFlags, sameFolders } from './folders.ts'
@@ -3437,6 +3437,13 @@ export function theRuns(log: (line: string) => void = () => {}): Runs {
   held[HELD] = runs
   /* A message to a session idle at its prompt wakes it (protocol 2.43.0): the protocol's rule, typed through `wake`. */
   messageWaker({ module: 'kehikot.claude', sessions: () => runs.wakeSessions(), type: (id, line) => runs.wake(id, line), log }).start()
+  /* The plugin folders of sessions a process that stopped without ending them left behind: removed now (skills.ts). */
+  try {
+    const swept = sweepKits()
+    if (swept) log(`claude: removed ${swept} plugin folder${swept === 1 ? '' : 's'} a stopped process left behind`)
+  } catch {
+    /* Swept at the next start. */
+  }
 
   /* Stopping, however it is asked. `exit` covers Vite's own handling of
      SIGTERM; the signals are here for when nothing else is listening. */
