@@ -245,9 +245,11 @@ on screen:
 - **Connected to this kehikko** — a checkbox in the View menu, checked for the one on screen. Unchecking it
   is "Disconnect from this kehikko" (below).
 - **Disconnect from this kehikko** — a run in the Run menu, not confirmed (it is kept and can be connected
-  again). The record no longer lists it here; the conversation itself is not ended, and the place opens what
-  it has left — another of its conversations, or a new one. A strip above Claude Code says it was kept and
-  where to connect it again, until dismissed.
+  again). The record no longer lists it at any place, and it stays disconnected until a person connects it
+  again: reopening it, its run going on, or Claude Code carrying it on under a new id does not put it back.
+  The conversation itself is not ended, and the place opens what it has left — another of its conversations,
+  or a new one. A strip above Claude Code says it was kept and where to connect it again, until dismissed.
+  `/kehikot-here off`, typed in the conversation, does the same for one on screen in no container.
 - **Connect a conversation to this kehikko** — a jump in the Go menu, present while the project has
   conversations that belong to no place (never assigned, or disconnected). Choosing one connects it here and
   shows it. Typing `/kehikot-here` in a conversation does the same.
@@ -693,6 +695,8 @@ Kehikot door:
 Typed by the person in any Claude Code conversation, `/kehikot-here` assigns THAT conversation to
 the kehikko they have on screen. `/kehikot-here own` also makes it that kehikko's own conversation;
 `/kehikot-here kehikko: <key>` names a kehikko when none, or several, are on screen.
+`/kehikot-here off` disconnects it from every kehikko, as the container's "Disconnect from this kehikko"
+does — for a conversation in an outside terminal, which no container has on screen.
 
 **Why a skill, and not the MCP door.** Claude Code never tells an MCP server which conversation is
 calling. A skill's text is different, and both of these were read in the 2.1.304 binary and then

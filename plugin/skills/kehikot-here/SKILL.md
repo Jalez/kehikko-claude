@@ -1,12 +1,12 @@
 ---
 name: kehikot-here
-description: Assign this Claude Code conversation to the kehikko on screen in Kehikot. Only a person runs it, by typing /kehikot-here (add "own" to make it that kehikko's own conversation).
-argument-hint: "[own] [kehikko: <key>]"
+description: Assign this Claude Code conversation to the kehikko on screen in Kehikot, or disconnect it. Only a person runs it, by typing /kehikot-here (add "own" to make it that kehikko's own conversation, or "off" to disconnect it from every kehikko).
+argument-hint: "[own] [kehikko: <key>] | off"
 disable-model-invocation: true
 allowed-tools: Bash(curl:*), Bash(echo:*)
 ---
 
-The person typed `/kehikot-here $ARGUMENTS` to assign THIS conversation to the kehikko they have on screen in Kehikot. Kehikot's Claude module at {{origin}} was asked, with this conversation's id. Its answer, then curl's own report in brackets:
+The person typed `/kehikot-here $ARGUMENTS` to assign THIS conversation to the kehikko they have on screen in Kehikot (or, with `off`, to disconnect it from every kehikko). Kehikot's Claude module at {{origin}} was asked, with this conversation's id. Its answer, then curl's own report in brackets:
 
 !`curl -s -m 5 --retry 4 --retry-connrefused --retry-delay 1 --retry-max-time 12 -w '\n[curl exit %{exitcode}: %{errormsg}; HTTP %{http_code}]\n' -X POST -G --data-urlencode "session=${CLAUDE_SESSION_ID}" --data-urlencode "say=$ARGUMENTS" {{origin}}/api/here || echo "[no answer from {{origin}}]"`
 
@@ -24,6 +24,6 @@ What to do:
    - curl exit 0 with HTTP 404, 403 or 405: "Kehikot: the Claude module at {{origin}} answered HTTP CODE to /kehikot-here, so it is older than this skill (or another program has its port). Update Claude from Kehikot's Updates menu, then type /kehikot-here again. [skill {{version}}]"
    - anything else: "Kehikot: the Claude module at {{origin}} did not assign this conversation (curl exit N, HTTP CODE: ERROR). Try /kehikot-here again in a moment; if it keeps failing, update Claude from Kehikot's Updates menu. [skill {{version}}]" — with curl's numbers and error message from the report.
 
-Never run either command again on your own, with another session id, or with other words: only the person assigns a conversation, by typing the command.
+Never run either command again on your own, with another session id, or with other words: only the person assigns or disconnects a conversation, by typing the command.
 
 Once this conversation has a place: when you or a subagent finish researching something (investigating, comparing, auditing, reading up), say so with `tell_finished({ event: "research-complete", label })` on the Claude module's MCP server (kehikko-claude), and the person gets a "Research complete" notice.
