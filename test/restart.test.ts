@@ -795,6 +795,70 @@ describe('needs you only for a question the person has not seen', () => {
     await third.runs.watch()
     expect(third.runs.activity(g.dir).filter((row) => row.state === 'attention').map((row) => row.id)).toEqual([g.id])
   })
+
+  test('a question that arrives while the person has it on screen is saved as seen: a restart does not bring it back (#59)', async () => {
+    const f = await fresh()
+    await prompted(f)
+    f.one.runs.look(f.run, f.viewer, true)
+    says(f.m, f.id, 'needs-you')
+    await f.one.runs.watch()
+    expect(f.run.state).toBe('needs-you')
+    expect(f.attention()).toEqual([])
+    expect(entryOf(f.dir, f.id)?.looked).toBeDefined()
+    f.one.runs.endAll()
+    await settle()
+    const second = f.m.module()
+    second.runs.know(f.dir)
+    await second.runs.watch()
+    expect(second.runs.activity(f.dir).filter((row) => row.state === 'attention')).toEqual([])
+  })
+
+  test('one seen in memory before the record was written is written on the next look', async () => {
+    const f = await fresh()
+    await prompted(f)
+    says(f.m, f.id, 'needs-you')
+    await f.one.runs.watch()
+    f.run.seen = true
+    expect(entryOf(f.dir, f.id)?.looked).toBeUndefined()
+    f.one.runs.look(f.run, f.viewer, true)
+    expect(entryOf(f.dir, f.id)?.looked).toBeDefined()
+  })
+
+  test('a page the host keeps hidden is not looking: a question that arrives then stays, and coming back is seeing it', async () => {
+    const f = await fresh()
+    await prompted(f)
+    f.one.runs.look(f.run, f.viewer, true)
+    /* The person left for a kehikko this module is not on: the page says the view is not watched. */
+    f.one.runs.look(f.run, f.viewer, false)
+    says(f.m, f.id, 'needs-you')
+    await f.one.runs.watch()
+    expect(f.attention()).toMatchObject([{ id: f.id, state: 'attention' }])
+    expect(entryOf(f.dir, f.id)?.looked).toBeUndefined()
+    /* Back: shown again, watched again. */
+    f.one.runs.look(f.run, f.viewer, true)
+    expect(f.attention()).toEqual([])
+    expect(entryOf(f.dir, f.id)?.looked).toBeDefined()
+  })
+
+  test('a view that opens on a hidden page (w: false in its opening) is not a look', async () => {
+    const f = await fresh()
+    await prompted(f)
+    says(f.m, f.id, 'needs-you')
+    await f.one.runs.watch()
+    f.one.runs.endAll()
+    await settle()
+    const second = f.m.module()
+    const p = page(second.runs)
+    second.runs.know(f.dir)
+    await second.runs.watch()
+    const viewer = new Watcher()
+    const again = (await second.runs.open({ ...open(f.dir, f.id), unwatched: true }, viewer)) as Run
+    await second.runs.watch()
+    expect(again.looking.size).toBe(0)
+    expect(entryOf(f.dir, f.id)?.looked).toBeUndefined()
+    expect(second.runs.activity(f.dir).filter((row) => row.state === 'attention').map((row) => row.id)).toEqual([f.id])
+    void p
+  })
 })
 
 describe('an Inbox item keeps its since while its state does: the same item is never news again', () => {

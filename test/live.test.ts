@@ -74,6 +74,11 @@ describe('the opening frame', () => {
     expect(opening(frame({ session: A }), 'T')).toMatchObject({ session: A })
   })
 
+  test('w: false says the view opens unwatched (behind another, or on a page the host keeps hidden)', () => {
+    expect(opening(frame({ w: false }), 'T')).toMatchObject({ unwatched: true })
+    expect(opening(frame({ w: true }), 'T')).not.toHaveProperty('unwatched')
+  })
+
   test('without this process’s ticket nothing else is looked at', () => {
     expect(typeof opening(frame({ ticket: 'other' }), 'T')).toBe('string')
     expect(typeof opening(frame({ ticket: undefined }), 'T')).toBe('string')

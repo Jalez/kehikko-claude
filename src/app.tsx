@@ -156,7 +156,7 @@ export function App() {
   )
   /* The modules on this kehikko, as one steady string: a change is what offers "Restart to load …". */
   const containers = host.containers.map((one) => one.module).sort().join(',')
-  return <Sessions theme={host.theme} at={at} cover={cover} hosted={hosted} canvasEpic={epic} containers={containers} show={shown} covered={host.covered} />
+  return <Sessions theme={host.theme} at={at} cover={cover} hosted={hosted} canvasEpic={epic} containers={containers} show={shown} covered={host.covered} visible={host.visible} />
 }
 
 /**
@@ -243,6 +243,7 @@ export function Sessions({
   containers = '',
   show = null,
   covered = NOT_COVERED,
+  visible = true,
 }: {
   theme: 'light' | 'dark'
   /** The place the canvas is about, or null when there is nothing to open. */
@@ -262,6 +263,12 @@ export function Sessions({
   show?: SharedShow | null
   /** What the host's revealed header and footer cover of the page (protocol 2.42.0), for the view on screen. See `view/keep-last.ts`. */
   covered?: Covered
+  /**
+   * Whether the host has this page on screen (protocol 2.45.0, `kehikot.visible`). A page the host
+   * keeps hidden on a kehikko the person left is not being looked at: no view of it is `watched`, so
+   * a question that arrives then is not taken as seen, and coming back is looking again (`saw`).
+   */
+  visible?: boolean
 }) {
   const [views, setViews] = useState<View[]>([])
   /** Which view each place shows, by `placeId`. */
@@ -1028,7 +1035,7 @@ export function Sessions({
                 }}
                 shown={shown}
                 covered={shown ? covered : undefined}
-                watched={one.n === view?.n}
+                watched={visible && one.n === view?.n}
                 onStanding={(next) => stood(one, next)}
                 onSaid={(heard) => said(one, heard)}
                 {...(shown ? { commands } : {})}
