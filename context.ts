@@ -67,6 +67,8 @@ export interface ContextNeeds {
   host(asked: DoorsAsked): Promise<HostPlace | null>
   /** The names of the doors the conversation was started with, when known. */
   doorsOf(token: string): string[] | null
+  /** The skills the conversation has (`heldSkills` of its plugin), when known: its notes say apart those it lacks (protocol 2.44.0). */
+  holdsOf?(token: string): string[] | null
   /** Where what the conversation was last told is kept. */
   toldFile(token: string): string
   /** The record changed under this project: what `/kehikot-here` calls after it files one. */
@@ -267,6 +269,8 @@ export async function context(asked: { event: string; session: string; token: st
       hostDoor,
       self: SELF,
       connected: needs.doorsOf(token),
+      /* The skills it has: the host lists what can load on the kehikko now, which a conversation started before a change lacks. */
+      holds: needs.holdsOf?.(token) ?? null,
       key,
       /* Unread messages from other agent sessions, handed by the host and now delivered (protocol 2.41.0). */
       messages: answer?.messages ?? null,
