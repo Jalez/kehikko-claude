@@ -17,7 +17,7 @@ import { isKehikkoKey, kehikkoOf, placeKey, sortedParts, type Kehikko } from './
 import { cutOffs, cutOffWords, midTurn, movedOn, type CutOff } from './cutoff.ts'
 import { PROGRAM, headOf, home, recordFile, sessionName, type Active, type ActiveStatus, type Able, type Program, type Running, type State } from './program.ts'
 import { PLACE_TOKEN, assign, attach, born, byToken, follow, homeOf, isDetached, markSession, markSessions, note, ownOf, projectRoot, readPlaces, readSettings, recordedIds, sighted, stayDetached, tokenFor, type NamedPlace, type PlaceEntry, type Places, type SessionEntry } from './record.ts'
-import { removePlugin, sessionPlugin, statusScriptIn, writeComposer, writeOwnStatusLine } from './skills.ts'
+import { heldSkills, removePlugin, sessionPlugin, statusScriptIn, writeComposer, writeOwnStatusLine } from './skills.ts'
 import { freshToken, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, removeConfig, sweepKept, writeConfig, writeKeptConfig, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
 import { extraFolders, folderFlags, sameFolders } from './folders.ts'
@@ -2184,6 +2184,12 @@ export class Runs {
     return kept.length ? kept.map((door) => door.name) : null
   }
 
+  /** The skills the conversation behind a token has: what its plugin lists (`heldSkills`), from its run or its kept folder. Null when unknown. */
+  skillsOf(token: string): string[] | null {
+    const run = [...this.runs.values()].find((one) => one.what === 'session' && one.token === token && !one.ended)
+    return heldSkills(run?.plugin) ?? heldSkills(join(keptDirOf(token, this.options.configBase), 'plugin'))
+  }
+
   /**
    * A session's own hook asking what it is to be told (`POST /api/context`, see context.ts): its
    * place and the modules on its kehikko at a start, what changed at a prompt — and the
@@ -2201,6 +2207,7 @@ export class Runs {
         startedOf: (one) => this.startedOf(one),
         host: (asked) => (this.options.place ?? hostPlace)(asked),
         doorsOf: (one) => this.doorNamesOf(one),
+        holdsOf: (one) => this.skillsOf(one),
         toldFile: (one) => join(keptDirOf(one, this.options.configBase), 'told.json'),
         told: (projectPath, assigned) => this.told(projectPath, assigned),
         log: this.log,

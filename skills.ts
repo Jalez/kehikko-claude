@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { WELL_KNOWN, missingNeeds, moduleSkillsSchema, skillPath, skillTextIssue, type ModuleSkill } from 'kehikot-module-protocol'
+import { WELL_KNOWN, moduleSkillsSchema, skillPath, skillTextIssue, skillsThatLoad, type ModuleSkill, type ProvidingManifest } from 'kehikot-module-protocol'
 import { originFor, preferred, registryDir } from 'kehikot-module-protocol/serve'
 
 import { configDirOf, type SessionDoor } from './doorConfig.ts'
-import { ID, PREFERRED_PORT } from './manifest.ts'
+import { ID, MANIFEST, PREFERRED_PORT } from './manifest.ts'
 import { configDir } from './program.ts'
 import { PLACE_TOKEN } from './record.ts'
 
@@ -166,12 +166,15 @@ async function getText(origin: string, path: string, options: GatherOptions): Pr
  * left out so it is not listed twice; at another version the session's copy, which is current, is
  * used. The first module to offer a name keeps it.
  *
- * A kehikko-bound skill (protocol 2.12.0: its declaration lists `needs`, other modules it cannot
- * work without) is included only when every module it needs has a container on the session's
- * kehikko — which is what the doors are: the host gives a session the doors of the modules placed
- * on its kehikko (`doorsFor` in the host). One that lacks any is left out with one log line naming
- * what is missing; its text is not fetched. A module with no MCP door is not seen this way, so a
- * skill cannot need one.
+ * A kehikko-bound skill (protocol 2.12.0: its declaration lists `needs`) is included only when
+ * every need is met on the session's kehikko — which is what the doors are: the host gives a session
+ * the doors of the modules placed on its kehikko (`doorsFor` in the host). The rule is the
+ * protocol's (`skillsThatLoad`, 2.44.0), judged on the modules' MANIFESTS, so a need for what a
+ * module provides, says or asks for (`{ provides: 'steps' }`) is met by one that says it. One that
+ * is not met is left out with one log line saying what is missing in words (`needSaid`); its text is
+ * not fetched. A module with no MCP door is not seen this way, so a skill cannot need one.
+ *
+ * The folder also lists the skills the session has (`HELD_FILE`, `heldSkills`), for its notes.
  *
  * The folder is new for each session, 0700, in this user's temporary folder, and the caller removes
  * it (`removePlugin`) when the session ends. Null only when there is nothing to offer AND no token:
@@ -182,15 +185,16 @@ export async function sessionPlugin(doors: readonly SessionDoor[], options: Gath
   const log = options.log ?? (() => {})
   const claudeDir = options.claudeDir ?? configDir()
   const found = new Map<string, string>()
+  /* The skills the session will have: those put in its plugin, and those the person installed at the same version. */
+  const held = new Set<string>()
   const take = (name: string, text: string, version: string, from: string) => {
     if (found.has(name)) return log(`claude: skill ${name} from ${from} left out — another module already offers one by that name`)
+    held.add(name)
     if (installed(claudeDir, name, version)) return log(`claude: skill ${name} is already installed (${version}) — not listed twice`)
     found.set(name, text)
   }
   for (const one of skillDeclarations()) take(one.name, skillText(one.name)!, one.version, ID)
 
-  /* The modules on the session's kehikko: every door the host gave, and this module, which starts it. */
-  const present = new Set([ID, ...doors.map((door) => door.module)])
   const origins = new Map<string, string>()
   for (const door of doors) {
     if (door.module === ID) continue
@@ -201,33 +205,52 @@ export async function sessionPlugin(doors: readonly SessionDoor[], options: Gath
       /* Not a URL: isDoor refused it already. */
     }
   }
-  const gathered = await Promise.all(
+  /* First every module's manifest, so that a skill's needs are judged on all of them (protocol 2.21.0: a need
+     can be what a module provides, says or asks for, which only its manifest tells). */
+  const manifests = await Promise.all(
     [...origins].map(async ([origin, module]) => {
       const said = await getText(origin, WELL_KNOWN, options)
       if (said === null) {
         log(`claude: ${module} did not answer at ${origin} — its skills are not loaded in this session`)
-        return []
+        return null
       }
       /* The host's own door, or a module that is not one: nothing to offer, and nothing to say. */
-      if (said.status !== 200) return []
-      let declared: ModuleSkill[] = []
+      if (said.status !== 200) return null
       try {
-        const parsed = moduleSkillsSchema.safeParse((JSON.parse(said.body) as { declares?: { skills?: unknown } }).declares?.skills ?? [])
-        if (parsed.success) declared = parsed.data
-        else log(`claude: ${module} declares skills that are not a valid list — none loaded`)
+        const manifest = JSON.parse(said.body) as ProvidingManifest & { name?: unknown; declares?: { skills?: unknown } }
+        return manifest && typeof manifest === 'object' ? { origin, module, manifest } : null
       } catch {
+        return null
+      }
+    }),
+  ).catch(() => [])
+  /* The modules on the session's kehikko, as manifests (`skillsThatLoad` takes no bare ids): this module, which
+     starts it, each one that answered, and by id alone each door that did not, which then meets only id needs. */
+  const present: ProvidingManifest[] = [selfManifest()]
+  const names = new Map<string, string>([[ID, 'Claude']])
+  for (const one of manifests) {
+    if (!one || typeof one.manifest.id !== 'string') continue
+    present.push(one.manifest)
+    if (typeof one.manifest.name === 'string' && one.manifest.name.trim()) names.set(one.manifest.id, one.manifest.name.trim().slice(0, 80))
+  }
+  for (const door of doors) if (!present.some((one) => one.id === door.module)) present.push({ id: door.module })
+  const nameOf = (id: string) => names.get(id) ?? id
+  const gathered = await Promise.all(
+    manifests.map(async (one) => {
+      if (!one) return []
+      const { origin, module, manifest } = one
+      const parsed = moduleSkillsSchema.safeParse(manifest.declares?.skills ?? [])
+      if (!parsed.success) {
+        log(`claude: ${module} declares skills that are not a valid list — none loaded`)
         return []
       }
-      declared = declared.filter((skill) => {
-        const missing = missingNeeds(skill, present)
-        if (missing.length) log(`claude: skill ${skill.name} from ${module} left out — it needs ${missing.join(', ')} on this kehikko`)
-        return missing.length === 0
-      })
+      const { load: declared, left } = skillsThatLoad(parsed.data, present, nameOf)
+      for (const out of left) log(`claude: skill ${out.skill.name} from ${module} left out — it needs ${out.said} on this kehikko`)
       const texts = await Promise.all(declared.map((skill) => getText(origin, skillPath(skill.name), options)))
       return declared.flatMap((skill, i) => {
-        const got = texts[i]!
-        if (got.status !== 200) {
-          log(`claude: ${module} did not give skill ${skill.name} (${got.status}) — left out`)
+        const got = texts[i]
+        if (!got || got.status !== 200) {
+          log(`claude: ${module} did not give skill ${skill.name} (${got?.status ?? 'no answer'}) — left out`)
           return []
         }
         const issue = skillTextIssue(got.body, skill.name)
@@ -262,9 +285,33 @@ export async function sessionPlugin(doors: readonly SessionDoor[], options: Gath
     writeFileSync(join(dir, 'skills', name, 'SKILL.md'), text, { mode: 0o600 })
   }
   if (hooked) writeContextHooks(dir, hooked, options.registration ?? join(registryDir(), `${ID}.json`))
+  writeFileSync(join(dir, HELD_FILE), `${JSON.stringify([...held].sort())}\n`, { mode: 0o600 })
   /* Last, so a folder with its plugin.json is a whole one. */
   writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), readFileSync(join(PLUGIN_DIR, '.claude-plugin', 'plugin.json')), { mode: 0o600 })
   return dir
+}
+
+/** Where a session's plugin lists the skills the session has (`heldSkills`): beside `.claude-plugin`, never read by Claude Code. */
+export const HELD_FILE = 'held-skills.json'
+
+/**
+ * The skills a session started with this plugin has — every one put in it, and every one it left out
+ * because the person installed it at the same version — for its notes (`holds`, protocol 2.44.0), so
+ * they never claim a skill it lacks. Null when the plugin is gone or older than this list: unknown.
+ */
+export function heldSkills(plugin: string | null | undefined): string[] | null {
+  if (!plugin) return null
+  try {
+    const said = JSON.parse(readFileSync(join(plugin, HELD_FILE), 'utf8')) as unknown
+    return Array.isArray(said) ? said.filter((name): name is string => typeof name === 'string').slice(0, 256) : null
+  } catch {
+    return null
+  }
+}
+
+/** This module as a skill's needs are judged against it: its own manifest. */
+function selfManifest(): ProvidingManifest {
+  return MANIFEST as unknown as ProvidingManifest
 }
 
 /** The script a session's context hooks run, copied into its plugin (see `context.sh`). */

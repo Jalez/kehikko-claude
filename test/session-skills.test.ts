@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { WELL_KNOWN, skillPath } from 'kehikot-module-protocol'
+import { WELL_KNOWN, skillPath, type SkillNeed } from 'kehikot-module-protocol'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer, get, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { SessionDoor } from '../doorConfig.ts'
-import { removePlugin, sessionPlugin, skillDeclarations, skillText } from '../skills.ts'
+import { heldSkills, removePlugin, sessionPlugin, skillDeclarations, skillText } from '../skills.ts'
 
 const scratch: string[] = []
 const dir = () => {
@@ -24,12 +24,12 @@ afterAll(() => {
 const text = (name: string, body = 'Do the thing.') => `---\nname: ${name}\ndescription: ${name} skill\n---\n${body}\n`
 
 /** A stand-in module: a manifest declaring skills, and each one's text. */
-function module(skills: Record<string, { text: string; version?: string; needs?: string[] }>) {
+function module(skills: Record<string, { text: string; version?: string; needs?: SkillNeed[] }>, manifest: { id?: string; declares?: { provides?: string[] } } = {}) {
   const server = createServer((request, response) => {
     const path = new URL(request.url ?? '/', 'http://x').pathname
     if (path === WELL_KNOWN) {
       response.setHeader('content-type', 'application/json')
-      return void response.end(JSON.stringify({ declares: { skills: Object.entries(skills).map(([name, one]) => ({ name, summary: `${name}.`, version: one.version ?? '1', ...(one.needs ? { needs: one.needs } : {}) })) } }))
+      return void response.end(JSON.stringify({ ...manifest, declares: { ...manifest.declares, skills: Object.entries(skills).map(([name, one]) => ({ name, summary: `${name}.`, version: one.version ?? '1', ...(one.needs ? { needs: one.needs } : {}) })) } }))
     }
     for (const [name, one] of Object.entries(skills)) if (path === skillPath(name)) return void response.end(one.text)
     response.statusCode = 404
@@ -126,6 +126,32 @@ describe('the skills a session is given', () => {
     const both = (await sessionPlugin([door('kehikot.factory', factory), door('kehikot.review', review)], options()))!
     expect(names(both)).toEqual(['factory', 'kehikot-here', 'review-factory'])
     expect(readFileSync(join(both, 'skills', 'review-factory', 'SKILL.md'), 'utf8')).toBe(text('review-factory'))
+  })
+
+  test('a capability need is met by a present module whose manifest says it, and left out with a readable reason when none does (#57)', async () => {
+    const flows = module({ 'flow-understand': { text: text('flow-understand') }, 'flow-roadmap': { text: text('flow-roadmap'), needs: [{ provides: 'steps' }] } }, { id: 'kehikot.flows' })
+    const journeys = module({}, { id: 'kehikot.journeys', declares: { provides: ['steps'] } })
+    const notes = module({}, { id: 'kehikot.notes' })
+    const kept = (await sessionPlugin([door('kehikot.flows', flows), door('kehikot.journeys', journeys)], options()))!
+    expect(names(kept)).toEqual(['flow-roadmap', 'flow-understand', 'kehikot-here'])
+    expect(heldSkills(kept)).toEqual(['flow-roadmap', 'flow-understand', 'kehikot-here'])
+    const log: string[] = []
+    const left = (await sessionPlugin([door('kehikot.flows', flows), door('kehikot.notes', notes)], options({ log })))!
+    expect(names(left)).toEqual(['flow-understand', 'kehikot-here'])
+    expect(heldSkills(left)).toEqual(['flow-understand', 'kehikot-here'])
+    expect(log).toEqual(['claude: skill flow-roadmap from kehikot.flows left out — it needs a module that keeps an epic’s steps on this kehikko'])
+  })
+
+  test('the skills a session has: those in its plugin and those the person installed at the same version', async () => {
+    const claudeDir = dir()
+    mkdirSync(join(claudeDir, 'skills', 'journey'), { recursive: true })
+    writeFileSync(join(claudeDir, 'skills', 'journey', '.kehikot-skill.json'), JSON.stringify({ version: '1' }))
+    const up = module({ journey: { text: text('journey') }, extra: { text: text('extra') } })
+    const plugin = (await sessionPlugin([door('kehikot.m', up)], options({ claudeDir })))!
+    expect(names(plugin)).toEqual(['extra', 'kehikot-here'])
+    expect(heldSkills(plugin)).toEqual(['extra', 'journey', 'kehikot-here'])
+    expect(heldSkills(join(plugin, 'nowhere'))).toBeNull()
+    expect(heldSkills(null)).toBeNull()
   })
 
   test('a skill that needs several modules is left out while any is missing', async () => {
