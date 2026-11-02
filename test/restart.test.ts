@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { answer } from '../doors.ts'
 import { RESUME_LINE, Runs, TICKET, headless, type Pty, type Run, type Viewer } from '../live.ts'
 import { PROGRAM, recordDirs, type Active, type Backgrounded, type Program, type Recorded } from '../program.ts'
-import { born, readPlaces, readSettings, writeSettings, type NamedPlace } from '../record.ts'
+import { born, markSession, readPlaces, readSettings, writeSettings, type NamedPlace } from '../record.ts'
 import { skillDeclarations } from '../skills.ts'
 import { placeKey } from '../place.ts'
 import { resumeToggle, statusLineToggle } from '../src/view/conversations.ts'
@@ -128,6 +128,7 @@ function machine() {
         watchEvery: null,
         log: (line) => logged.push(line),
         ...(options.now ? { now: options.now } : {}),
+        ...(options.tells ? { port: () => 9590 } : {}),
         ...(options.configBase ? { configBase: options.configBase, doors: async () => [], place: async () => null } : {}),
         screen: headless,
         spawn: (file, args) => {
@@ -252,18 +253,26 @@ describe('a conversation runs in the background, and the terminal is a view of i
 })
 
 describe('a conversation a restart cut off mid-turn', () => {
-  test('is woken in the background, told once, and said in the Inbox once', async () => {
-    const m = machine()
-    const dir = project()
+  /** A conversation this module holds the process of — the folder refused `--bg`, so it runs in the module's own terminal — seen working, and then the module (and the session with it) went away. */
+  const heldAndLost = async (m: ReturnType<typeof machine>, dir: string) => {
     m.records(dir, A)
     born(dir, HERE, A, null, { label: 'tighten the methods' })
-    /* Seen working by the module, and then the module (and the session with it) went away. */
-    const first = m.module()
-    await first.runs.open(open(dir, A), new Watcher())
-    m.background.get(A)!.state = 'working'
-    await first.runs.watch()
+    m.refuse.now = 'Workspace not trusted.'
+    const first = m.module({ tells: true })
+    const run = (await first.runs.open(open(dir, A), new Watcher())) as Run
+    expect(run.joined).toBeNull()
+    expect(first.runs.heard(run.id, run.secret, 'UserPromptSubmit')).toBe(true)
     expect(entryOf(dir, A)?.working).toBeString()
-    m.background.clear()
+    m.refuse.now = ''
+    return { first, run }
+  }
+
+  test('one whose process this module held is woken in the background, told once, and said in the Inbox once', async () => {
+    const m = machine()
+    const dir = project()
+    const { first } = await heldAndLost(m, dir)
+    first.runs.endAll()
+    await settle()
 
     const second = m.module()
     second.runs.know(dir)
@@ -289,36 +298,91 @@ describe('a conversation a restart cut off mid-turn', () => {
   test('not when the person turned the setting off: the mark goes, nothing is woken', async () => {
     const m = machine()
     const dir = project()
-    m.records(dir, A)
-    born(dir, HERE, A, null)
-    const first = m.module()
-    await first.runs.open(open(dir, A), new Watcher())
-    m.background.get(A)!.state = 'working'
-    await first.runs.watch()
-    m.background.clear()
+    const { first } = await heldAndLost(m, dir)
+    first.runs.endAll()
+    await settle()
     writeSettings(dir, { resumeCutOff: false })
     const second = m.module()
     second.runs.know(dir)
     await second.runs.recovered(dir)
-    expect(m.calls.bg.length).toBe(1)
+    expect(m.calls.bg.filter((args) => args.includes(RESUME_LINE))).toEqual([])
     expect(entryOf(dir, A)?.working).toBeUndefined()
   })
 
   test('never one the person ended', async () => {
     const m = machine()
     const dir = project()
+    const { first } = await heldAndLost(m, dir)
+    first.runs.end(A)
+    await settle()
+    expect(entryOf(dir, A)?.working).toBeUndefined()
+    const second = m.module()
+    second.runs.know(dir)
+    await second.runs.recovered(dir)
+    expect(m.calls.bg.filter((args) => args.includes(RESUME_LINE))).toEqual([])
+  })
+
+  test('never one run in the background: a restart ends only the view, so no mark is kept, nothing is woken and nothing is said', async () => {
+    const m = machine()
+    const dir = project()
     m.records(dir, A)
-    born(dir, HERE, A, null)
+    born(dir, HERE, A, null, { label: 'tighten the methods' })
     const first = m.module()
     await first.runs.open(open(dir, A), new Watcher())
     m.background.get(A)!.state = 'working'
     await first.runs.watch()
-    first.runs.end(A)
+    expect(first.runs.activity(dir).find((one) => one.id === A)?.state).toBe('working')
+    /* Working, as a view says it: its process is Claude Code's, so no "cut off" mark. */
+    expect(entryOf(dir, A)?.working).toBeUndefined()
+    first.runs.endAll()
     await settle()
+
+    /* Still running, as after an app update: the view goes, the conversation does not. */
     const second = m.module()
     second.runs.know(dir)
     await second.runs.recovered(dir)
-    expect(m.calls.bg.length).toBe(1)
+    expect(m.calls.bg.filter((args) => args.includes(RESUME_LINE))).toEqual([])
+    expect(second.runs.activity(dir).some((one) => one.id.startsWith('resumed:') || one.id.startsWith('cut-off:'))).toBe(false)
+
+    /* Not even when it is not listed at the moment of asking: it was never this module's to lose. */
+    m.background.clear()
+    const third = m.module()
+    third.runs.know(dir)
+    await third.runs.recovered(dir)
+    expect(m.calls.bg.filter((args) => args.includes(RESUME_LINE))).toEqual([])
+    expect(third.runs.activity(dir).some((one) => one.id.startsWith('resumed:'))).toBe(false)
+  })
+
+  test('a "working" mark an older release kept for a background conversation is let go, not taken for a cut-off', async () => {
+    const m = machine()
+    const dir = project()
+    m.records(dir, A)
+    born(dir, HERE, A, null)
+    markSession(dir, A, (entry) => {
+      entry.background = true
+      entry.working = new Date().toISOString()
+      return true
+    })
+    const one = m.module()
+    one.runs.know(dir)
+    await one.runs.recovered(dir)
+    expect(m.calls.bg).toEqual([])
+    expect(entryOf(dir, A)?.working).toBeUndefined()
+    expect(one.runs.activity(dir).some((row) => row.id === `resumed:${A}`)).toBe(false)
+  })
+
+  test('a background conversation nobody here views, seen working, keeps no mark', async () => {
+    const m = machine()
+    const dir = project()
+    m.records(dir, C)
+    born(dir, HERE, C, null, { label: 'elsewhere' })
+    m.background.set(C, { session: C, kind: 'background', called: 'background', handle: C.slice(0, 8), pid: 4242, cwd: dir, startedAt: Date.now(), name: '', state: 'working' })
+    const one = m.module()
+    one.runs.know(dir)
+    await one.runs.recovered(dir)
+    await one.runs.watch()
+    expect(one.runs.activity(dir).find((row) => row.id === C)?.state).toBe('working')
+    expect(entryOf(dir, C)?.working).toBeUndefined()
   })
 
   test('one recorded before this release is judged by its transcript: a turn under way is woken, an ended one is not', async () => {
@@ -434,6 +498,141 @@ describe('background work cut off or failed: a "needs you" line in the Inbox', (
     one.runs.know(dir)
     await one.runs.recovered(dir)
     expect(one.runs.activity(dir)).toEqual([])
+  })
+})
+
+describe('an Inbox line about a conversation ends once the person is in it', () => {
+  const now = Date.now()
+  const HOUR = 60 * 60_000
+  const backgroundWithFailure = (at: number) => {
+    const m = machine()
+    const dir = project()
+    m.records(dir, A)
+    born(dir, HERE, A, null, { label: 'tighten the methods' })
+    markSession(dir, A, (entry) => {
+      entry.background = true
+      return true
+    })
+    const file = transcript(dir, A, [typed(at - 60_000), notified(at, 'failed', FAILED)])
+    return { m, dir, file }
+  }
+  const hasCutOff = (runs: Runs, dir: string) => runs.activity(dir).some((row) => row.id === `cut-off:${A}`)
+
+  test('a cut-off line goes at the next start when the conversation has gone to work since: the line a restart left up over a conversation the person kept talking to', async () => {
+    const { m, dir } = backgroundWithFailure(now - 3 * HOUR)
+    const first = m.module()
+    first.runs.know(dir)
+    await first.runs.recovered(dir)
+    expect(hasCutOff(first.runs, dir)).toBe(true)
+    /* Hours later it is working — the person's turn, typed in Claude Code's own view of it, outside this module. */
+    markSession(dir, A, (entry) => {
+      entry.stated = { state: 'working', since: now - HOUR }
+      return true
+    })
+    const second = m.module()
+    second.runs.know(dir)
+    await second.runs.recovered(dir)
+    expect(hasCutOff(second.runs, dir)).toBe(false)
+    expect(entryOf(dir, A)?.cutOff?.open).toEqual([])
+  })
+
+  test('not when it went to work within moments of the line: that is the program answering its own notification', async () => {
+    const at = now - 3 * HOUR
+    const { m, dir } = backgroundWithFailure(at)
+    markSession(dir, A, (entry) => {
+      entry.stated = { state: 'working', since: Date.parse(new Date(at).toISOString()) + 2000 }
+      return true
+    })
+    const one = m.module()
+    one.runs.know(dir)
+    await one.runs.recovered(dir)
+    expect(hasCutOff(one.runs, dir)).toBe(true)
+  })
+
+  test('it goes when the background sweep sees the conversation go to work later', async () => {
+    const { m, dir } = backgroundWithFailure(now - 3 * HOUR)
+    const one = m.module()
+    one.runs.know(dir)
+    await one.runs.recovered(dir)
+    expect(hasCutOff(one.runs, dir)).toBe(true)
+    m.background.set(A, { session: A, kind: 'background', called: 'background', handle: A.slice(0, 8), pid: 4242, cwd: dir, startedAt: Date.now(), name: '', state: 'working' })
+    await one.runs.watch()
+    await one.runs.readCutOffs(dir, true)
+    expect(hasCutOff(one.runs, dir)).toBe(false)
+  })
+
+  test('it goes when the person types into the module’s own terminal for it', async () => {
+    const { m, dir } = backgroundWithFailure(now - 3 * HOUR)
+    const one = m.module()
+    one.runs.know(dir)
+    await one.runs.recovered(dir)
+    const run = (await one.runs.open(open(dir, A), new Watcher())) as Run
+    expect(hasCutOff(one.runs, dir)).toBe(true)
+    one.runs.type(run, 'y')
+    /* Withdrawn from the list at once, and let go in the record when the record is next read. */
+    expect(hasCutOff(one.runs, dir)).toBe(false)
+    await one.runs.readCutOffs(dir, true)
+    expect(entryOf(dir, A)?.cutOff?.open).toEqual([])
+  })
+
+  test('every watched project is read on the clock, not only the first one asked', async () => {
+    const m = machine()
+    const other = project()
+    const { dir, file } = backgroundWithFailure(now - 3 * HOUR)
+    const one = m.module()
+    for (const projectPath of [other, dir]) {
+      one.runs.know(projectPath)
+      await one.runs.recovered(projectPath)
+    }
+    expect(hasCutOff(one.runs, dir)).toBe(true)
+    appendFileSync(file, `${typed(now - 1000)}\n`)
+    await one.runs.watch()
+    expect(hasCutOff(one.runs, dir)).toBe(false)
+  })
+
+  test('a "resumed after a restart" line goes once the person types a prompt in it; the module’s own line and the turn it starts do not count', async () => {
+    const m = machine()
+    const dir = project()
+    m.records(dir, A)
+    born(dir, HERE, A, null, { label: 'tighten the methods' })
+    markSession(dir, A, (entry) => {
+      entry.working = new Date(now - 60_000).toISOString()
+      return true
+    })
+    const file = transcript(dir, A, [typed(now - 120_000), said(now - 110_000, 'tool_use')])
+    const one = m.module()
+    one.runs.know(dir)
+    await one.runs.recovered(dir)
+    const resumedAt = Date.parse(entryOf(dir, A)!.resumed!.at)
+    expect(one.runs.activity(dir).some((row) => row.id === `resumed:${A}`)).toBe(true)
+    appendFileSync(file, `${typed(resumedAt + 10, RESUME_LINE)}\n`)
+    markSession(dir, A, (entry) => {
+      entry.stated = { state: 'working', since: resumedAt + 60_000 }
+      return true
+    })
+    await one.runs.readCutOffs(dir, true)
+    expect(one.runs.activity(dir).some((row) => row.id === `resumed:${A}`)).toBe(true)
+    appendFileSync(file, `${typed(resumedAt + 120_000)}\n`)
+    await one.runs.readCutOffs(dir, true)
+    expect(one.runs.activity(dir).some((row) => row.id === `resumed:${A}`)).toBe(false)
+    expect(entryOf(dir, A)?.resumed?.told).toBe(true)
+  })
+
+  test('a "needs you" line of a background conversation nobody here views goes once its transcript has a prompt after it', async () => {
+    const m = machine()
+    const dir = project()
+    m.records(dir, C)
+    born(dir, HERE, C, null, { label: 'asks' })
+    m.background.set(C, { session: C, kind: 'background', called: 'background', handle: C.slice(0, 8), pid: 4243, cwd: dir, startedAt: Date.now(), name: '', state: 'needs-you' })
+    const one = m.module()
+    one.runs.know(dir)
+    await one.runs.recovered(dir)
+    await one.runs.watch()
+    const row = one.runs.activity(dir).find((item) => item.id === C)
+    expect(row?.state).toBe('attention')
+    transcript(dir, C, [typed(row!.since + 5000)])
+    await one.runs.readCutOffs(dir, true)
+    expect(one.runs.activity(dir).some((item) => item.id === C)).toBe(false)
   })
 })
 

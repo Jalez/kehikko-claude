@@ -151,11 +151,13 @@ export function cutOffs(text: string): CutOff[] {
 }
 
 /**
- * Whether the person said something in the conversation after `after`: a prompt they typed, which
- * is a conversation that has moved on. A task notification, a tool's answer, a meta row and a
- * subagent's thread are not the person; nor is a line of this module's own (`except`).
+ * When the person last said something in the conversation: a prompt they typed (or queued), which
+ * is a conversation they are in. A task notification, a tool's answer, a meta row, a message from
+ * another session and a subagent's thread are not the person; nor is a line of this module's own
+ * (`except`). Negative infinity for none.
  */
-export function movedOn(text: string, after: number, except: readonly string[] = []): boolean {
+export function lastPrompt(text: string, except: readonly string[] = []): number {
+  let last = Number.NEGATIVE_INFINITY
   for (const row of rows(text)) {
     if (row.type !== 'user' || row.isSidechain === true || row.isMeta === true || row.promptSource === 'system') continue
     const kind = row.origin?.kind
@@ -164,9 +166,14 @@ export function movedOn(text: string, after: number, except: readonly string[] =
     const said = contentOf(row).trim()
     if (!said || said.startsWith('<task-notification>') || except.some((line) => said === line)) continue
     const at = timeOf(row)
-    if (Number.isFinite(at) && at > after) return true
+    if (Number.isFinite(at) && at > last) last = at
   }
-  return false
+  return last
+}
+
+/** Whether the person said something in the conversation after `after` (`lastPrompt`): a conversation that has moved on. */
+export function movedOn(text: string, after: number, except: readonly string[] = []): boolean {
+  return lastPrompt(text, except) > after
 }
 
 /**

@@ -412,8 +412,11 @@ before, and ends with this module's server; the next open of its place **resumes
 
 ### What a restart cut off anyway
 
-- **A conversation that was working.** The record keeps a mark while a conversation is working. One
-  still marked at the module's next start and no longer running was cut off: it is woken in the
+- **A conversation that was working.** The record keeps a mark while a conversation whose process
+  this module holds — one opened in its own terminal — is working. A conversation in the background,
+  or one the terminal is only a view of, keeps no mark: a restart ends the view, never the
+  conversation, so it is never taken for cut off. One still marked at the module's next start and
+  no longer running was cut off: it is woken in the
   background, once, with one sentence — *"Kehikot restarted while you were working. Some background
   work may have been cut off: check your task notifications and resume anything unfinished."* — and
   one Inbox line says so (*"<conversation>: resumed after Kehikot restarted"*). Never one a person
@@ -428,7 +431,11 @@ before, and ends with this module's server; the next open of its place **resumes
   128), an agent that failed, a task stopped for time or memory. Each such task raises ONE *needs you*
   line for the conversation, at its place — *"<conversation>: 2 background tasks didn't finish before
   the session ended"*, the summaries in its detail — once: the record keeps how far it has read. It
-  goes when the person types in the conversation after it, or dismisses it. Successes, what the
+  goes when the person is in the conversation after it — a prompt in its transcript, typing in this
+  module's terminal, or the conversation going to work more than 30 seconds after it (sooner is
+  Claude answering the notification itself) — whichever process runs it, or when they dismiss it.
+  The same goes for a *needs you* line and a *resumed after Kehikot restarted* line (for which only
+  the person's prompt or typing counts: the module's own sentence starts that turn). Successes, what the
   person or Claude stopped on purpose, commands ended by a signal and watchers are not said. It is
   read when the module starts, so what happened while it was down is said too.
 

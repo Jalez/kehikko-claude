@@ -199,7 +199,9 @@ export interface SessionEntry {
   /**
    * Since when this module has seen it working, while it still is: cleared when its turn ends,
    * when it stops for the person, and when a person ends it here. Still set at the next start of
-   * this module and not running: a restart cut it off mid-turn (see `recover` in live.ts).
+   * this module and not running: a restart cut it off mid-turn (see `recover` in live.ts). Only
+   * kept for a conversation whose process this module holds: one in the background, or one it is a
+   * view of, runs on when this module stops.
    */
   working?: string
   /**
