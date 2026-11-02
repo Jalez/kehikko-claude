@@ -14,7 +14,7 @@ import { Gauges } from './gauges.ts'
 import { contextOf, readStatus, type Context, type Status } from './meter.ts'
 import { limitsNow, mergeLimits, readLimits, type Limits } from './usage.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, sortedParts, type Kehikko } from './place.ts'
-import { cutOffs, cutOffWords, midTurn, movedOn, type CutOff } from './cutoff.ts'
+import { cutOffs, cutOffWords, lastPrompt, midTurn, type CutOff } from './cutoff.ts'
 import { PROGRAM, headOf, home, recordFile, sessionName, type Active, type ActiveStatus, type Able, type Program, type Running, type State } from './program.ts'
 import { PLACE_TOKEN, assign, attach, born, byToken, follow, homeOf, isDetached, markSession, markSessions, note, ownOf, projectRoot, readPlaces, readSettings, recordedIds, sighted, stayDetached, tokenFor, type NamedPlace, type PlaceEntry, type Places, type SessionEntry } from './record.ts'
 import { heldSkills, removePlugin, sessionPlugin, statusScriptIn, sweepKits, writeComposer, writeOwnStatusLine } from './skills.ts'
@@ -336,6 +336,12 @@ const CUTOFF_EVERY = 20_000
 const CUTOFF_TAIL = 1024 * 1024
 /** How long a "resumed after a restart" line stays in the Inbox when nobody opens the conversation. */
 const RESUMED_FOR = 24 * 60 * 60_000
+/**
+ * How long after an Inbox line's `since` a conversation's going to work is still the program's own
+ * answer to what the line is about, and not the person: a task notification starts a turn of its
+ * own within moments of being written. Working that begins later than this is the person's.
+ */
+export const ENGAGED_GRACE = 30_000
 
 /**
  * What a session is called in Claude Code's own lists, from where it belongs:
@@ -581,6 +587,8 @@ export interface Run {
   printedAt: number
   /** When a person last typed into it or last looked away from it: what a finished session's rest is counted from. */
   attendedAt: number
+  /** When a person last typed into it, or pressed Compact or Clear for it: 0 for never. A person engaged in it (`engagedAfter`). */
+  typedAt: number
   /** What the program last said it is doing, or null when it has said nothing that still holds. */
   state: State | null
   /**
@@ -977,11 +985,13 @@ function rowPlace(entry: PlaceEntry | null): ActivityRow['place'] | undefined {
  * The Inbox lines a project's record holds besides its sessions' states (see `recover`):
  *
  *  - **`cut-off:<session>`, needs you**: background tasks of the conversation that a restart cut
- *    off, or that failed, as its transcript says (cutoff.ts) — until the person moves the
- *    conversation on, which is a prompt typed in it after them. A dismissed one stays dismissed
- *    until another task is cut off (its `since` is the latest one's).
+ *    off, or that failed, as its transcript says (cutoff.ts) — until the person is in the
+ *    conversation after them (`engagedAfter`): a prompt typed in it, typing in a terminal here, or
+ *    it going to work later than `ENGAGED_GRACE` after. A dismissed one stays dismissed until
+ *    another task is cut off (its `since` is the latest one's).
  *  - **`resumed:<session>`, finished**: the conversation was working when a restart cut it off,
- *    and was woken in the background and told so — until the person has it on screen, or a day.
+ *    and was woken in the background and told so — until the person has it on screen, types in
+ *    it, or a day.
  */
 export function recordRows(places: Places, projectPath: string, now: number): ActivityRow[] {
   const rows: ActivityRow[] = []
@@ -1222,6 +1232,8 @@ export class Runs {
   private readonly cutRead = new Map<string, string>()
   /** When the transcripts were last read for cut-off work (`CUTOFF_EVERY`). */
   private cutAt = Number.NEGATIVE_INFINITY
+  /** When the person last typed a prompt in each conversation, as its transcript says (`heardPrompt`), by session. */
+  private readonly prompted = new Map<string, number>()
   /** Whether the kept folders of long-gone background conversations were swept since this process started. */
   private swept = false
   /**
@@ -1335,6 +1347,13 @@ export class Runs {
     const candidates: [string, PlaceEntry][] = []
     for (const [id, entry] of Object.entries(read.value.sessions)) {
       if (entry.ignored || this.find(id)) continue
+      /* Run in the background, its process is Claude Code's and not this module's: a restart of this
+         module ended only a view of it, never the conversation. Never cut off; a mark an older
+         release kept for one is let go. */
+      if (entry.background) {
+        if (entry.working) markSession(projectPath, id, (one) => (one.working ? (delete one.working, true) : false))
+        continue
+      }
       const at = placeEntryFor(read.value, id)
       if (at && (entry.working || (await this.wasCut(projectPath, id, entry)))) candidates.push([id, at])
     }
@@ -1419,27 +1438,82 @@ export class Runs {
         continue
       }
       const key = `${projectPath}\0${id}`
-      if (this.cutRead.get(key) === stamp) continue
-      this.cutRead.set(key, stamp)
       const since = entry.cutOff?.through ?? this.now() - FIRST_LOOK
-      if (entry.cutOff && grown <= since && entry.cutOff.open.length === 0) continue
-      const tail = await tailOfFile(file, CUTOFF_TAIL)
-      const fresh = cutOffs(tail).filter((one) => one.at > since)
-      const open: CutOff[] = [...(entry.cutOff?.open ?? []), ...fresh].slice(-8)
+      const owed = entry.cutOff?.open ?? []
+      /* A "resumed after a restart" line still up: it goes once the person is in the conversation. */
+      const resumedAt = entry.resumed && !entry.resumed.told ? Date.parse(entry.resumed.at) : Number.NaN
+      const pending = owed.length > 0 || Number.isFinite(resumedAt)
+      const changed = this.cutRead.get(key) !== stamp
+      /* Nothing new in the record and nothing up: nothing to read or to judge. */
+      if (!changed && !pending) continue
+      let fresh: CutOff[] = []
+      if (changed) {
+        this.cutRead.set(key, stamp)
+        if (!(entry.cutOff && grown <= since && !pending)) {
+          const tail = await tailOfFile(file, CUTOFF_TAIL)
+          fresh = cutOffs(tail).filter((one) => one.at > since)
+          this.heardPrompt(id, lastPrompt(tail, [RESUME_LINE]))
+        }
+      }
+      const open: CutOff[] = [...owed, ...fresh].slice(-8)
       const latest = open.reduce((most, one) => Math.max(most, one.at), 0)
-      const dealt = open.length > 0 && movedOn(tail, latest, [RESUME_LINE])
+      const dealt = open.length > 0 && this.engagedAfter(projectPath, id, latest, true)
+      const told = Number.isFinite(resumedAt) && this.engagedAfter(projectPath, id, resumedAt, false)
       const next = { through: fresh.reduce((most, one) => Math.max(most, one.at), since), open: dealt ? [] : open }
-      if (JSON.stringify(next) === JSON.stringify(entry.cutOff ?? null)) continue
+      const same = JSON.stringify(next) === JSON.stringify(entry.cutOff ?? null)
+      if (same && !told) continue
       if (fresh.length) this.log(`claude: ${id} — ${fresh.map((one) => one.summary).join('; ')}`)
       if (dealt) this.log(`claude: ${id} moved on since its background work was cut off; its Inbox line goes`)
+      if (told) this.log(`claude: ${id} was taken up by the person since it was resumed; its Inbox line goes`)
       edits.set(id, (one) => {
-        one.cutOff = next
-        return true
+        let edited = false
+        if (!same) {
+          one.cutOff = next
+          edited = true
+        }
+        if (told && one.resumed && !one.resumed.told) {
+          one.resumed.told = true
+          edited = true
+        }
+        return edited
       })
     }
     const written = markSessions(projectPath, edits)
     if (!written.ok) this.log(`claude: ${written.error}`)
     this.recount(projectPath)
+  }
+
+  /** The newest prompt the person typed in a conversation, as its transcript says (`lastPrompt`): kept, the newest few thousand. */
+  private heardPrompt(id: string, at: number): void {
+    if (!Number.isFinite(at) || at <= (this.prompted.get(id) ?? Number.NEGATIVE_INFINITY)) return
+    this.prompted.delete(id)
+    this.prompted.set(id, at)
+    if (this.prompted.size > 4096) this.prompted.delete(this.prompted.keys().next().value!)
+  }
+
+  /**
+   * Whether the person has been in a conversation since `since`: a prompt in its transcript after it
+   * (`prompted`), whichever process the conversation runs in; typing into a terminal of this module
+   * that holds it or is a view of it; and, when `working` counts, it going to work later than
+   * `ENGAGED_GRACE` after — as a view, the background sweep or the record says. What ends an Inbox
+   * line about the conversation that it was there to ask the person to look at.
+   */
+  engagedAfter(projectPath: string, id: string, since: number, working: boolean): boolean {
+    if ((this.prompted.get(id) ?? Number.NEGATIVE_INFINITY) > since) return true
+    for (const run of this.runs.values()) {
+      if (run.what !== 'session') continue
+      if (run.settled !== id && run.id !== id && run.joined?.session !== id) continue
+      if (run.typedAt > since) return true
+      if (working && run.state === 'working' && run.stateSince > since + ENGAGED_GRACE) return true
+    }
+    if (!working) return false
+    const unviewed = this.unviewed.get(id)
+    if (unviewed?.state === 'working' && unviewed.since > since + ENGAGED_GRACE) return true
+    const stated = this.stated.get(id) ?? (() => {
+      const read = readPlaces(projectPath)
+      return read.ok ? read.value.sessions[id]?.stated : undefined
+    })()
+    return stated?.state === 'working' && stated.since > since + ENGAGED_GRACE
   }
 
   /** The Inbox lines of a project's record, read again; said where they changed. */
@@ -1559,9 +1633,11 @@ export class Runs {
    * gone when its turn ends or it stops for the person. Nothing is said of "no state": that is also
    * what a conversation cut off looks like, and the mark is what tells that apart (`recover`).
    */
-  private markWorking(projectPath: string, id: string | null, state: State | null): void {
+  private markWorking(projectPath: string, id: string | null, state: State | null, held = true): void {
     if (!id || state === null) return
-    const working = state === 'working'
+    /* Only a conversation whose process this module holds can be cut off by this module stopping:
+       one it is a view of, or one nobody here views, runs on in its own process. */
+    const working = state === 'working' && held
     /* A question seen is not news until it is asked again: moving on clears the mark (`saw`). */
     const moved = state !== 'needs-you'
     const written = markSession(projectPath, id, (entry) => {
@@ -1657,8 +1733,11 @@ export class Runs {
         if (listed) this.placed(run, listed, asked)
       }
       await this.see(running)
-      for (const projectPath of this.projects) await this.readCutOffs(projectPath).catch(() => {})
-      if (this.projects.size > 0) this.cutAt = this.now()
+      /* Every watched project on the same clock: each one asked on its own would be held back by the one before it. */
+      if (this.projects.size > 0 && this.now() - this.cutAt >= CUTOFF_EVERY) {
+        this.cutAt = this.now()
+        for (const projectPath of this.projects) await this.readCutOffs(projectPath, true).catch(() => {})
+      }
     } finally {
       this.watchBusy = false
     }
@@ -1722,7 +1801,7 @@ export class Runs {
     for (const [id, one] of next) this.unviewed.set(id, one)
     for (const one of gone) if (!mine.has(one.session)) this.announce({ session: one.session, state: null, since: this.now() })
     for (const one of moved) {
-      this.markWorking(one.projectPath, one.session, one.state)
+      this.markWorking(one.projectPath, one.session, one.state, false)
       this.announce({ session: one.session, state: one.state, since: one.since })
       if (before.has(one.session)) this.noticeOf(one)
     }
@@ -1880,6 +1959,7 @@ export class Runs {
     run.touched = true
     run.stirredAt = now
     run.attendedAt = now
+    run.typedAt = now
     run.pty.write(text)
     setTimeout(() => {
       if (!run.ended) run.pty.write('\r')
@@ -2601,6 +2681,7 @@ export class Runs {
       stirredAt: this.now(),
       printedAt: this.now(),
       attendedAt: this.now(),
+      typedAt: 0,
       state: null,
       told: null,
       turnTag: null,
@@ -2647,7 +2728,7 @@ export class Runs {
       run.stateSince = this.entered(projectPath, settled, joined.state)
       if (joined.state !== 'needs-you') run.turned = true
       run.seen = run.looking.size > 0 || (joined.state === 'needs-you' && this.lookedAt(projectPath, settled))
-      this.markWorking(projectPath, settled, joined.state)
+      this.markWorking(projectPath, settled, joined.state, false)
       if (run.looking.size > 0) this.keepLooked(run)
     }
     this.keepWatching()
@@ -2750,7 +2831,7 @@ export class Runs {
       else if (homeless) this.log(`claude: ${run.settled} filed under the place it was started at${hadOwn ? '' : ', as its kehikko’s own (it had none)'} — no /kehikot-here needed`)
       run.place = null
       if (run.owned) this.markBackground(run.projectPath, run.settled, run.folders ?? [])
-      if (run.state) this.markWorking(run.projectPath, run.settled, run.state)
+      if (run.state) this.markWorking(run.projectPath, run.settled, run.state, !run.joined)
     } else {
       note(run.projectPath, run.settled, { label, lastActive: known?.lastActive })
     }
@@ -3055,7 +3136,7 @@ export class Runs {
     if (state === 'working' || state === 'finished') run.turned = true
     run.seen = run.looking.size > 0 || (state === 'needs-you' && this.lookedAt(run.projectPath, run.settled))
     if (state === 'finished' && run.secret !== null) run.idleAt = Math.max(run.idleAt, run.stateSince)
-    this.markWorking(run.projectPath, run.settled, state)
+    this.markWorking(run.projectPath, run.settled, state, !run.joined)
     /* Seen because somebody has it on screen as it comes to wait: written, so that it stays seen. */
     if (run.looking.size > 0) this.keepLooked(run)
     this.tell(run)
@@ -3112,7 +3193,20 @@ export class Runs {
   activity(project: string | null = null): ActivityRow[] {
     /* The sessions, and nothing about conversations that belong to no kehikko: that is said on the
        page of the kehikko that has none, not in the Inbox. A host closes an item absent from the list. */
-    return activityRows(this.runs.values(), project, this.unviewed.values(), [...this.extras.values()].flat()).slice(0, ACTIVITY_ITEMS)
+    return activityRows(this.runs.values(), project, this.unviewed.values(), [...this.extras.values()].flat())
+      .filter((row) => !this.outlived(row))
+      .slice(0, ACTIVITY_ITEMS)
+  }
+
+  /**
+   * Whether an Inbox line asking the person to look at a conversation — it needs them, its
+   * background work was cut off, or it was resumed after a restart — is one they have been in since
+   * (`engagedAfter`): then it is withdrawn here, whichever process runs the conversation; the host
+   * never closes it on its own. Going to work counts where the record is kept (`readCutOffs`).
+   */
+  private outlived(row: ActivityRow): boolean {
+    const session = row.id.startsWith('cut-off:') ? row.id.slice(8) : row.id.startsWith('resumed:') ? row.id.slice(8) : row.state === 'attention' && !row.id.includes(':') ? row.id : null
+    return session !== null && this.engagedAfter(row.project, session, row.since, false)
   }
 
   /**
@@ -3262,6 +3356,7 @@ export class Runs {
       run.touched = true
       run.stirredAt = this.now()
       run.attendedAt = run.stirredAt
+      run.typedAt = run.stirredAt
       /* What is at its prompt now, counted: what Compact and Clear wait on (see `readiness`). */
       const before = run.what === 'session' ? this.readiness(run) : null
       run.prompt = promptAfter(run.prompt, data, this.now())
@@ -3327,6 +3422,7 @@ export class Runs {
       stirredAt: this.now(),
       printedAt: this.now(),
       attendedAt: this.now(),
+      typedAt: 0,
       state: null,
       told: null,
       turnTag: null,

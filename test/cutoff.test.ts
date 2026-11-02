@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { cutOffWords, cutOffs, judged, midTurn, movedOn } from '../cutoff.ts'
+import { cutOffWords, cutOffs, judged, lastPrompt, midTurn, movedOn } from '../cutoff.ts'
 
 import { AGENT_CUT, FAILED, SHELL_CUT, T0, asked, notified, queued, toolResult, turnEnded, typed } from './transcripts.ts'
 
@@ -115,5 +115,14 @@ describe('the words', () => {
     expect(cutOffWords([one('stopped', 2)]).said).toBe('2 background tasks were stopped before finishing')
     expect(cutOffWords([one('ended'), one('failed')]).said).toBe('2 background tasks were cut off or failed')
     expect(cutOffWords([one('ended'), one('failed')]).detail).toBe('s-ended; s-failed')
+  })
+})
+
+describe('lastPrompt', () => {
+  test('the newest prompt the person typed; task notifications, tool answers and the module’s own line are not the person', () => {
+    const text = [typed(T0), notified(T0 + 1000, 'failed', FAILED), toolResult(T0 + 2000), typed(T0 + 3000, 'mine')].join('\n')
+    expect(lastPrompt(text)).toBe(T0 + 3000)
+    expect(lastPrompt(text, ['mine'])).toBe(T0)
+    expect(lastPrompt(notified(T0, 'failed', FAILED))).toBe(Number.NEGATIVE_INFINITY)
   })
 })
