@@ -2,6 +2,9 @@ import { LIMITS, type FooterItemInput, type FooterLevel } from 'kehikot-module-p
 
 import { contextWords, costSaid, tokensSaid, type Context } from '../../meter.ts'
 import { limitsWords, type Level, type Limits } from '../../usage.ts'
+import type { State } from '../../program.ts'
+import { HERE_COMMAND, NONE_CONNECTED } from './conversations.ts'
+import { MARKS } from './places.ts'
 
 /**
  * The footer the host draws for this module (`kehikot.footer`, protocol 2.38.0): the same things the
@@ -25,6 +28,8 @@ export const FOOT = {
   RESTART_FOLDERS: 'restart-folders',
   RESUME: 'resume',
   TRY_AGAIN: 'try-again',
+  COPY_HERE: 'copy-here',
+  DISMISS_DISCONNECTED: 'dismiss-disconnected',
 } as const
 
 export const COMPACT_MEANS = 'Compact: Claude Code’s own /compact, typed at the prompt — the conversation so far is summarised, and the window holds the summary.'
@@ -38,6 +43,15 @@ export const WORKING = 'It is working. Restart it when it is idle.'
 
 /** What the footer is drawn from: the state the page's own rows are drawn from. */
 export interface FooterState {
+  /** The conversation on screen: what it is doing, what it is called, and what it is besides this module's own (a background one, a copy). */
+  session?: { state: State | null; label: string; how: { word: string; means: string } | null } | null
+  /**
+   * No conversation is connected to this kehikko. `copy`: the host writes the clipboard inside the
+   * person's click (protocol 2.40.0), so Copy is a footer run; `copied`: what the last one came to.
+   */
+  unconnected?: { copy: boolean; copied: 'yes' | 'failed' | null } | null
+  /** A conversation was just disconnected from this kehikko: the sentence saying so, until dismissed. */
+  disconnected?: string | null
   /** The session on screen is live, and its line is shown: the meters and Compact and Clear. */
   line: {
     context: Context | null
@@ -76,13 +90,29 @@ export function contextLevel(context: Context): FooterLevel {
 
 const USAGE_LEVEL: Record<Level, FooterLevel> = { ok: 'normal', near: 'warn', at: 'critical' }
 
+/** What the conversation on screen is doing, as the footer says it: the menu's mark and a word. */
+export const STATE_WORDS: Record<State, string> = { working: 'Working', 'needs-you': 'Needs you', finished: 'Finished' }
+
+/**
+ * The conversation on screen, as one text: what it is doing, what it is called, and what it is
+ * besides this module's own. The first thing a person glances at, so it leads the row.
+ */
+export function sessionItem(session: NonNullable<FooterState['session']>): FooterItemInput {
+  const name = session.label || 'A new conversation'
+  const doing = session.state ? `${MARKS[session.state].glyph} ${STATE_WORDS[session.state]}` : null
+  const words = [doing, name, session.how?.word].filter(Boolean).join(' · ')
+  const about = [session.state ? `${STATE_WORDS[session.state]}: ${name}` : name, session.how?.means].filter(Boolean).join('. ')
+  return { kind: 'text', id: 'session', text: said(words), level: session.state === 'needs-you' ? 'warn' : 'normal', tooltip: tip(about) }
+}
+
 /** The footer's items for a state; `[]` when there is nothing to show. */
 export function footerItems(state: FooterState): FooterItemInput[] {
   const items: FooterItemInput[] = []
   const { line } = state
+  if (line?.said) items.push({ kind: 'text', id: 'said', text: said(line.said), tooltip: tip(line.said) })
+  if (state.session) items.push(sessionItem(state.session))
   if (line) {
     const { context } = line
-    if (line.said) items.push({ kind: 'text', id: 'said', text: said(line.said), tooltip: tip(line.said) })
     if (context && context.tokens !== null) {
       const words = contextWords(context)
       items.push({
@@ -174,6 +204,24 @@ export function footerItems(state: FooterState): FooterItemInput[] {
     const words = `The install did not finish (${state.installFailed.failed}) — run ${state.installFailed.line} in a terminal, then try again.`
     items.push({ kind: 'text', id: 'install-failed', text: said(words), level: 'critical', tooltip: tip(words) })
     items.push({ kind: 'run', id: FOOT.TRY_AGAIN, label: 'Try again', icon: 'refresh', align: 'end' })
+  }
+  if (state.disconnected) {
+    items.push({ kind: 'text', id: 'disconnected', text: said(state.disconnected), tooltip: tip(state.disconnected) })
+    items.push({ kind: 'run', id: FOOT.DISMISS_DISCONNECTED, label: 'Dismiss', icon: 'x', align: 'end' })
+  }
+  if (state.unconnected) {
+    items.push({ kind: 'text', id: 'unconnected', text: said(NONE_CONNECTED), tooltip: tip(NONE_CONNECTED) })
+    if (state.unconnected.copy) {
+      const { copied } = state.unconnected
+      items.push({
+        kind: 'run',
+        id: FOOT.COPY_HERE,
+        label: copied === 'yes' ? 'Copied' : `Copy ${HERE_COMMAND}`,
+        align: 'end',
+        copy: { plain: HERE_COMMAND },
+        tooltip: copied === 'failed' ? `Could not copy: select ${HERE_COMMAND} and copy it` : `Copy ${HERE_COMMAND}, to type in the conversation you want here`,
+      })
+    }
   }
   return items
 }
