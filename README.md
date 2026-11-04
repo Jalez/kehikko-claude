@@ -228,6 +228,8 @@ bottom row as a sentence with its button as a run: **Restart in the new folder**
 **Restart**, **Resume**, **Try again**. The breakdown has no place in a host's footer: the meter's
 tooltip carries the summary. Any other host gets no footer and the page draws its own, as above.
 
+The footer leads with the conversation on screen — what it is doing (**● Working**, **◆ Needs you**, *warn*, **○ Finished**), its title and what it is besides this module's own (*background*, *copy*), which the View menu then leaves out of its option — so a container folded to its header and footer still says what is going on. The strips the page drew above the terminal are the footer's too: "No conversation is connected…" with **Copy /kehikot-here** beside it, a run the app copies inside the person's click (`copy`, protocol 2.40.0; an app that does not copy keeps the page's own bar, where the click is), and "Disconnected …" with **Dismiss**. The header keeps only what sets the module up or starts something: the View menu, Make own, Connected, What this conversation was told, Disconnect, Connect, and the settings toggles.
+
 A host that draws headers (protocol 1.1.0, `kehikot.header`) is given one **View** menu — a `switch`,
 *This kehikko’s conversations* — listing every conversation connected to this place, and nothing else:
 the own one first, then by when each was last active. Each line is its mark, its title, when it was
