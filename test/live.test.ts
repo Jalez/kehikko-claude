@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import { activityItemsSchema, messageReadResult } from 'kehikot-module-protocol'
-import { messageWaker } from 'kehikot-module-protocol/serve'
+import { messageDelivery } from 'kehikot-module-protocol/serve'
 import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,7 +12,7 @@ import { RESEARCH_LINE, SELF as CONTEXT_SELF } from '../context.ts'
 import { NOTES_VERSION, UPDATED_HEAD, sessionNotes } from 'kehikot-module-protocol'
 import { readFileSync as fsRead, writeFileSync as fsWrite } from 'node:fs'
 import { PROGRAM, SUBAGENT_EVENTS, readActive, type Active, type Program, type Recorded } from '../program.ts'
-import { assign, attach, detach, ignore, readPlaces, sessionsAt, writeSettings, type NamedPlace } from '../record.ts'
+import { assign, attach, detach, ignore, readPlaces, sessionsAt, tokenFor, writeSettings, type NamedPlace } from '../record.ts'
 import type { AbsentModule } from 'kehikot-module-protocol'
 import { freshToken, keptDirOf, writeKeptPlace, type DoorsAsked, type HostPlace, type ModuleOn, type SessionDoor } from '../doorConfig.ts'
 import { existsSync, readFileSync, statSync } from 'node:fs'
@@ -2769,7 +2769,7 @@ describe('a session started here knows its place and its kehikko’s modules, an
  * The context meter, and Compact and Clear
  * ------------------------------------------------------------------ */
 
-describe('a message wakes an idle session (protocol 2.43.0)', () => {
+describe('a message is typed into its session (protocol 2.48.0)', () => {
   const after = (ms: number) => new Promise((done) => setTimeout(done, ms))
   async function reporting() {
     const dir = project()
@@ -2783,84 +2783,163 @@ describe('a message wakes an idle session (protocol 2.43.0)', () => {
     run.token = freshToken()
     return { dir, w, run, tell: (event: string) => w.runs.heard(run.id, run.secret, event) }
   }
-  const LINE = 'New message for this session from Codex (kehikot.codex, epic methods on the kehikko writing). Read it with read_messages.'
+  const TEXT = '[Kehikot message from Codex (epic methods on the kehikko writing), #4] leave auth.ts\n  for an hour\n\nThat message was typed in by Kehikot for this session.'
+  const PASTE = `\x1b[200~${TEXT}\x1b[201~`
+  let ids = 0
+  const msg = (over: Record<string, unknown> = {}) => ({
+    id: ++ids,
+    at: '2026-10-31T14:00:00.000Z',
+    from: { module: 'kehikot.codex', name: 'Codex', session: 's', place: { epic: 'methods', parts: [], kehikko: 'writing' } },
+    to: { module: 'kehikot.claude' },
+    thread: null,
+    body: 'leave server/auth.ts alone',
+    ...over,
+  })
+  /** A host that keeps `inbox` for every token, and moves a cursor on an `unread` read, as a 2.41.0 host does. */
+  function host(inbox: ReturnType<typeof msg>[]) {
+    let cursor = 0
+    const reads: boolean[] = []
+    return {
+      reads,
+      read: async (_token: string, unread: boolean) => {
+        reads.push(unread)
+        const fresh = inbox.filter((one) => one.id > cursor)
+        const you = { module: 'kehikot.claude', session: A, place: { epic: null, parts: [], kehikko: null } }
+        if (unread) {
+          const taken = fresh.slice(0, 8)
+          if (taken.length) cursor = taken.at(-1)!.id
+          return { ok: true as const, data: messageReadResult.parse({ messages: taken, unread: fresh.length - taken.length, you }) }
+        }
+        return { ok: true as const, data: messageReadResult.parse({ messages: inbox, unread: fresh.length, you }) }
+      },
+    }
+  }
 
-  test('a session this module runs is listed as its own, idle only at its prompt, with the person’s two settings', async () => {
+  test('a session this module runs is listed as its own, by where it stands, with the person’s two settings', async () => {
     const { dir, w, run, tell } = await reporting()
-    const one = () => w.runs.wakeSessions().find((s) => s.key === run.id)!
-    expect(one()).toMatchObject({ token: run.token, own: true, idle: false, wake: true, act: true })
+    const one = () => w.runs.deliverySessions().find((s) => s.key === A)!
+    expect(one()).toMatchObject({ token: run.token, own: true, wake: true, act: true })
     tell('UserPromptSubmit')
-    expect(one().idle).toBe(false)
+    expect(one().state).toBe('busy')
+    w.later(1_000)
+    tell('PermissionRequest')
+    expect(one().state).toBe('asks')
     w.later(1_000)
     tell('Stop')
     w.later(1_000)
-    expect(one().idle).toBe(true)
+    expect(one().state).toBe('idle')
+    w.runs.type(run, 'half a th')
+    expect(one().state).toBe('typing')
+    w.runs.type(run, '\x7f'.repeat(9))
     writeSettings(dir, { wakeOnMessages: false, actOnMessages: false })
     expect(one()).toMatchObject({ wake: false, act: false })
   })
 
-  test('at its prompt the line is typed through its own pty, then Enter — never while it works, waits, or has something typed', async () => {
+  test('idle: the messages are one bracketed paste through its own pty, then Enter', async () => {
     const { w, run, tell } = await reporting()
-    expect(w.runs.wake(run.id, LINE)).toBe(false)
+    tell('Stop')
+    w.later(1_000)
+    const before = w.ptys[0]!.typed.length
+    expect(w.runs.deliver(A, TEXT)).toBe(true)
+    expect(w.ptys[0]!.typed.slice(before)).toEqual([PASTE])
+    await after(320)
+    expect(w.ptys[0]!.typed.slice(before)).toEqual([PASTE, '\r'])
+    expect(run.prompt.chars).toBe(0)
+    expect(w.logged.some((line) => line.includes('typed into it'))).toBe(true)
+  })
+
+  test('busy: typed at once — Claude Code queues a line typed during a turn', async () => {
+    const { w, tell } = await reporting()
     tell('UserPromptSubmit')
-    expect(w.runs.wake(run.id, LINE)).toBe(false)
     w.later(1_000)
+    expect(w.runs.deliver(A, TEXT)).toBe(true)
+  })
+
+  test('never into a question on screen, nor over text the person has not sent', async () => {
+    const { w, run, tell } = await reporting()
     tell('PermissionRequest')
-    expect(w.runs.wake(run.id, LINE)).toBe(false)
     w.later(1_000)
+    expect(w.runs.deliver(A, TEXT)).toBe(false)
     tell('Stop')
     w.later(1_000)
     w.runs.type(run, 'half a th')
-    expect(w.runs.wake(run.id, LINE)).toBe(false)
-    w.runs.type(run, '\x7f'.repeat(9))
-    const before = w.ptys[0]!.typed.length
-    expect(w.runs.wake(run.id, LINE)).toBe(true)
-    expect(w.ptys[0]!.typed.slice(before)).toEqual([LINE])
-    await after(320)
-    expect(w.ptys[0]!.typed.slice(before)).toEqual([LINE, '\r'])
-    /* Sent: not again until it is seen back at its prompt. */
-    expect(w.runs.wake(run.id, LINE)).toBe(false)
-    expect(w.logged.some((line) => line.includes('one line typed to wake it'))).toBe(true)
+    expect(w.runs.deliver(A, TEXT)).toBe(false)
   })
 
-  test('the line is one line: a control character in it is never typed', async () => {
-    const { w, run, tell } = await reporting()
-    tell('Stop')
-    w.later(2_000)
-    const before = w.ptys[0]!.typed.length
-    expect(w.runs.wake(run.id, 'one\rtwo\x1b[2J')).toBe(true)
-    expect(w.ptys[0]!.typed.slice(before)).toEqual(['one two [2J'])
-  })
-
-  test('the protocol’s waker, over this module’s sessions: one wake, the body never typed', async () => {
-    const { w, run, tell } = await reporting()
+  test('the protocol’s delivery over this module’s sessions: the body typed, control characters stripped, several in one paste, once', async () => {
+    const { w, tell } = await reporting()
     tell('Stop')
     w.later(2_000)
     let clock = Date.parse('2026-10-31T15:00:00.000Z')
-    const read = messageReadResult.parse({
-      messages: [
-        {
-          id: 4,
-          at: '2026-10-31T14:00:00.000Z',
-          from: { module: 'kehikot.codex', name: 'Codex', session: 's', place: { epic: 'methods', parts: [], kehikko: 'writing' } },
-          to: { module: 'kehikot.claude' },
-          thread: null,
-          body: 'BODY-NEVER-TYPED',
-        },
-      ],
-      unread: 1,
-      you: { module: 'kehikot.claude', session: A, place: { epic: null, parts: [], kehikko: null } },
-    })
-    const waker = messageWaker({ module: 'kehikot.claude', sessions: () => w.runs.wakeSessions(), type: (id, line) => w.runs.wake(id, line), now: () => clock, read: async () => ({ ok: true, data: read }) })
-    await waker.tick()
+    const h = host([msg({ body: 'first\x1b[201~\r/clear\x07' }), msg({ body: 'second' })])
+    const delivery = messageDelivery({ module: 'kehikot.claude', queues: true, sessions: () => w.runs.deliverySessions(), type: (k, t) => w.runs.deliver(k, t), now: () => clock, read: h.read })
+    await delivery.tick()
     clock += 2_500
-    expect(run.token).not.toBeNull()
-    expect(await waker.tick()).toBe(1)
+    expect(await delivery.tick()).toBe(1)
     const typed = w.ptys[0]!.typed.join('')
-    expect(typed).toContain('New message for this session from Codex (kehikot.codex, epic methods on the kehikko writing).')
-    expect(typed).not.toContain('BODY-NEVER-TYPED')
+    expect(typed.match(/\x1b\[200~/g)).toHaveLength(1)
+    expect(typed.match(/\x1b\[201~/g)).toHaveLength(1)
+    expect(typed).toContain('[Kehikot message from Codex (epic methods on the kehikko writing)')
+    expect(typed).toContain('first\n  /clear')
+    expect(typed).toContain('second')
+    expect(typed).not.toContain('\x07')
     clock += 10_000
-    expect(await waker.tick()).toBe(0)
+    expect(await delivery.tick()).toBe(0)
+  })
+
+  test('a question for the person waits until it is answered', async () => {
+    const { w, tell } = await reporting()
+    tell('PermissionRequest')
+    let clock = Date.parse('2026-10-31T15:00:00.000Z')
+    const h = host([msg()])
+    const delivery = messageDelivery({ module: 'kehikot.claude', queues: true, sessions: () => w.runs.deliverySessions(), type: (k, t) => w.runs.deliver(k, t), now: () => clock, read: h.read })
+    clock += 10_000
+    expect(await delivery.tick()).toBe(0)
+    expect(h.reads).not.toContain(true)
+    w.later(1_000)
+    tell('UserPromptSubmit')
+    w.later(1_000)
+    expect(await delivery.tick()).toBe(1)
+  })
+
+  test('asleep: a conversation of its own, put away, is resumed and the messages typed in at its prompt', async () => {
+    const { dir, w, run } = await reporting()
+    tokenFor(dir, A, freshToken)
+    w.ptys[0]!.ends(0)
+    await settle()
+    expect(run.ended).toBe(true)
+    const listed = w.runs.deliverySessions().find((s) => s.key === A)!
+    expect(listed).toMatchObject({ token: tokenFor(dir, A, freshToken), own: true, state: 'asleep' })
+    const resumed = w.runs.resumeFor(A, TEXT)
+    await settle()
+    const again = w.runs.sessions().find((one) => !one.ended)!
+    expect(again).toBeDefined()
+    expect(w.ptys.at(-1)!.args).toContain('--resume')
+    w.runs.heard(again.id, again.secret, 'SessionStart')
+    w.runs.heard(again.id, again.secret, 'Stop')
+    w.later(2_000)
+    expect(await resumed).toBe(true)
+    expect(w.ptys.at(-1)!.typed.join('')).toContain(PASTE)
+  })
+
+  test('asleep: never one open in another process', async () => {
+    const { dir, w } = await reporting()
+    tokenFor(dir, A, freshToken)
+    w.ptys[0]!.ends(0)
+    await settle()
+    w.runs.deliverySessions()
+    w.elsewhere.push({ session: A, pid: 4242, kind: 'interactive', called: 'claude', handle: null, status: null, state: null } as unknown as Active)
+    const ptys = w.ptys.length
+    expect(await w.runs.resumeFor(A, TEXT)).toBe(false)
+    expect(w.ptys.length).toBe(ptys)
+    expect(w.logged.some((line) => line.includes('open in another process — not resumed'))).toBe(true)
+  })
+
+  test('a view of a session started elsewhere is not its own', async () => {
+    const { w, run } = await reporting()
+    run.joined = { session: A, pid: 1, kind: 'background', handle: 'h', called: 'claude' } as unknown as Active
+    run.owned = false
+    expect(w.runs.deliverySessions().find((s) => s.key === A)!.own).toBe(false)
   })
 })
 

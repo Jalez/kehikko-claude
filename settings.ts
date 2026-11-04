@@ -13,8 +13,8 @@ import { ACT_ON_MESSAGES_SETTING, KEHIKOT_DIR, WAKE_ON_MESSAGES_SETTING, setting
  * Edits and commands there ask as the person's permission mode says.
  *
  * "Messages wake an idle session" and "Act on messages from other sessions" (protocol 2.43.0) are
- * the protocol's own declarations, the same in every agent module: the waker (`wakeSessions`,
- * `wake` in live.ts) and the words a session is told about messages (context.ts, doors.ts).
+ * the protocol's own declarations, the same in every agent module: delivery by typing (`deliverySessions`,
+ * `deliver`, `resumeFor` in live.ts, protocol 2.48.0) and the words a session is told about messages (context.ts, doors.ts).
  */
 
 export const SETTINGS_FILE = `${KEHIKOT_DIR}/claude/settings.json`
