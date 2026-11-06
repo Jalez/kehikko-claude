@@ -8,7 +8,7 @@ import type { Duplex } from 'node:stream'
 import { PROJECT_ID, projectFile, readProjectFile } from 'kehikot-module-protocol'
 import type { RunSockets } from 'kehikot-module-protocol/run'
 import { messageDelivery, mintTicket, pasted, sameTicket, type DeliverySession } from 'kehikot-module-protocol/serve'
-import type { DeliveryState } from 'kehikot-module-protocol'
+import type { DeliveryState, KehikkoSkill } from 'kehikot-module-protocol'
 
 import { emptyPrompt, promptAfter, typedByPerson, type Prompt } from './input.ts'
 import { Gauges } from './gauges.ts'
@@ -1565,9 +1565,12 @@ export class Runs {
     this.issue(token, { projectPath, projectId, place }, kept)
     let doors: SessionDoor[] = []
     let config: string | null = null
+    let kehikkoSkills: KehikkoSkill[] | null = null
     if (able.configures) {
       const kehikko = place.kehikko && 'key' in place.kehikko ? place.kehikko.key : null
-      const got = await (this.options.doors ?? hostDoors)({ projectPath, projectId, token, kehikko }).catch(() => null)
+      const started = await this.startPlace({ projectPath, projectId, token, kehikko })
+      const got = started.doors
+      kehikkoSkills = started.kehikkoSkills
       if (got?.length) {
         try {
           config = writeKeptConfig(got, kept)
@@ -1579,7 +1582,7 @@ export class Runs {
         this.log('claude: no host gave this session its doors; it starts with the agent’s own configuration')
       }
     }
-    const plugin = able.plugins ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log, into: join(kept, 'plugin'), token }) : null
+    const plugin = able.plugins ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log, into: join(kept, 'plugin'), token, kehikkoSkills }) : null
     const name = able.names ? placeName(projectPath, place) : ''
     /* Its status line, which says its context here (statusline.sh). Written into the plugin at every start and wake, so a woken one runs the person's line as their settings say it now. */
     const status = plugin && able.tells ? this.statusLineFor(projectPath, plugin) : null
@@ -2356,6 +2359,21 @@ export class Runs {
   }
 
   /** Remember where a token was given out; a background conversation's also in its kept folder. */
+  /**
+   * What a session is started with from the host: its doors and the skills the person wrote for its
+   * kehikko (protocol 2.53.0), in one ask (`hostPlace`). A test's stand-in `doors` is asked for the
+   * doors, and its `place`, when it has one, for the skills.
+   */
+  private async startPlace(asked: DoorsAsked): Promise<{ doors: SessionDoor[] | null; kehikkoSkills: KehikkoSkill[] | null }> {
+    if (this.options.doors) {
+      const doors = await this.options.doors(asked).catch(() => null)
+      const placed = this.options.place ? await this.options.place(asked).catch(() => null) : null
+      return { doors, kehikkoSkills: placed?.kehikkoSkills ?? null }
+    }
+    const got = await hostPlace(asked).catch(() => null)
+    return { doors: got?.doors ?? null, kehikkoSkills: got?.kehikkoSkills ?? null }
+  }
+
   private issue(token: string, started: Started, kept: string | null = null): void {
     this.issued.delete(token)
     this.issued.set(token, started)
@@ -2725,11 +2743,14 @@ export class Runs {
     let token: string | null = null
     let doors: SessionDoor[] = []
     let config: string | null = null
+    let kehikkoSkills: KehikkoSkill[] | null = null
     if (!joined && (await this.program.supports(found.file)).configures) {
       token = (settled ? tokenFor(projectPath, settled, freshToken) : null) ?? freshToken()
       this.issue(token, { projectPath, projectId, place: asked.place })
       const kehikko = asked.place.kehikko && 'key' in asked.place.kehikko ? asked.place.kehikko.key : null
-      const got = await (this.options.doors ?? hostDoors)({ projectPath, projectId, token, kehikko }).catch(() => null)
+      const started = await this.startPlace({ projectPath, projectId, token, kehikko })
+      const got = started.doors
+      kehikkoSkills = started.kehikkoSkills
       if (got?.length) {
         try {
           config = writeConfig(got, this.options.configBase)
@@ -2744,7 +2765,7 @@ export class Runs {
     /* The skills of every module on the kehikko, for this one process: one folder, removed with it. */
     const plugin =
       !joined && (await this.program.supports(found.file)).plugins
-        ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log, token })
+        ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log, token, kehikkoSkills })
         : null
     /* Its own status line, which also says its context here (statusline.sh): only beside its plugin, which holds the script and the token. */
     const status = !joined && plugin && token && able.tells ? this.statusLineFor(projectPath, plugin) : null

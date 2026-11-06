@@ -9,7 +9,7 @@ import { listing, runOf, type Listing } from '../doors.ts'
 import { CLOSED, Runs, activityRows, sameProject, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type RunsOptions, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
 import { placeKey } from '../place.ts'
 import { RESEARCH_LINE, SELF as CONTEXT_SELF } from '../context.ts'
-import { NOTES_VERSION, UPDATED_HEAD, sessionNotes } from 'kehikot-module-protocol'
+import { KEHIKKO_SKILLS_HEAD, NOTES_VERSION, UPDATED_HEAD, kehikkoSkillText, sessionNotes, type KehikkoSkill } from 'kehikot-module-protocol'
 import { readFileSync as fsRead, writeFileSync as fsWrite } from 'node:fs'
 import { PROGRAM, SUBAGENT_EVENTS, readActive, type Active, type Program, type Recorded } from '../program.ts'
 import { assign, attach, detach, ignore, readPlaces, sessionsAt, tokenFor, writeSettings, type NamedPlace } from '../record.ts'
@@ -2467,17 +2467,18 @@ describe('a session started here knows its place and its kehikko’s modules, an
   const TERMINAL: ModuleOn = { module: 'kehikot.terminal', name: 'Terminal', summary: 'A shell.', door: null, skills: [] }
   const SELF: ModuleOn = { module: 'kehikot.claude', name: 'Claude', summary: 'This.', door: 'kehikko-claude', skills: ['kehikot-here'] }
   /** A host whose kehikko holds `on`, changed by a test as a person would. */
-  const host = (on: ModuleOn[], asked: DoorsAsked[] = [], absent: AbsentModule[] = []) => ({
+  const host = (on: ModuleOn[], asked: DoorsAsked[] = [], absent: AbsentModule[] = [], kehikkoSkills?: KehikkoSkill[]) => ({
     on,
     asked,
     absent,
+    kehikkoSkills,
     doors: async (one: DoorsAsked): Promise<SessionDoor[]> => [
       { module: 'kehikko', name: 'kehikko', url: `http://127.0.0.1:4180/mcp?kehikot-place=${one.token}`, transport: 'http' },
       { module: 'kehikot.notes', name: 'notes', url: `http://127.0.0.1:4600/mcp?kehikot-place=${one.token}`, transport: 'http' },
     ],
     place: async (one: DoorsAsked): Promise<HostPlace | null> => {
       asked.push(one)
-      return { doors: [{ module: 'kehikko', name: 'kehikko', url: 'http://127.0.0.1:4180/mcp', transport: 'http' }], modules: [...on], absent: [...absent], messages: null, messagesMore: 0 }
+      return { doors: [{ module: 'kehikko', name: 'kehikko', url: 'http://127.0.0.1:4180/mcp', transport: 'http' }], modules: [...on], absent: [...absent], messages: null, messagesMore: 0, ...(kehikkoSkills ? { kehikkoSkills: [...kehikkoSkills] } : {}) }
     },
   })
   const started = async (h: ReturnType<typeof host>, dir: string, place: NamedPlace = KEYED) => {
@@ -2518,6 +2519,28 @@ describe('a session started here knows its place and its kehikko’s modules, an
     expect(statSync(join(plugin, 'kehikot', 'token')).mode & 0o777).toBe(0o600)
     expect(readFileSync(join(plugin, 'kehikot', 'origin'), 'utf8')).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
     expect(args.join(' ')).not.toContain(token)
+  })
+
+  test('the skills the person wrote for its kehikko are in its plugin, held, and said in its notes; one added later is said with where to read it', async () => {
+    const dir = project()
+    const skill = (name: string, body = 'Check the list.') => ({ name, description: `When ${name} applies.`, text: kehikkoSkillText(name, `When ${name} applies.`, body) })
+    const skills = [skill('review-checklist')]
+    const h = host([NOTES], [], [], skills)
+    const { w, token } = await started(h, dir)
+    const args = w.ptys[0]!.args
+    const plugin = args[args.indexOf('--plugin-dir') + 1]!
+    expect(readFileSync(join(plugin, 'skills', 'review-checklist', 'SKILL.md'), 'utf8')).toBe(skills[0]!.text)
+    expect(JSON.parse(readFileSync(join(plugin, 'held-skills.json'), 'utf8'))).toContain('review-checklist')
+    const start = said(await w.runs.context('SessionStart', B, token))
+    expect(start).toContain(KEHIKKO_SKILLS_HEAD)
+    expect(start).toContain('- review-checklist — "When review-checklist applies."')
+    expect(start).not.toContain('Not loaded in this conversation')
+    /* The person adds one while it runs: told at the next prompt, as not loaded until a restart, with the tool to read it. */
+    skills.push(skill('house-style'))
+    const prompt = said(await w.runs.context('UserPromptSubmit', B, token))
+    expect(prompt).toContain('The person added skills to this kehikko')
+    expect(prompt).toContain('Not loaded in this conversation as a skill: house-style')
+    expect(prompt).toContain('kehikko_skills')
   })
 
   test('a new kehikko and a new session: it is the kehikko’s own at its first prompt, with no command — even when the run that started it is gone', async () => {

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { WELL_KNOWN, moduleSkillsSchema, skillPath, skillTextIssue, skillsThatLoad, type ModuleSkill, type ProvidingManifest } from 'kehikot-module-protocol'
+import { WELL_KNOWN, moduleSkillsSchema, skillPath, skillTextIssue, skillsThatLoad, type KehikkoSkill, type ModuleSkill, type ProvidingManifest } from 'kehikot-module-protocol'
 import { originFor, preferred, registryDir } from 'kehikot-module-protocol/serve'
 
 import { configDirOf, type SessionDoor } from './doorConfig.ts'
@@ -129,6 +129,11 @@ export interface GatherOptions {
   token?: string | null
   /** Where this module's registration is: where the hook looks when the origin it was given stops answering. */
   registration?: string
+  /**
+   * The skills the person wrote for the session's kehikko (protocol 2.53.0), as the host handed them:
+   * each put in the plugin as it is, before any module's, so a name the person chose is theirs.
+   */
+  kehikkoSkills?: readonly KehikkoSkill[] | null
 }
 
 /** Whether the person already installed `name` at `version` through Kehikot (its marker says the same version). */
@@ -188,10 +193,16 @@ export async function sessionPlugin(doors: readonly SessionDoor[], options: Gath
   /* The skills the session will have: those put in its plugin, and those the person installed at the same version. */
   const held = new Set<string>()
   const take = (name: string, text: string, version: string, from: string) => {
-    if (found.has(name)) return log(`claude: skill ${name} from ${from} left out — another module already offers one by that name`)
+    if (found.has(name)) return log(`claude: skill ${name} from ${from} left out — this kehikko or another module already has one by that name`)
     held.add(name)
     if (installed(claudeDir, name, version)) return log(`claude: skill ${name} is already installed (${version}) — not listed twice`)
     found.set(name, text)
+  }
+  /* The person's own skills for this kehikko first (protocol 2.53.0): never "installed" elsewhere, so always put in. */
+  for (const one of options.kehikkoSkills ?? []) {
+    if (found.has(one.name) || skillTextIssue(one.text, one.name)) continue
+    held.add(one.name)
+    found.set(one.name, one.text)
   }
   for (const one of skillDeclarations()) take(one.name, skillText(one.name)!, one.version, ID)
 
