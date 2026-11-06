@@ -789,7 +789,12 @@ its list again, its bar goes, and it puts that conversation on screen):
   runs it. A copy whose help has no `--plugin-dir` is started without it. The same plugin holds
   the skills of every module on the session's kehikko; a skill that needs other modules
   (`needs`, protocol 2.12.0, "kehikko-bound") is in it only when each of them has a container
-  on that kehikko, and is otherwise left out with one log line naming what is missing.
+  on that kehikko, and is otherwise left out with one log line naming what is missing. The
+  skills the person wrote for the kehikko (protocol 2.53.0, `kehikkoSkills` in the host's answer)
+  are put in it first, as the host handed them, and a module's skill of the same name is left out.
+  They are loaded at the start (and at a wake); one the person adds or changes while the session
+  runs is said in its notes at the next prompt, with `kehikko_skills` on the host's door to read
+  it, and is loaded as a skill when the session is started again.
 - **A conversation started outside Kehikot** needs it in `~/.claude/skills/kehikot-here/`. This
   module never writes there. It declares the skill in its manifest (`declares.skills`, protocol
   2.5.0: name, summary, and as version the first twelve hex digits of the text's sha256) and

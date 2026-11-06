@@ -216,3 +216,17 @@ describe('plugin folders a stopped process left behind', () => {
     expect(existsSync(join(root, 'plugin-live', 'kehikot', 'pid'))).toBe(true)
   })
 })
+
+describe('the skills the person wrote for the kehikko (protocol 2.53.0)', () => {
+  test('are put in the plugin as handed, held, and keep a name a module also offers', async () => {
+    const mine = { name: 'browse', description: 'Mine.', text: text('browse', 'The person’s own.') }
+    const one = module({ browse: { text: text('browse', 'The module’s.') } })
+    const log: string[] = []
+    const plugin = (await sessionPlugin([door('kehikot.browser', one)], { ...options({ log }), kehikkoSkills: [mine, { name: 'bad', description: 'x', text: 'no front matter' }] }))!
+    expect(readFileSync(join(plugin, 'skills', 'browse', 'SKILL.md'), 'utf8')).toBe(mine.text)
+    expect(names(plugin)).not.toContain('bad')
+    expect(heldSkills(plugin)).toContain('browse')
+    expect(log.some((line) => line.includes('skill browse from kehikot.browser left out'))).toBe(true)
+    removePlugin(plugin)
+  })
+})

@@ -1,4 +1,4 @@
-import { NOTES_MESSAGES_MOST, agentMessageSchema, type AgentMessage, oneLine, type AbsentModule, type SessionModule } from 'kehikot-module-protocol'
+import { NOTES_MESSAGES_MOST, agentMessageSchema, kehikkoSkillsSchema, type AgentMessage, type KehikkoSkill, oneLine, type AbsentModule, type SessionModule } from 'kehikot-module-protocol'
 import { createHash, randomBytes } from 'node:crypto'
 import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -94,6 +94,12 @@ export interface HostPlace {
   messages: AgentMessage[] | null
   /** How many more unread wait; handed at the next ask. */
   messagesMore: number
+  /**
+   * The skills the person wrote for the session's kehikko (protocol 2.53.0), each with its SKILL.md:
+   * loaded into the session's plugin at its start (`sessionPlugin`), said in its notes. Null from a host
+   * too old to say, or a place with no kehikko.
+   */
+  kehikkoSkills?: KehikkoSkill[] | null
 }
 
 /**
@@ -114,7 +120,7 @@ export async function hostPlace(asked: DoorsAsked, options: { env?: Record<strin
         signal: control.signal,
       })
       if (!response.ok) continue
-      const said = (await response.json()) as { ok?: unknown; token?: unknown; doors?: unknown; modules?: unknown; absent?: unknown; messages?: unknown; messagesMore?: unknown }
+      const said = (await response.json()) as { ok?: unknown; token?: unknown; doors?: unknown; modules?: unknown; absent?: unknown; messages?: unknown; messagesMore?: unknown; kehikkoSkills?: unknown }
       if (said.ok !== true || said.token !== asked.token || !Array.isArray(said.doors)) continue
       return {
         doors: said.doors.filter(isDoor).slice(0, 64),
@@ -122,6 +128,7 @@ export async function hostPlace(asked: DoorsAsked, options: { env?: Record<strin
         absent: Array.isArray(said.absent) ? said.absent.flatMap(absentOne).slice(0, 32) : null,
         messages: Array.isArray(said.messages) ? said.messages.flatMap((one) => { const read = agentMessageSchema.safeParse(one); return read.success ? [read.data] : [] }).slice(0, NOTES_MESSAGES_MOST) : null,
         messagesMore: typeof said.messagesMore === 'number' && Number.isInteger(said.messagesMore) && said.messagesMore > 0 ? said.messagesMore : 0,
+        kehikkoSkills: kehikkoSkillsOf(said.kehikkoSkills),
       }
     } catch {
       /* Not this origin. */
@@ -130,6 +137,13 @@ export async function hostPlace(asked: DoorsAsked, options: { env?: Record<strin
     }
   }
   return null
+}
+
+/** The kehikko's own skills in a host's answer (protocol 2.53.0): each that parses, or null when the host did not say. */
+export function kehikkoSkillsOf(raw: unknown): KehikkoSkill[] | null {
+  if (raw === undefined) return null
+  const read = kehikkoSkillsSchema.safeParse(raw)
+  return read.success ? read.data : null
 }
 
 /** Ask the host for a session's doors (`POST /host/place`). Null when no host answers or it refuses: the session then starts exactly as it did before. */

@@ -123,7 +123,7 @@ export const RESEARCH_LINE = researchLine(SELF)
 
 export function readTold(file: string): Told | null {
   try {
-    const said = JSON.parse(readFileSync(file, 'utf8')) as { key?: unknown; version?: unknown; modules?: unknown; absent?: unknown; names?: unknown; said?: unknown }
+    const said = JSON.parse(readFileSync(file, 'utf8')) as { key?: unknown; version?: unknown; modules?: unknown; absent?: unknown; names?: unknown; said?: unknown; kehikkoSkills?: unknown }
     const ids = (list: unknown): string[] | null => (Array.isArray(list) ? list.filter((one): one is string => typeof one === 'string') : null)
     const names = said.names && typeof said.names === 'object' && !Array.isArray(said.names) ? Object.fromEntries(Object.entries(said.names).filter((pair): pair is [string, string] => typeof pair[1] === 'string')) : undefined
     return {
@@ -133,11 +133,18 @@ export function readTold(file: string): Told | null {
       modules: ids(said.modules),
       ...(said.absent !== undefined ? { absent: ids(said.absent) } : {}),
       ...(names ? { names } : {}),
+      ...(marks(said.kehikkoSkills) ? { kehikkoSkills: marks(said.kehikkoSkills)! } : {}),
       ...(saidOf(said.said) ? { said: saidOf(said.said)! } : {}),
     }
   } catch {
     return null
   }
+}
+
+/** The kehikko's skills a conversation was told of, by name with each text's mark (protocol 2.53.0); null when none were kept. */
+function marks(raw: unknown): Record<string, string> | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  return Object.fromEntries(Object.entries(raw).filter((pair): pair is [string, string] => typeof pair[1] === 'string').slice(0, 64))
 }
 
 const text = (one: unknown): { at: number; text: string } | null => {
@@ -278,6 +285,8 @@ export async function context(asked: { event: string; session: string; token: st
       messaging: answer?.messages ? { session } : null,
       /* The person's standing permission to act on messages (protocol 2.43.0), this project's setting. */
       actOnMessages: readSettings(projectPath).actOnMessages,
+      /* The skills the person wrote for this kehikko (protocol 2.53.0): loaded at the start; one added since is said with where to read it. */
+      kehikkoSkills: place?.kehikko && !kehikko ? null : (answer?.kehikkoSkills ?? null),
     },
     event === 'SessionStart' ? 'start' : 'prompt',
     told,
