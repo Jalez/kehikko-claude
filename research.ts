@@ -86,8 +86,11 @@ export function subagentMeta(sessionRecord: string, session: string, agent: stri
 
 /** What the session's agent said it finished, waiting for the turn or a subagent to end. */
 export interface Told {
+  /** What was declared (protocol 2.55.0, `TURN_KINDS`): `done`, `needs-decision` or `research-complete`. */
   event: string
   label: string
+  /** A decision's choices; absent for none. */
+  choices?: string[]
   at: number
 }
 

@@ -9,6 +9,7 @@ import { PROJECT_ID, projectFile, readProjectFile } from 'kehikot-module-protoco
 import type { RunSockets } from 'kehikot-module-protocol/run'
 import { messageDelivery, mintTicket, pasted, sameTicket, type DeliverySession } from 'kehikot-module-protocol/serve'
 import type { DeliveryState, KehikkoSkill } from 'kehikot-module-protocol'
+import { REFUSED_EVENT, RESEARCH_COMPLETE_EVENT, STALLED_EVENT, TURN_EVENTS, TURN_KINDS, refusalEnd, refusalOf, refusalWords, toldReply, turnEnd, turnQuestion, type ActivityQuestion, type Refusal as Refused, type TurnEnd, type TurnKind } from 'kehikot-module-protocol'
 
 import { emptyPrompt, promptAfter, typedByPerson, type Prompt } from './input.ts'
 import { Gauges } from './gauges.ts'
@@ -22,8 +23,9 @@ import { heldSkills, removePlugin, sessionPlugin, statusScriptIn, sweepKits, wri
 import { freshToken, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, removeConfig, sweepKept, writeConfig, writeKeptConfig, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
 import { extraFolders, folderFlags, sameFolders } from './folders.ts'
-import { AGENT_ID, AGENT_TYPE, EVENT_IDS, FOUND_MOST, isResearch, subagentMeta, type Found, type Told } from './research.ts'
+import { AGENT_ID, AGENT_TYPE, FOUND_MOST, isResearch, subagentMeta, type Found, type Told } from './research.ts'
 import { context, toldWords, type HookAnswer, type Said, type Started } from './context.ts'
+import { ID } from './manifest.ts'
 
 /**
  * The sessions that are running, and the socket a page watches one through.
@@ -606,8 +608,18 @@ export interface Run {
    * (`Stop`) or for a subagent that ran when it was said to (`SubagentStop`). Null for nothing.
    */
   told: Told | null
-  /** The tag its last turn ended with: its finished item names the event, until the next prompt. */
-  turnTag: Told | null
+  /**
+   * How its last turn ended (protocol 2.55.0, `turnEnd`): done, a decision it asked for, an action
+   * refused, or a stall. Its finished item is this, until the next prompt. Null before a turn ended here.
+   */
+  turnEnd: TurnEnd | null
+  /**
+   * The last action auto mode's permission check refused since the person last sent a prompt
+   * (`PermissionDenied`, tell.sh): an Inbox item of its own, the specific ask, until they answer.
+   */
+  refused: (Refused & { at: number }) | null
+  /** Whether its `Stop` hook already sent a stalled turn back once since the last prompt (`sendBackStalls`). */
+  sentBack: boolean
   /** Its subagents running now, by agent id, with when each started (`SubagentStart`). */
   agents: Map<string, number>
   /** Its subagents that finished research, each an Inbox item of its own until the person opens the session. */
@@ -635,6 +647,8 @@ export interface Run {
    * session, and it is not put away (see `rest`). Zero when it said none, or said nothing.
    */
   background: number
+  /** How many scheduled wake-ups (`session_crons`: `/loop`, a scheduled wake) it said it has at its last turn's end. They bring it back too. */
+  crons: number
   /**
    * The background session this run is a VIEW of: the pty holds `claude
    * attach`, and the session's own process is another one, started elsewhere.
@@ -817,6 +831,8 @@ export interface Notice {
   kehikko: string
   /** The picked parts' ids, as the place holds them (a press goes by id, never by name). */
   partIds?: string[]
+  /** What it needs, when its turn ended needing the person (protocol 2.55.0): "Needs your decision: Merge it?". */
+  asks?: string
   /** The kehikko's key, when the place is held by one. */
   kehikkoKey?: string | null
   at: number
@@ -848,6 +864,8 @@ export interface ActivityRow {
    * turn or subagent that was research. One of the manifest's `events`; absent for none.
    */
   event?: string
+  /** A question the person can answer from the Inbox (protocol 2.55.0): a decision the agent asked, a refused action. */
+  question?: ActivityQuestion
   /**
    * The folder of the project the session runs in (protocol 1.8.0). A session keeps running
    * when the person switches project, and the page framed now is the one that reports it; a
@@ -901,26 +919,43 @@ export function activityRows(runs: Iterable<Run>, project: string | null = null,
         project: run.projectPath,
       })
     }
+    /* How its last turn ended (protocol 2.55.0), once it has: a finished session's item is this. */
+    const end = run.state === 'finished' ? endOf(run) : null
+    /* An action auto mode refused (`PermissionDenied`): the specific ask, an item of its own until the
+       person answers — unless the turn's own item already is that ask. */
+    const to = { module: ID, session: run.settled ?? run.id }
+    if (run.refused && end?.event !== REFUSED_EVENT) {
+      const refused = refusalEnd(run.refused, run.cwd || run.projectPath)
+      const question = turnQuestion(refused, to)
+      rows.push({
+        id: `${run.settled ?? run.id}:refused`,
+        state: 'attention',
+        label: clip(refused.label ?? '', ACTIVITY_LABEL),
+        ...(Object.keys(place).length > 0 ? { place: { ...place, ...(place.parts ? { parts: [...place.parts] } : {}) } } : {}),
+        since: run.refused.at,
+        detail: clip(refused.detail, ACTIVITY_DETAIL),
+        event: REFUSED_EVENT,
+        /* Answered from the Inbox (protocol 2.55.0): the answer is typed into this session as the person's. */
+        ...(question && run.settled ? { question } : {}),
+        project: run.projectPath,
+      })
+    }
     if (!run.state) continue
     /* A question the person has already seen, or a conversation with no turn yet, is no Inbox line. */
     if (run.state === 'needs-you' && !needsYou(run)) continue
-    const state = ACTIVITY_STATE[run.state]
-    /* A finished turn its agent said was research (`tell_finished`): the event, and its words. */
-    const tag = run.state === 'finished' ? run.turnTag : null
-    const detail =
-      run.state === 'needs-you'
-        ? 'waiting for you: a permission or an answer'
-        : run.state === 'finished'
-          ? run.background > 0 ? `turn ended; ${run.background} background task${run.background === 1 ? '' : 's'} still running` : 'turn ended'
-          : 'working'
+    const state = end ? end.state : ACTIVITY_STATE[run.state]
+    const detail = end ? end.detail : run.state === 'needs-you' ? 'waiting for you: a permission or an answer' : 'working'
     rows.push({
       id: run.settled ?? run.id,
       state,
-      label: clip((tag?.label ?? run.label).replace(/\s+/g, ' ').trim() || 'Claude session', ACTIVITY_LABEL),
+      label: clip((end?.label ?? run.label).replace(/\s+/g, ' ').trim() || 'Claude session', ACTIVITY_LABEL),
       ...(Object.keys(place).length > 0 ? { place } : {}),
       since: run.stateSince,
       detail: clip(detail, ACTIVITY_DETAIL),
-      ...(tag ? { event: tag.event } : {}),
+      ...(end?.event ? { event: end.event } : {}),
+      /* A decision or a refusal, answered from the Inbox (protocol 2.55.0): only for a conversation with
+         an id the host's messages can reach (`settled`), which a session that has had a turn has. */
+      ...(end && run.settled && turnQuestion(end, to) ? { question: turnQuestion(end, to)! } : {}),
       project: run.projectPath,
     })
   }
@@ -956,6 +991,27 @@ export function activityRows(runs: Iterable<Run>, project: string | null = null,
   }
   rows.sort((a, b) => ACTIVITY_ORDER[a.state] - ACTIVITY_ORDER[b.state] || b.since - a.since || a.id.localeCompare(b.id))
   return rows.slice(0, ACTIVITY_ITEMS)
+}
+
+/**
+ * What a finished session's item is (protocol 2.55.0): how its turn ended (`turnEnd`), except that a
+ * stall the person had on screen as it happened is no news — they saw it stop — and is the plain
+ * finished item. A turn this module did not hear end (a view of a session started elsewhere, a
+ * conversation read back after a restart) is the plain finished item too.
+ */
+export function endOf(run: Pick<Run, 'turnEnd' | 'seen' | 'looking' | 'background' | 'crons'>): TurnEnd {
+  const end = run.turnEnd
+  const waking = (run.background || 0) + (run.crons || 0)
+  const plain: TurnEnd = { state: 'done', event: null, label: null, detail: waking > 0 ? `turn ended; ${waking} background task${waking === 1 ? '' : 's'} still running` : 'turn ended', asks: null }
+  if (!end) return plain
+  if (end.event === STALLED_EVENT && (run.seen || run.looking.size > 0)) return plain
+  return end
+}
+
+/** A turn's end that needs the person, as a notice says it: the event's words, then its own. */
+export function noticeAsks(end: TurnEnd): string {
+  const says = TURN_EVENTS.find((one) => one.id === end.event)?.says ?? 'Waiting for you'
+  return clip(end.label ? `${says}: ${end.label}` : says, ACTIVITY_LABEL)
 }
 
 /** Whether a conversation has had a turn: heard working or finishing, or recorded by the program, which it is from its first prompt on. */
@@ -2826,7 +2882,9 @@ export class Runs {
       typedAt: 0,
       state: null,
       told: null,
-      turnTag: null,
+      turnEnd: null,
+      refused: null,
+      sentBack: false,
       agents: new Map(),
       found: [],
       stateSince: this.now(),
@@ -2835,6 +2893,7 @@ export class Runs {
       secret,
       notices: { left: NOTICES_AT_ONCE, at: this.now() },
       background: 0,
+      crons: 0,
       joined,
       copyOf,
       unchecked,
@@ -3105,23 +3164,24 @@ export class Runs {
    * end, or for a subagent that was running when it was said to; a sentence for the agent says
    * which. Null when the token is no running session's.
    */
-  tellFinished(token: string, event: string, label: string): string | null {
-    if (!PLACE_TOKEN.test(token) || !EVENT_IDS.includes(event)) return null
+  tellFinished(token: string, kind: string, label: string, choices: readonly string[] = []): string | null {
+    if (!PLACE_TOKEN.test(token) || !(TURN_KINDS as readonly string[]).includes(kind)) return null
     const run = [...this.runs.values()].find((one) => one.what === 'session' && !one.ended && one.token === token)
     if (!run) return null
-    const words = label.replace(/\s+/g, ' ').trim().slice(0, 120)
-    run.told = { event, label: words || run.label || 'Research', at: this.now() }
-    if (run.secret === null) return 'Noted, but this conversation does not report when its turn ends, so the person is not told.'
-    return run.agents.size
-      ? 'Noted. The person is told “Research complete” when this turn ends, or when the subagent saying this finishes.'
-      : 'Noted. The person is told “Research complete” when this turn ends.'
+    /* A decision's question is shown whole (protocol 2.55.0: up to the item's question limit, said by `readTellFinished`). */
+    const words = label.replace(/\s+/g, ' ').trim().slice(0, kind === 'needs-decision' ? 1000 : 120)
+    run.told = { event: kind, label: words || (kind === RESEARCH_COMPLETE_EVENT ? run.label || 'Research' : ''), ...(choices.length ? { choices: [...choices] } : {}), at: this.now() }
+    const told = { kind: kind as TurnKind, label: run.told.label }
+    if (run.secret !== null && kind === RESEARCH_COMPLETE_EVENT && run.agents.size) return 'Noted. The person is told “Research complete” when this turn ends, or when the subagent saying this finishes.'
+    return toldReply(told, run.secret !== null)
   }
 
   /** A subagent finished: an item when it was research, or said so while it ran (research.ts). */
   private async subagentDone(run: Run, agent: string, agentType: string | null): Promise<void> {
     const started = run.agents.get(agent)
     run.agents.delete(agent)
-    const told = run.told && started !== undefined && run.told.at >= started ? run.told : null
+    /* Only research is a subagent's own item; a decision or a done is about the session's turn, and waits for it. */
+    const told = run.told && run.told.event === RESEARCH_COMPLETE_EVENT && started !== undefined && run.told.at >= started ? run.told : null
     if (told) run.told = null
     let found: { event: string; label: string } | null = told ? { event: told.event, label: told.label } : null
     if (!found) {
@@ -3222,7 +3282,14 @@ export class Runs {
    * the caller answers every such thing the same way, so that what is running
    * cannot be learned by asking.
    */
-  heard(session: string, secret: string | null, event: string, background: number | null = null, agent: { id: string; type: string | null } | null = null): boolean {
+  heard(
+    session: string,
+    secret: string | null,
+    event: string,
+    background: number | null = null,
+    agent: { id: string; type: string | null } | null = null,
+    more: { crons?: number | null; again?: boolean; payload?: unknown } = {},
+  ): boolean | 'send-back' {
     const run = this.runs.get(session)
     if (!run || run.what !== 'session' || run.ended || !run.secret || !sameTicket(secret, run.secret)) return false
     /* A subagent started or finished (research.ts): nothing about the session's own state. */
@@ -3235,23 +3302,52 @@ export class Runs {
       } else void this.subagentDone(run, agent.id, agent.type && AGENT_TYPE.test(agent.type) ? agent.type : null)
       return true
     }
-    /* A new prompt: what the last turn was tagged with, or was about to be, is over. */
+    /* Auto mode's permission check refused an action (`PermissionDenied`, protocol 2.55.0): the
+       specific ask, as an item of its own until the person answers. Nothing of the session's state. */
+    if (event === 'PermissionDenied') {
+      /* A payload too large to pass, or not one: still a refusal, said without its words. */
+      const refusal = refusalOf(more.payload) ?? { tool: 'an action', action: '', reason: '' }
+      run.refused = { ...refusal, at: this.now() }
+      this.changed()
+      this.notice(run, 'needs-you', clip(`Action refused: ${refusalWords(refusal).label}`, ACTIVITY_LABEL))
+      return true
+    }
+    /* A new prompt: what the last turn was tagged with, or was about to be, is over — and so is a
+       refusal it was waiting on: the person answered. */
     if (event === 'UserPromptSubmit') {
       run.told = null
-      if (run.turnTag) {
-        run.turnTag = null
+      run.sentBack = false
+      if (run.turnEnd || run.refused) {
+        run.turnEnd = null
+        run.refused = null
         this.changed()
       }
     }
-    /* The turn ended: what its agent said it finished is the finished item's. */
-    if (event === 'Stop' && run.told) {
-      run.turnTag = run.told
+    const count = (said: number | null | undefined): number => (typeof said === 'number' && Number.isSafeInteger(said) && said > 0 ? Math.min(said, 999) : 0)
+    /* The turn ended: how, by THE RULE (protocol 2.55.0) — what its agent declared, an action refused,
+       something set up to wake it (background tasks, scheduled wake-ups), or else a stall. */
+    if (event === 'Stop') {
+      const waking = count(background) + count(more.crons)
+      const told = run.told && (TURN_KINDS as readonly string[]).includes(run.told.event) ? { kind: run.told.event as TurnKind, label: run.told.label, ...(run.told.choices ? { choices: run.told.choices } : {}) } : null
+      const end = turnEnd({ told, waking, refused: run.refused, folder: run.cwd || run.projectPath })
+      /* A stall, and the person asked for one to be sent back: once a prompt, and never when the program
+         says this turn already went on because of a stop hook. The turn goes on; nothing else changes. */
+      if (end.event === STALLED_EVENT && !more.again && !run.sentBack && readSettings(run.projectPath).sendBackStalls) {
+        run.sentBack = true
+        this.log(`claude: ${run.settled ?? run.id} stopped without finishing, asking or setting up a wake — sent back once`)
+        return 'send-back'
+      }
+      run.turnEnd = end
       run.told = null
     }
     const state = this.program.signal(event)
-    /* The count of background tasks still running, which only a turn's end carries (`Stop`): a whole
-       number the hook script counted, bounded here again. Any other report leaves it as it was. */
-    if (event === 'Stop' && state) run.background = background !== null && Number.isSafeInteger(background) && background > 0 ? Math.min(background, 999) : 0
+    /* The counts of background tasks still running and scheduled wake-ups, which only a turn's end
+       carries (`Stop`): whole numbers the hook script counted, bounded here again. Any other report
+       leaves them as they were. */
+    if (event === 'Stop' && state) {
+      run.background = count(background)
+      run.crons = count(more.crons)
+    }
     if (state) this.become(run, state)
     return true
   }
@@ -3285,6 +3381,17 @@ export class Runs {
     this.tell(run)
     void this.meter(run)
     if (state !== 'needs-you' && state !== 'finished') return
+    /* A turn that ended needing the person (protocol 2.55.0: a decision, a refusal, a stall) is told in
+       the words of how it ended, and drawn as needing them (`noticeLine`). */
+    const end = state === 'finished' ? endOf(run) : null
+    this.notice(run, state, end?.state === 'attention' ? noticeAsks(end) : undefined)
+  }
+
+  /**
+   * Raise a notice about a session, once per change, unless somebody has it on screen or it has spent
+   * its ration (`NOTICES_AT_ONCE`). `asks` is what it needs, when that is more than "waiting for you".
+   */
+  private notice(run: Run, state: 'needs-you' | 'finished', asks?: string): void {
     if (run.looking.size > 0) return
     const ration = run.notices
     ration.left = Math.min(NOTICES_AT_ONCE, ration.left + (this.now() - ration.at) / NOTICE_EVERY)
@@ -3304,6 +3411,7 @@ export class Runs {
       kehikko: at?.kehikkoName ?? '',
       partIds: [...(at?.parts ?? [])],
       kehikkoKey: at?.kehikko && 'key' in at.kehikko ? at.kehikko.key : null,
+      ...(asks ? { asks } : {}),
       at: this.now(),
     })
   }
@@ -3386,7 +3494,9 @@ export class Runs {
       if (!this.followers.has(follower)) return
       for (const notice of this.held.splice(0)) {
         const run = this.find(notice.session)
-        if (run ? run.state === notice.state && run.looking.size === 0 && !run.seen : this.unviewed.get(notice.session)?.state === notice.state) follower.notice(notice)
+        /* A refusal is still true while it waits for the person, whatever the session is doing (protocol 2.55.0). */
+        const same = run && (run.state === notice.state || (notice.state === 'needs-you' && Boolean(notice.asks) && run.refused !== null))
+        if (run ? same && run.looking.size === 0 && !run.seen : this.unviewed.get(notice.session)?.state === notice.state) follower.notice(notice)
       }
     }
     if (follower.notices && this.held.length) {
@@ -3440,7 +3550,7 @@ export class Runs {
       /* A turn that ended with background work still running (a server, a watcher, a build) is not a
          session that is done: putting it away would kill that work. It goes on being kept until the
          program says otherwise — its next turn ends with the count — or a person ends it. */
-      if (run.background > 0) continue
+      if (run.background > 0 || run.crons > 0) continue
       const finished = run.state === 'finished'
       const quietFor = this.now() - (finished ? Math.max(run.stateSince, run.attendedAt) : run.stirredAt)
       if (quietFor < this.quiet) continue
@@ -3568,7 +3678,9 @@ export class Runs {
       typedAt: 0,
       state: null,
       told: null,
-      turnTag: null,
+      turnEnd: null,
+      refused: null,
+      sentBack: false,
       agents: new Map(),
       found: [],
       stateSince: this.now(),
@@ -3577,6 +3689,7 @@ export class Runs {
       secret: null,
       notices: { left: NOTICES_AT_ONCE, at: this.now() },
       background: 0,
+      crons: 0,
       joined: null,
       copyOf: null,
       unchecked: null,

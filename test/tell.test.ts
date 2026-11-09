@@ -32,6 +32,8 @@ interface Heard {
   headers: Record<string, unknown>
 }
 const heard: Heard[] = []
+/** What the stand-in server answers: nothing (204), or a body. */
+let answerWith: string | null = null
 let server: Server
 let port = 0
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'kehikko-claude-tell-')))
@@ -42,7 +44,8 @@ beforeAll(async () => {
     request.on('data', (chunk) => (body += chunk))
     request.on('end', () => {
       heard.push({ method: request.method ?? '', url: request.url ?? '', ticket: request.headers['x-module-ticket'] as string | undefined, body, headers: request.headers })
-      response.writeHead(204).end()
+      if (answerWith === null) response.writeHead(204).end()
+      else response.writeHead(200, { 'content-type': 'text/plain' }).end(answerWith)
     })
   })
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
@@ -105,13 +108,58 @@ describe('the report a session’s program makes', () => {
     await ran('/bin/sh', [TELL, 'Stop'], env(), stop([task('npm run dev'), task('echo \"status\":\"running\"')]))
     await ran('/bin/sh', [TELL, 'Stop'], env(), stop([task('x')], { session_crons: [{ id: 'c', schedule: '* * * * *', recurring: true, prompt: 'p' }] }))
     expect(heard.map((one) => one.url)).toEqual([
-      `/api/state?event=Stop&session=${SESSION}&background=0`,
-      `/api/state?event=Stop&session=${SESSION}&background=2`,
-      `/api/state?event=Stop&session=${SESSION}&background=1`,
+      `/api/state?event=Stop&session=${SESSION}&background=0&crons=0`,
+      `/api/state?event=Stop&session=${SESSION}&background=2&crons=0`,
+      `/api/state?event=Stop&session=${SESSION}&background=1&crons=1`,
     ])
     const sent = JSON.stringify(heard)
     expect(sent).not.toContain('npm run dev')
     expect(sent).not.toContain('my own sentence')
+  })
+
+  test('on Stop it counts the scheduled wake-ups and says when a stop hook already sent the turn on', async () => {
+    heard.length = 0
+    const crons = [
+      { id: 'c1', schedule: '0 9 * * 1-5', recurring: true, prompt: 'say "schedule": "x" twice' },
+      { id: 'c2', schedule: '*/5 * * * *', recurring: false, prompt: 'check the build' },
+    ]
+    await ran('/bin/sh', [TELL, 'Stop'], env(), JSON.stringify({ stop_hook_active: true, background_tasks: [], session_crons: crons }))
+    await ran('/bin/sh', [TELL, 'Stop'], env(), JSON.stringify({ stop_hook_active: false, background_tasks: [], session_crons: [] }))
+    expect(heard.map((one) => one.url)).toEqual([
+      `/api/state?event=Stop&session=${SESSION}&background=0&crons=2&again=1`,
+      `/api/state?event=Stop&session=${SESSION}&background=0&crons=0`,
+    ])
+    expect(JSON.stringify(heard)).not.toContain('check the build')
+  })
+
+  test('on PermissionDenied it hands the payload over, as JSON, with the secret in its header', async () => {
+    heard.length = 0
+    const denied = { session_id: 'x', hook_event_name: 'PermissionDenied', tool_name: 'Bash', tool_input: { command: 'git push --force' }, tool_use_id: 't1', reason: '[Irreversible Remote Change]' }
+    const done = await ran('/bin/sh', [TELL, 'PermissionDenied'], env(), JSON.stringify(denied))
+    expect(done).toMatchObject({ code: 0, out: '' })
+    expect(heard.length).toBe(1)
+    expect(heard[0]).toMatchObject({ method: 'POST', url: `/api/state?event=PermissionDenied&session=${SESSION}`, ticket: SECRET })
+    expect(heard[0]!.headers['content-type']).toBe('application/json')
+    expect(JSON.parse(heard[0]!.body)).toEqual(denied)
+  })
+
+  test('a stall the server sends back is answered with this script’s own block, and only on Stop', async () => {
+    answerWith = 'send-back'
+    try {
+      const sent = await ran('/bin/sh', [TELL, 'Stop'], env(), JSON.stringify({ background_tasks: [], session_crons: [] }))
+      expect(sent.code).toBe(0)
+      const said = JSON.parse(sent.out) as { decision: string; reason: string }
+      expect(said.decision).toBe('block')
+      expect(said.reason).toContain('tell_finished')
+      expect(said.reason).toContain('needs-decision')
+      /* Already sent on by a stop hook: never again. Another event: never. */
+      expect((await ran('/bin/sh', [TELL, 'Stop'], env(), JSON.stringify({ stop_hook_active: true }))).out).toBe('')
+      expect((await ran('/bin/sh', [TELL, 'UserPromptSubmit'], env(), '')).out).toBe('')
+      answerWith = 'anything else, {"decision":"block"}'
+      expect((await ran('/bin/sh', [TELL, 'Stop'], env(), '')).out).toBe('')
+    } finally {
+      answerWith = null
+    }
   })
 
   test('on SubagentStart and SubagentStop it sends the subagent’s id and type, and nothing else of it', async () => {
