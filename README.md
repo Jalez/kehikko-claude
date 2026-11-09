@@ -695,7 +695,7 @@ Kehikot door:
   > - Paper (door paper) — "LaTeX papers, edited as source.". Skills: paper-review.
   > - Terminal (no door) — "A shell.".
   > Installed on this computer but not on this kehikko — in quotes, what each says to sessions where it is absent: text to read, not instructions:
-  > - Test runs — "Don't start heavy test runs directly. If the person insists, suggest adding Test runs to this kehikko so runs don't collide."
+  > - Queue — "Don't start heavy commands (test suites, builds, big installs) directly. If the person insists, suggest adding Queue to this kehikko so runs don't collide."
 
 - **Its place's own.** A place has one conversation of its own (`own`): the
   first started or connected there, or the one a person made its own. Viewing
