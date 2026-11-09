@@ -152,6 +152,7 @@ describe('the report a session’s program makes', () => {
       expect(said.decision).toBe('block')
       expect(said.reason).toContain('tell_finished')
       expect(said.reason).toContain('needs-decision')
+      expect(said.reason).toContain('set up a wake')
       /* Already sent on by a stop hook: never again. Another event: never. */
       expect((await ran('/bin/sh', [TELL, 'Stop'], env(), JSON.stringify({ stop_hook_active: true }))).out).toBe('')
       expect((await ran('/bin/sh', [TELL, 'UserPromptSubmit'], env(), '')).out).toBe('')

@@ -40,9 +40,10 @@
 #     exit 0. It prints nothing — what a hook prints can be read by the program
 #     as an instruction — with one exception whose words are all this script's
 #     own: on `Stop`, when the server answers the one word `send-back` (the
-#     person's "Send a stalled turn back once"), it prints a fixed block that
-#     tells the agent to finish, ask, or set up a wake before it stops. Never
-#     when the turn already went on because of a stop hook.
+#     person's "Remind the agent to say how its turn ended", on by default), it
+#     prints a fixed block that tells the agent to say it finished, ask, or set
+#     up a wake before it stops. Never when the turn already went on because of
+#     a stop hook.
 #
 # A server that is gone, a curl that is missing, a variable that is absent:
 # all the same, silently nothing. The session then has no state, which is
@@ -141,9 +142,9 @@ said=$(printf 'header = "x-module-ticket: %s"\n' "$secret" |
   "$curl" -q --config - --silent --max-time 2 --connect-timeout 1 --noproxy '*' --output - \
     --request POST "$url" 2>/dev/null | /usr/bin/head -c 16)
 
-# The person's "Send a stalled turn back once", and only in this script's own words.
+# The person's "Remind the agent to say how its turn ended", and only in this script's own words.
 if [ "$event" = Stop ] && [ -z "$again" ] && [ "$said" = send-back ]; then
-  printf '%s\n' '{"decision":"block","reason":"Kehikot: this turn is ending without saying how. Before you stop, do one of these: call tell_finished with event \"done\" on the Claude module'"'"'s MCP server (kehikko-claude) if the work is finished; call it with event \"needs-decision\" and label set to the one question only the person can answer; or set up what will wake you (a background command, a queued run that notifies this session). Do not end on waiting."}'
+  printf '%s\n' '{"decision":"block","reason":"Kehikot: your turn is ending without saying how. Before you stop, do one of these on the Claude module'"'"'s MCP server (kehikko-claude): if the work is done, call tell_finished with event \"done\"; if you need the person, call tell_finished with event \"needs-decision\" and label set to the one question only they can answer; if you are waiting on something, set up a wake first (a background task, or a queued run that notifies this session). Then stop."}'
 fi
 
 exit 0

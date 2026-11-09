@@ -238,8 +238,8 @@ export interface Settings {
   wakeOnMessages: boolean
   /** Sessions here may act on requests from other agent sessions in the project (protocol 2.43.0, default on). */
   actOnMessages: boolean
-  /** A turn that would end as a stall is sent back once, through the `Stop` hook (protocol 2.55.0, default off). */
-  sendBackStalls: boolean
+  /** A turn that would end as a stall is sent back once, through the `Stop` hook, to say how it ended (protocol 2.56.0, default on). */
+  remindTurnEnd: boolean
 }
 
 export interface Places {
@@ -722,10 +722,10 @@ export function markSessions(projectPath: string | null | undefined, edits: Read
 }
 
 const SETTINGS = 'settings'
-const DEFAULTS: Settings = { resumeCutOff: true, statusLine: true, folders: [], wakeOnMessages: true, actOnMessages: true, sendBackStalls: false }
+const DEFAULTS: Settings = { resumeCutOff: true, statusLine: true, folders: [], wakeOnMessages: true, actOnMessages: true, remindTurnEnd: true }
 
 /** Settings as written: each switch a boolean, the default where it is not one; the folders each one that could be one (`foldersOf`). */
-type RawSettings = { resumeCutOff?: unknown; statusLine?: unknown; folders?: unknown; wakeOnMessages?: unknown; actOnMessages?: unknown; sendBackStalls?: unknown }
+type RawSettings = { resumeCutOff?: unknown; statusLine?: unknown; folders?: unknown; wakeOnMessages?: unknown; actOnMessages?: unknown; remindTurnEnd?: unknown }
 
 function settingsOf(raw: RawSettings | null | undefined): Settings {
   return {
@@ -734,7 +734,7 @@ function settingsOf(raw: RawSettings | null | undefined): Settings {
     folders: foldersOf(raw?.folders),
     wakeOnMessages: typeof raw?.wakeOnMessages === 'boolean' ? raw.wakeOnMessages : DEFAULTS.wakeOnMessages,
     actOnMessages: typeof raw?.actOnMessages === 'boolean' ? raw.actOnMessages : DEFAULTS.actOnMessages,
-    sendBackStalls: typeof raw?.sendBackStalls === 'boolean' ? raw.sendBackStalls : DEFAULTS.sendBackStalls,
+    remindTurnEnd: typeof raw?.remindTurnEnd === 'boolean' ? raw.remindTurnEnd : DEFAULTS.remindTurnEnd,
   }
 }
 
