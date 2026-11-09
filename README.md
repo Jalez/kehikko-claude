@@ -498,6 +498,25 @@ project MCP server to approve). Answering, opening, a new state and the session 
 the line; a question seen is kept in the record (`looked`), so a restart does not bring it back. The
 page's own mark still says `needs-you`. `needsYou` in live.ts; the Codex module applies the same rule.
 
+**How a turn ended (protocol 2.55.0).** `finished` is not one Inbox item: what the turn's end is to
+the person is the protocol's rule (`turnEnd`), applied at `Stop`:
+
+| the turn ended… | Inbox item |
+|---|---|
+| with `tell_finished({ event: "needs-decision", label, choices })` | `attention`, "Needs your decision", the question and its choices on the item, answerable from the Inbox |
+| with `tell_finished({ event: "done" })` or `"research-complete"` | `done` |
+| after auto mode refused an action (`PermissionDenied`), with nothing declared | `attention`, "Action refused": "Allow Bash: git push --force?", why, and what granting it means |
+| with background tasks or scheduled wake-ups still pending (`background_tasks`, `session_crons` in `Stop`) | `done`, "turn ended; N background tasks still running" |
+| any other way | `attention`, "Stopped without finishing" (plain `done` when the person watched it stop) |
+
+A refusal is an item of its own the moment it happens (`<session>:refused`), until the next prompt.
+An answer from the Inbox is typed into the session as the person's message; the prompt it makes
+withdraws the item. **Send a stalled turn back once** (`sendBackStalls`, off by default) answers a
+stall's `Stop` hook once a prompt with a block of `tell.sh`'s own words, so the agent finishes, asks,
+or sets up a wake first; never when Claude Code says a stop hook already sent the turn on
+(`stop_hook_active`). Claude Code fires `PermissionDenied` only in auto mode (not for a dialog answered
+no, a `deny` rule or a hook's block): its hooks reference.
+
 **The same item is never news twice.** An Inbox item's `since` is when the conversation entered its
 state, and it stays put while the conversation stays in that state: whether a view of it says it or
 the background sweep does, and after this module restarts (the record keeps `stated`: the state and

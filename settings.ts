@@ -12,6 +12,9 @@ import { ACT_ON_MESSAGES_SETTING, KEHIKOT_DIR, WAKE_ON_MESSAGES_SETTING, setting
  * project, without asking file by file. The person's own list, each folder checked (`folderIssue`).
  * Edits and commands there ask as the person's permission mode says.
  *
+ * "Send a stalled turn back once" (`sendBackStalls`, protocol 2.55.0) answers a session's `Stop` hook
+ * with a block, once a prompt, when its turn would end as a stall (`heard` in live.ts, tell.sh).
+ *
  * "Messages wake an idle session" and "Act on messages from other sessions" (protocol 2.43.0) are
  * the protocol's own declarations, the same in every agent module: delivery by typing (`deliverySessions`,
  * `deliver`, `resumeFor` in live.ts, protocol 2.48.0) and the words a session is told about messages (context.ts, doors.ts).
@@ -43,6 +46,15 @@ export const SETTINGS: SettingField[] = settingsDeclarationSchema.parse([
       'Folders outside this project that sessions here may read without asking file by file, one absolute path a line. Edits and commands there still ask as your permission mode says. Applies when a session starts or restarts.',
     type: 'list',
     default: [],
+    personOnly: true,
+  },
+  {
+    key: 'sendBackStalls',
+    label: 'Send a stalled turn back once',
+    description:
+      'When a session started here stops without saying it finished, without asking you a decision and with nothing set up to wake it, it is told once to do one of those before it stops. Off: it stops, and the Inbox says “Stopped without finishing”.',
+    type: 'boolean',
+    default: false,
     personOnly: true,
   },
   WAKE_ON_MESSAGES_SETTING,

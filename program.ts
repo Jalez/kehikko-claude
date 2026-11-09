@@ -1054,9 +1054,19 @@ const SIGNALS: Record<string, State> = {
  */
 export const SUBAGENT_EVENTS = ['SubagentStart', 'SubagentStop'] as const
 
+/**
+ * Auto mode's permission check refusing an action (protocol 2.55.0), heard beside the state signals
+ * and saying nothing of the session's state: the program goes on, told it was refused. Claude Code
+ * fires `PermissionDenied` only in auto mode — not for a dialog the person answered no, a `deny`
+ * rule or a hook's block — with `tool_name`, `tool_input`, `tool_use_id` and `reason` (its hooks
+ * reference). `tell.sh` hands that payload to this module's server, which keeps a few words of it
+ * (`refusalOf`) as the ask the person is shown.
+ */
+export const REFUSAL_EVENTS = ['PermissionDenied'] as const
+
 function reports(command: (event: string) => string, more: Record<string, unknown> = {}): string[] {
   const hooks = Object.fromEntries(
-    [...Object.keys(SIGNALS), ...SUBAGENT_EVENTS].map((event) => [event, [{ hooks: [{ type: 'command', command: command(event), timeout: 5 }] }]]),
+    [...Object.keys(SIGNALS), ...SUBAGENT_EVENTS, ...REFUSAL_EVENTS].map((event) => [event, [{ hooks: [{ type: 'command', command: command(event), timeout: 5 }] }]]),
   )
   return [TELLS, JSON.stringify({ ...more, hooks })]
 }

@@ -18,8 +18,15 @@
 #     `background_tasks` list of the payload (the tasks that are running or
 #     pending: no other kind is listed), and only the NUMBER, up to 99, leaves
 #     this script. On `SubagentStart` and `SubagentStop`, the subagent's id and
-#     type, each checked for its spelling. No word of the payload is sent,
-#     stored or shown.
+#     type, each checked for its spelling. On `Stop`, also how many scheduled
+#     wake-ups it has (`session_crons`) and whether this turn already went on
+#     because of a stop hook (`stop_hook_active`): a number and a yes. No other
+#     word of those payloads is sent, stored or shown.
+#   - The one exception is `PermissionDenied` (auto mode's permission check
+#     refused an action): its payload is handed to this module's server as it
+#     is, on a pipe, because the person is to be shown the specific ask — the
+#     tool, a short form of the action, the reason. The server keeps a few words
+#     of those three and nothing else (`refusalOf` in the protocol).
 #   - Nothing is interpolated into a command. The three values come from this
 #     module's own environment, each is checked for its exact spelling before
 #     it is used, and the secret never appears on a command line: it goes to
@@ -29,9 +36,13 @@
 #     because a project's own settings may set variables for the program it
 #     runs in, and a whole address from there would be somewhere to send the
 #     secret. No proxy is used, whatever the environment says about one.
-#   - It never holds the program up and never says anything to it: two
-#     seconds at most, every outcome is exit 0, and nothing is printed —
-#     what a hook prints can be read by the program as an instruction.
+#   - It never holds the program up: two seconds at most, and every outcome is
+#     exit 0. It prints nothing — what a hook prints can be read by the program
+#     as an instruction — with one exception whose words are all this script's
+#     own: on `Stop`, when the server answers the one word `send-back` (the
+#     person's "Send a stalled turn back once"), it prints a fixed block that
+#     tells the agent to finish, ask, or set up a wake before it stops. Never
+#     when the turn already went on because of a stop hook.
 #
 # A server that is gone, a curl that is missing, a variable that is absent:
 # all the same, silently nothing. The session then has no state, which is
@@ -57,6 +68,8 @@ curl=/usr/bin/curl
 # exactly one "status" of its own (strings inside it are escaped, so a quoted `"status":"` is only ever
 # a real key). Anything unclear is no count, which is what a turn's end meant before this was asked.
 background=
+crons=
+again=
 if [ "$event" = Stop ] && [ ! -t 0 ]; then
   grep=/usr/bin/grep
   wc=/usr/bin/wc
@@ -74,10 +87,27 @@ if [ "$event" = Stop ] && [ ! -t 0 ]; then
         fi
         ;;
     esac
+    # The scheduled wake-ups, the same way: `session_crons` is the last array, and each of its entries
+    # carries exactly one "schedule" of its own.
+    case $body in
+      *'"session_crons":'*)
+        rest=${body##*'"session_crons":'}
+        n=$(printf '%s' "$rest" | "$grep" -o '"schedule": *"' | "$wc" -l)
+        n=$((n + 0)) 2>/dev/null || n=
+        if [ -n "$n" ]; then
+          [ "$n" -gt 99 ] && n=99
+          crons=$n
+        fi
+        ;;
+    esac
+    # Whether this turn already went on because of a stop hook: then it is never sent back again.
+    case $body in *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) again=1 ;; esac
   fi
 fi
 extra=
 [ -n "$background" ] && extra="&background=$background"
+[ -n "$crons" ] && extra="$extra&crons=$crons"
+[ -n "$again" ] && extra="$extra&again=1"
 
 # On SubagentStart and SubagentStop only: the subagent's id and type, each checked for its exact
 # spelling, and nothing else of the payload. The module reads what the subagent was asked to do
@@ -93,8 +123,27 @@ if { [ "$event" = SubagentStart ] || [ "$event" = SubagentStop ]; } && [ ! -t 0 
   [ -n "$kind" ] && extra="$extra&type=$kind"
 fi
 
-printf 'header = "x-module-ticket: %s"\n' "$secret" |
-  "$curl" -q --config - --silent --max-time 2 --connect-timeout 1 --noproxy '*' --output /dev/null \
-    --request POST "http://127.0.0.1:$port/api/state?event=$event&session=$session$extra" >/dev/null 2>&1
+url="http://127.0.0.1:$port/api/state?event=$event&session=$session$extra"
+
+# On PermissionDenied only: the payload, as it is, to the server (see the top). The secret goes to
+# curl on its standard input as before; the payload on descriptor 3, a pipe, never a file or an argument.
+if [ "$event" = PermissionDenied ] && [ ! -t 0 ]; then
+  /usr/bin/head -c 61440 2>/dev/null | {
+    printf 'header = "x-module-ticket: %s"\n' "$secret" |
+      "$curl" -q --config - --silent --max-time 2 --connect-timeout 1 --noproxy '*' --output /dev/null \
+        --header 'content-type: application/json' --data-binary @/dev/fd/3 \
+        --request POST "$url" >/dev/null 2>&1
+  } 3<&0
+  exit 0
+fi
+
+said=$(printf 'header = "x-module-ticket: %s"\n' "$secret" |
+  "$curl" -q --config - --silent --max-time 2 --connect-timeout 1 --noproxy '*' --output - \
+    --request POST "$url" 2>/dev/null | /usr/bin/head -c 16)
+
+# The person's "Send a stalled turn back once", and only in this script's own words.
+if [ "$event" = Stop ] && [ -z "$again" ] && [ "$said" = send-back ]; then
+  printf '%s\n' '{"decision":"block","reason":"Kehikot: this turn is ending without saying how. Before you stop, do one of these: call tell_finished with event \"done\" on the Claude module'"'"'s MCP server (kehikko-claude) if the work is finished; call it with event \"needs-decision\" and label set to the one question only the person can answer; or set up what will wake you (a background command, a queued run that notifies this session). Do not end on waiting."}'
+fi
 
 exit 0

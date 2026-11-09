@@ -1,4 +1,4 @@
-import { PROJECT_ID, doorContext, manifestSchema, type Manifest } from 'kehikot-module-protocol'
+import { PROJECT_ID, doorContext, manifestSchema, readTellFinished, tellFinishedTool, type Manifest } from 'kehikot-module-protocol'
 import { answerMessageTool, messageToolsFor, establishBuild, hostHasProject, hostVouches, refuseTicket, sameTicket, settingsDoor, type Reply, type Stream } from 'kehikot-module-protocol/serve'
 import { foldersIssue } from './folders.ts'
 import { SETTINGS, SETTINGS_FILE } from './settings.ts'
@@ -10,7 +10,6 @@ import { PROGRAM, headOf, home, type Program, type Recorded, type Running, type 
 import { PLACE_TOKEN, WHERE, assign, detach, follow, homeOf, isDetached, ownOf, projectRoot, readPlaces, readSettings, recordedIds, rekey, sessionsAt, writeSettings, type Places } from './record.ts'
 import { enable, enabled, hookCommand, settingsFile } from './hook.ts'
 import { here } from './here.ts'
-import { EVENT_IDS } from './research.ts'
 import { isSkillPath, serveFrom, skillAt, skillDeclarations } from './skills.ts'
 import { contextWords, costSaid, percentOf, type Context } from './meter.ts'
 
@@ -114,7 +113,7 @@ const settings = settingsDoor({
       if (written.ok) theRuns().settingsSaved(root.value)
       return written.ok ? null : written.error
     }
-    if (key !== 'resumeCutOff' && key !== 'statusLine' && key !== 'wakeOnMessages' && key !== 'actOnMessages') return `Claude has no setting called "${key.slice(0, 64)}".`
+    if (key !== 'resumeCutOff' && key !== 'statusLine' && key !== 'wakeOnMessages' && key !== 'actOnMessages' && key !== 'sendBackStalls') return `Claude has no setting called "${key.slice(0, 64)}".`
     const written = writeSettings(root.value, { [key]: value === true })
     return written.ok ? null : written.error
   },
@@ -517,39 +516,21 @@ function tools() {
       },
       annotations: { title: 'Sessions by place', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    {
-      name: 'tell_finished',
-      description:
-        'Say that what this conversation just finished was research, so its person gets a "Research complete" notice in '
-        + 'Kehikot’s Inbox, with its own sound. Call it when you or a subagent finish a research task — investigating, '
-        + 'comparing, auditing, reading up, finding out how something works — with event "research-complete" and a label of a '
-        + 'few words saying what was researched ("Protocol audit"). From the session’s own agent it is told when the turn '
-        + 'ends; from a subagent, when that subagent finishes. A subagent whose description reads as research is noticed '
-        + 'without this. Only this conversation’s own item is tagged; nothing else is started, typed or changed.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          event: { type: 'string', enum: [...EVENT_IDS], description: 'The kind of finished work: "research-complete".' },
-          label: { type: 'string', maxLength: 120, description: 'A few words saying what was researched, e.g. "Protocol audit".' },
-        },
-        required: ['event', 'label'],
-      },
-      annotations: { title: 'Tell the person it finished', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    },
+    /* How the turn ends (protocol 2.55.0): done, a decision for the person, or research. The protocol's words, the same on every agent door. */
+    tellFinishedTool(),
   ]
 }
 
 /**
- * `tell_finished`: the session's agent (or one of its subagents) says a finished piece of work was
- * one of this module's Inbox events (research.ts). Known by the place token on this door's URL,
- * which only the conversation's own doors carry: nothing here can tag another conversation.
+ * `tell_finished`: the session's agent (or one of its subagents) says how its turn ends (protocol
+ * 2.55.0, `readTellFinished`): `done`, `needs-decision` with the one question for the person, or
+ * `research-complete`. Known by the place token on this door's URL, which only the conversation's
+ * own doors carry: nothing here can tag another conversation.
  */
 function tellFinished(args: Record<string, unknown>, token: string | null): string {
-  const event = typeof args.event === 'string' ? args.event : ''
-  if (!EVENT_IDS.includes(event)) throw new Error(`event is one of: ${EVENT_IDS.join(', ')}.`)
-  const label = typeof args.label === 'string' ? args.label : ''
-  if (!label.trim()) throw new Error('label is a few words saying what was researched, e.g. "Protocol audit".')
-  const said = token ? theRuns().tellFinished(token, event, label) : null
+  const read = readTellFinished(args)
+  if (!read.ok) throw new Error(read.error)
+  const said = token ? theRuns().tellFinished(token, read.told.kind, read.told.label, read.told.choices ?? []) : null
   if (said === null) {
     throw new Error(
       'This conversation is not one Kehikot’s Claude module is running with its doors (it was not started from the Claude container, '
@@ -751,13 +732,26 @@ export async function answer(
     const counted = query.get('background') ?? ''
     /* A subagent's id and type, on SubagentStart and SubagentStop only (research.ts): checked again in `heard`. */
     const agent = query.get('agent')
+    /* `crons`, the scheduled wake-ups, the same: on Stop only. `again` when the program said the turn
+       already went on because of a stop hook (`stop_hook_active`). */
+    const crons = query.get('crons') ?? ''
+    const event = query.get('event') ?? ''
     const took = theRuns().heard(
       query.get('session') ?? '',
       ticket,
-      query.get('event') ?? '',
+      event,
       /^\d{1,3}$/.test(counted) ? Number(counted) : null,
       agent ? { id: agent.slice(0, 64), type: query.get('type')?.slice(0, 64) ?? null } : null,
+      {
+        crons: /^\d{1,3}$/.test(crons) ? Number(crons) : null,
+        again: query.get('again') === '1',
+        /* The hook's own payload, on PermissionDenied only (protocol 2.55.0, `refusalOf`): a few words of
+           the tool, its input and the reason are kept, nothing else. */
+        payload: event === 'PermissionDenied' ? body : undefined,
+      },
     )
+    /* A stall the person asked to be sent back (`sendBackStalls`): the one word tell.sh answers with a block of its own words. */
+    if (took === 'send-back') return { status: 200, body: null, raw: { bytes: 'send-back', type: 'text/plain; charset=utf-8' } }
     return took ? { status: 204, body: null } : bad('that is not a running session’s own report', 403)
   }
 

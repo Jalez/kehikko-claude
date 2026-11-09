@@ -61,3 +61,19 @@ describe('the list as the protocol takes it', () => {
     expect(h.sets()).toHaveLength(0)
   })
 })
+
+describe('how a turn ended, as the protocol takes it (protocol 2.55.0)', () => {
+  test('a decision with choices, a refusal and a stall all parse, the question addressed to the session', () => {
+    const decision = { kind: 'needs-decision' as const, label: 'Which branch?', choices: ['main', 'release'] }
+    const ended = (turnEnd: unknown, more: Record<string, unknown> = {}) => run({ id: 'd', settled: 'd', state: 'finished', turnEnd, crons: 0, ...more })
+    const rows = activityRows([
+      ended({ state: 'attention', event: 'needs-decision', label: 'Which branch?', detail: 'asks you to decide: answer here or in the session', asks: { text: decision.label, choices: decision.choices } }),
+      ended({ state: 'attention', event: 'stalled', label: null, detail: 'stopped without finishing or asking', asks: null }, { id: 'e', settled: 'e' }),
+      run({ id: 'f', settled: 'f', state: 'working', refused: { tool: 'Bash', action: 'rm -rf build', reason: '[Irreversible Local Destruction]', at: 5 }, crons: 0 }),
+    ])
+    expect(activityItemsSchema.safeParse(rows).success).toBe(true)
+    expect(rows.find((one) => one.id === 'd')!.question).toEqual({ text: 'Which branch?', choices: ['main', 'release'], to: { module: 'kehikot.claude', session: 'd' } })
+    expect(rows.find((one) => one.id === 'e')!.question).toBeUndefined()
+    expect(rows.find((one) => one.id === 'f:refused')).toMatchObject({ state: 'attention', event: 'action-refused', question: { to: { module: 'kehikot.claude', session: 'f' } } })
+  })
+})

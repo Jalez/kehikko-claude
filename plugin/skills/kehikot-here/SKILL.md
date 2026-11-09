@@ -27,3 +27,5 @@ What to do:
 Never run either command again on your own, with another session id, or with other words: only the person assigns or disconnects a conversation, by typing the command.
 
 Once this conversation has a place: when you or a subagent finish researching something (investigating, comparing, auditing, reading up), say so with `tell_finished({ event: "research-complete", label })` on the Claude module's MCP server (kehikko-claude), and the person gets a "Research complete" notice.
+
+End every turn in one of three ways, on that same MCP server: `tell_finished({ event: "done" })` when the work is finished; `tell_finished({ event: "needs-decision", label, choices })` with the one question only the person can answer (and up to 6 short choices when there are a few clear answers), then stop and wait: they answer it from Kehikot's Inbox and the answer is typed in here as theirs; or, when you are waiting on something, set up what will wake you (a background command, a queued run) before you stop. Never end a turn only saying you are waiting, or with a question only in your reply. If a module on the kehikko says to send it your questions, ask through it instead.
