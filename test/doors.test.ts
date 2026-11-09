@@ -10,9 +10,11 @@ import { Runs, TELL_ENV, headless, theRuns, type Notice, type Pty, type Run, typ
 import { ID } from '../manifest.ts'
 import { placeKey } from '../place.ts'
 import { PROGRAM, recordDirs, type Active } from '../program.ts'
-import { attach, detach as detachFrom, readPlaces } from '../record.ts'
+import { attach, detach as detachFrom, readPlaces, writeSettings } from '../record.ts'
 
 const project = realpathSync(mkdtempSync(join(tmpdir(), 'kehikko-claude-doors-')))
+/* A `Stop` here ends the turn: the reminder that sends a stall back once (on by default) is tested in live.test.ts. */
+writeSettings(project, { remindTurnEnd: false })
 const bin = realpathSync(mkdtempSync(join(tmpdir(), 'kehikko-claude-bin-')))
 afterAll(() => {
   rmSync(project, { recursive: true, force: true })

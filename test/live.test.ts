@@ -36,9 +36,15 @@ const B = '22222222-2222-4222-8222-222222222222'
 const HERE = { epic: 'thesis', parts: ['methods'], kehikko: { id: 3 }, kehikkoName: 'writing' }
 
 const made: string[] = []
+/**
+ * A scratch project. "Remind the agent to say how its turn ended" (on by default since protocol
+ * 2.56.0) sends a stall's first `Stop` back, so a turn there does not end; here it is off, so that a
+ * `Stop` ends the turn, and the tests of the reminder turn it on ("how a turn ended").
+ */
 const project = () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'kehikko-claude-live-')))
   made.push(dir)
+  writeSettings(dir, { remindTurnEnd: false })
   return dir
 }
 afterAll(() => {
@@ -1839,9 +1845,9 @@ describe('the activity list a page passes to the host', () => {
       expect(feed.got.at(-1)).toMatchObject({ state: 'needs-you', asks: 'Action refused: Allow Bash: rm -rf build?' })
     })
 
-    test('“Send a stalled turn back once”: a stall is sent back once a prompt, never when a stop hook already sent it on', async () => {
+    test('“Remind the agent to say how its turn ended”: a stall is sent back once a prompt, never when a stop hook already sent it on', async () => {
       const { w, hear, row, dir, run } = await going()
-      expect(writeSettings(dir, { sendBackStalls: true }).ok).toBe(true)
+      expect(writeSettings(dir, { remindTurnEnd: true }).ok).toBe(true)
       expect(hear('Stop', 0)).toBe('send-back')
       /* The turn goes on: nothing changed. */
       expect(run.state).toBe('working')
@@ -1856,6 +1862,22 @@ describe('the activity list a page passes to the host', () => {
       hear('UserPromptSubmit')
       w.runs.tellFinished(run.token!, 'done', '')
       expect(hear('Stop', 0)).toBe(true)
+    })
+
+    test('the reminder is on by default: a project that never set it sends a stall back; off, it stops as a stall', async () => {
+      const { hear, row, dir } = await going()
+      rmSync(join(dir, '.kehikot', 'claude', 'settings.json'), { force: true })
+      expect(hear('Stop', 0)).toBe('send-back')
+      expect(writeSettings(dir, { remindTurnEnd: false }).ok).toBe(true)
+      hear('UserPromptSubmit')
+      expect(hear('Stop', 0)).toBe(true)
+      expect(row()).toMatchObject({ state: 'attention', event: 'stalled' })
+    })
+
+    test('a turn with something set up to wake it is never sent back', async () => {
+      const { hear, dir } = await going()
+      expect(writeSettings(dir, { remindTurnEnd: true }).ok).toBe(true)
+      expect(hear('Stop', 1)).toBe(true)
     })
   })
 
@@ -2982,7 +3004,7 @@ describe('a message is typed into its session (protocol 2.48.0)', () => {
     w.runs.type(run, 'half a th')
     expect(one().state).toBe('typing')
     w.runs.type(run, '\x7f'.repeat(9))
-    writeSettings(dir, { wakeOnMessages: false, actOnMessages: false, sendBackStalls: false })
+    writeSettings(dir, { wakeOnMessages: false, actOnMessages: false, remindTurnEnd: false })
     expect(one()).toMatchObject({ wake: false, act: false })
   })
 

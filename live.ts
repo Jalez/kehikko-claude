@@ -618,7 +618,7 @@ export interface Run {
    * (`PermissionDenied`, tell.sh): an Inbox item of its own, the specific ask, until they answer.
    */
   refused: (Refused & { at: number }) | null
-  /** Whether its `Stop` hook already sent a stalled turn back once since the last prompt (`sendBackStalls`). */
+  /** Whether its `Stop` hook already sent a stalled turn back once since the last prompt (`remindTurnEnd`). */
   sentBack: boolean
   /** Its subagents running now, by agent id, with when each started (`SubagentStart`). */
   agents: Map<string, number>
@@ -3332,7 +3332,7 @@ export class Runs {
       const end = turnEnd({ told, waking, refused: run.refused, folder: run.cwd || run.projectPath })
       /* A stall, and the person asked for one to be sent back: once a prompt, and never when the program
          says this turn already went on because of a stop hook. The turn goes on; nothing else changes. */
-      if (end.event === STALLED_EVENT && !more.again && !run.sentBack && readSettings(run.projectPath).sendBackStalls) {
+      if (end.event === STALLED_EVENT && !more.again && !run.sentBack && readSettings(run.projectPath).remindTurnEnd) {
         run.sentBack = true
         this.log(`claude: ${run.settled ?? run.id} stopped without finishing, asking or setting up a wake — sent back once`)
         return 'send-back'

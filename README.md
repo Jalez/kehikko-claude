@@ -511,10 +511,12 @@ the person is the protocol's rule (`turnEnd`), applied at `Stop`:
 
 A refusal is an item of its own the moment it happens (`<session>:refused`), until the next prompt.
 An answer from the Inbox is typed into the session as the person's message; the prompt it makes
-withdraws the item. **Send a stalled turn back once** (`sendBackStalls`, off by default) answers a
-stall's `Stop` hook once a prompt with a block of `tell.sh`'s own words, so the agent finishes, asks,
-or sets up a wake first; never when Claude Code says a stop hook already sent the turn on
-(`stop_hook_active`). Claude Code fires `PermissionDenied` only in auto mode (not for a dialog answered
+withdraws the item. **Remind the agent to say how its turn ended** (`remindTurnEnd`, the protocol's
+`REMIND_TURN_SETTING`, on by default since 1.30.0; before it, "Send a stalled turn back once",
+`sendBackStalls`, off) answers a stall's `Stop` hook once a prompt with a block of `tell.sh`'s own
+words: call `tell_finished` with done, or with needs-decision and the question, or set up a wake (a
+background task, a queued run) first; never when Claude Code says a stop hook already sent the turn
+on (`stop_hook_active`). Claude Code fires `PermissionDenied` only in auto mode (not for a dialog answered
 no, a `deny` rule or a hook's block): its hooks reference.
 
 **The same item is never news twice.** An Inbox item's `since` is when the conversation entered its

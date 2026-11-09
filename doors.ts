@@ -113,7 +113,7 @@ const settings = settingsDoor({
       if (written.ok) theRuns().settingsSaved(root.value)
       return written.ok ? null : written.error
     }
-    if (key !== 'resumeCutOff' && key !== 'statusLine' && key !== 'wakeOnMessages' && key !== 'actOnMessages' && key !== 'sendBackStalls') return `Claude has no setting called "${key.slice(0, 64)}".`
+    if (key !== 'resumeCutOff' && key !== 'statusLine' && key !== 'wakeOnMessages' && key !== 'actOnMessages' && key !== 'remindTurnEnd') return `Claude has no setting called "${key.slice(0, 64)}".`
     const written = writeSettings(root.value, { [key]: value === true })
     return written.ok ? null : written.error
   },
@@ -750,7 +750,7 @@ export async function answer(
         payload: event === 'PermissionDenied' ? body : undefined,
       },
     )
-    /* A stall the person asked to be sent back (`sendBackStalls`): the one word tell.sh answers with a block of its own words. */
+    /* A stall to be sent back once to say how it ended (`remindTurnEnd`, on unless the person turned it off): the one word tell.sh answers with a block of its own words. */
     if (took === 'send-back') return { status: 200, body: null, raw: { bytes: 'send-back', type: 'text/plain; charset=utf-8' } }
     return took ? { status: 204, body: null } : bad('that is not a running session’s own report', 403)
   }

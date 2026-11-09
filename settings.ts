@@ -1,4 +1,4 @@
-import { ACT_ON_MESSAGES_SETTING, KEHIKOT_DIR, WAKE_ON_MESSAGES_SETTING, settingsDeclarationSchema, type SettingField } from 'kehikot-module-protocol'
+import { ACT_ON_MESSAGES_SETTING, KEHIKOT_DIR, REMIND_TURN_SETTING, WAKE_ON_MESSAGES_SETTING, settingsDeclarationSchema, type SettingField } from 'kehikot-module-protocol'
 
 /**
  * Claude's settings as a host shows them (protocol 2.15.0, `declares.settings`): the same
@@ -12,8 +12,10 @@ import { ACT_ON_MESSAGES_SETTING, KEHIKOT_DIR, WAKE_ON_MESSAGES_SETTING, setting
  * project, without asking file by file. The person's own list, each folder checked (`folderIssue`).
  * Edits and commands there ask as the person's permission mode says.
  *
- * "Send a stalled turn back once" (`sendBackStalls`, protocol 2.55.0) answers a session's `Stop` hook
- * with a block, once a prompt, when its turn would end as a stall (`heard` in live.ts, tell.sh).
+ * "Remind the agent to say how its turn ended" (`remindTurnEnd`, the protocol's `REMIND_TURN_SETTING`,
+ * 2.56.0, on by default) answers a session's `Stop` hook with a block, once a prompt, when its turn
+ * would end as a stall (`heard` in live.ts, tell.sh). Before 2.56.0 it was "Send a stalled turn back
+ * once" (`sendBackStalls`, off by default); that key is no longer read.
  *
  * "Messages wake an idle session" and "Act on messages from other sessions" (protocol 2.43.0) are
  * the protocol's own declarations, the same in every agent module: delivery by typing (`deliverySessions`,
@@ -48,15 +50,7 @@ export const SETTINGS: SettingField[] = settingsDeclarationSchema.parse([
     default: [],
     personOnly: true,
   },
-  {
-    key: 'sendBackStalls',
-    label: 'Send a stalled turn back once',
-    description:
-      'When a session started here stops without saying it finished, without asking you a decision and with nothing set up to wake it, it is told once to do one of those before it stops. Off: it stops, and the Inbox says “Stopped without finishing”.',
-    type: 'boolean',
-    default: false,
-    personOnly: true,
-  },
+  REMIND_TURN_SETTING,
   WAKE_ON_MESSAGES_SETTING,
   ACT_ON_MESSAGES_SETTING,
 ])
