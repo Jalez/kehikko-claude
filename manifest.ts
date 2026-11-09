@@ -58,6 +58,9 @@ export const PREFERRED_PORT = 8010
  * - **`uses: ['agents:message']`** (protocol 2.41.0): `send_message` and `read_messages` on its door, a
  *   thin adapter over the host's messages between agent sessions, and a session's unread ones in its
  *   notes. A host before 2.41.0 keeps none: the door lists neither tool and the notes say nothing.
+ * - **`uses: ['view:expand']`** (protocol 2.58.0): in a container too small for a terminal the page
+ *   is a tile, and pressing it asks the host to show the container large over the canvas. A host
+ *   that does not answer the method is not asked: the tile shows the conversation in place.
  * - **`uses: ['events:emit']`, `emits: [NOTICES]`.** The one thing it asks a
  *   host: to carry a line saying that a session a person is not looking at
  *   has finished, or has stopped to wait for them. Reading the context is not
@@ -139,7 +142,7 @@ export const MANIFEST: Manifest = manifestSchema.parse({
   reveal: 'over',
   declares: {
     protocol: `>=${PROTOCOL} <${PROTOCOL + 1}`,
-    uses: ['events:emit', 'activity:report', 'agents:message'],
+    uses: ['events:emit', 'activity:report', 'agents:message', 'view:expand'],
     /* This module runs Claude Code sessions and loads the kehikko-bound skills of the modules on a
        session's kehikko into them (protocol 2.21.0). A host routes those skills to a module that
        says so; one built with 2.21.0 that says nothing is not treated as a skill loader. */
