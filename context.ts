@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { guardDecision, guardSays, researchLine, sessionNotes, subagentNotes, type NotesPlace, type NotesTold, type PlacedGuard } from 'kehikot-module-protocol'
+import { doorCarriesPlace, guardDecision, guardSays, researchLine, sessionNotes, subagentNotes, type NotesPlace, type NotesTold, type PlacedGuard } from 'kehikot-module-protocol'
 
 import type { DoorsAsked, HostPlace } from './doorConfig.ts'
 import { ID } from './manifest.ts'
@@ -68,6 +68,11 @@ export interface ContextNeeds {
   host(asked: DoorsAsked): Promise<HostPlace | null>
   /** The names of the doors the conversation was started with, when known. */
   doorsOf(token: string): string[] | null
+  /**
+   * The doors the conversation was started with, with their URLs, when known (protocol 2.66.0): its
+   * notes say it can message only when its door of this module carries its token. Absent: the names.
+   */
+  handedDoors?(token: string): { name: string; url: string; module?: string }[] | null
   /** The skills the conversation has (`heldSkills` of its plugin), when known: its notes say apart those it lacks (protocol 2.44.0). */
   holdsOf?(token: string): string[] | null
   /** Where what the conversation was last told is kept. */
@@ -297,7 +302,8 @@ export async function context(asked: { event: string; session: string; token: st
       /* Unread messages from other agent sessions, handed by the host and now delivered (protocol 2.41.0). */
       messages: answer?.messages ?? null,
       messagesMore: answer?.messagesMore ?? 0,
-      messaging: answer?.messages ? { session } : null,
+      /* Only a door that carries the token lists the message tools; one without is told so, and how to get them (protocol 2.66.0, issue #80). */
+      messaging: answer?.messages ? { session, listed: doorCarriesPlace(needs.handedDoors?.(token) ?? needs.doorsOf(token), SELF) } : null,
       /* The person's standing permission to act on messages (protocol 2.43.0), this project's setting. */
       actOnMessages: readSettings(projectPath).actOnMessages,
       /* The skills the person wrote for this kehikko (protocol 2.53.0): loaded at the start; one added since is said with where to read it. */

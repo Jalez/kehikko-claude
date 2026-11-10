@@ -44,6 +44,47 @@ export interface SessionDoor {
   transport: 'http' | 'sse'
 }
 
+/** The name this module's own door goes under in a session's config when the host did not hand it (`withOwnDoor`): the one the notes name. */
+export const OWN_DOOR = 'kehikko-claude'
+
+/**
+ * A session's doors with this module's own among them, carrying the session's token (issue #80).
+ *
+ * The notes tell every session to end its turns, and to message, on this module's door. When the host
+ * handed no doors (none answered at the start) or left this module's out, Claude Code connected the
+ * person's own entry for it instead — which carries no token, so the door could not tell which
+ * conversation called and listed no message tools, while the session's hooks (which do carry the
+ * token) said it could message. So this module adds its own door, at its own port, when the host's
+ * list has none of this module's. The host's own door for this module is kept when it handed one: it
+ * may be on the module's stable address, which outlives a port change. Null port (not bound yet) or a
+ * token that is not one: the doors as they were.
+ */
+export function withOwnDoor(doors: readonly SessionDoor[] | null, port: number | null, token: string): SessionDoor[] | null {
+  if (doors?.some((door) => door.module === ID)) return [...doors]
+  if (port === null || !Number.isSafeInteger(port) || port <= 0 || !PLACE_TOKEN.test(token)) return doors ? [...doors] : null
+  const own: SessionDoor = { module: ID, name: OWN_DOOR, url: `http://127.0.0.1:${port}/mcp?kehikot-place=${token}`, transport: 'http' }
+  /* A door of another module under this name would be one server in the config: this module's own wins, as its notes name it. */
+  return [...(doors ?? []).filter((door) => door.name !== OWN_DOOR), own]
+}
+
+/**
+ * The doors a session was handed, as the protocol's `doorCarriesPlace` reads them: a kept doors file
+ * names no module, so a door at this module's stable address (`/m/<id>/`) or at its own port is this
+ * module's.
+ */
+export function handedDoors(doors: readonly SessionDoor[], port: number | null): { name: string; url: string; module?: string }[] {
+  return doors.map((door) => {
+    if (door.module) return { name: door.name, url: door.url, module: door.module }
+    try {
+      const url = new URL(door.url)
+      const ours = url.pathname.startsWith(`/m/${ID}/`) || url.pathname.startsWith(`/m/${ID}@`) || (port !== null && url.port === String(port) && url.pathname === '/mcp')
+      return { name: door.name, url: door.url, ...(ours ? { module: ID } : {}) }
+    } catch {
+      return { name: door.name, url: door.url }
+    }
+  })
+}
+
 /** A token for a conversation: 32 random bytes, URL-safe. */
 export const freshToken = (): string => randomBytes(32).toString('base64url')
 
