@@ -804,6 +804,17 @@ export async function answer(
     return said ? { status: 200, body: null, raw: { bytes: JSON.stringify(said), type: 'application/json' } } : { status: 204, body: null }
   }
 
+  /* A session's own Bash hook, through `guard.sh` (protocol 2.61.0, see `guard` in context.ts): before
+     each command of the session or its subagents, whether a module placed on its kehikko guards it.
+     Carries the session's place token like `/api/context`; the hook's input is the body, of which
+     only the tool's input is read and none is kept. The answer is what Claude Code reads from a
+     PreToolUse hook, or nothing (204): the command runs as written. */
+  if (path === '/api/guard') {
+    if (method !== 'POST') return bad('this door takes POST', 405)
+    const said = await theRuns().guard((query.get('session') ?? '').slice(0, 64), ticket, body, query.get('direct') === '1')
+    return said ? { status: 200, body: null, raw: { bytes: JSON.stringify(said), type: 'application/json' } } : { status: 204, body: null }
+  }
+
   /* A session's own status line, through `statusline.sh` (see meter.ts): Claude Code's status
      line JSON, for the context meter. A program's door like `/api/context`: it must carry the
      session's place token, and of what it sends only numbers, the session and the model's name

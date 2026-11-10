@@ -3,7 +3,11 @@
 # What a session this module started runs at its start and at each prompt, to be
 # told where it is: its place and the modules on its kehikko (see context.ts).
 #
-#   /bin/sh context.sh <SessionStart|UserPromptSubmit>
+#   /bin/sh context.sh <SessionStart|UserPromptSubmit|SubagentStart>
+#
+# At SubagentStart (a subagent the session starts with its Agent tool) it is told what a subagent is
+# told (`subagentNotes`, protocol 2.61.0): the place, what the modules on the kehikko say to agents,
+# and the guards there — a subagent starts with only its brief.
 #
 # It is a hook of the session's own plugin (`hooks/hooks.json` in the folder
 # this module assembles for the session, `sessionPlugin` in skills.ts), copied
@@ -29,7 +33,7 @@
 # same, silently nothing. The session then starts as it did before this existed.
 
 event=${1-}
-case $event in SessionStart | UserPromptSubmit) ;; *) exit 0 ;; esac
+case $event in SessionStart | UserPromptSubmit | SubagentStart) ;; *) exit 0 ;; esac
 
 here=$(/usr/bin/dirname "$0")/kehikot
 token=$(/bin/cat "$here/token" 2>/dev/null)

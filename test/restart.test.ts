@@ -730,7 +730,7 @@ describe('with every skill already installed in the person’s own config', () =
   const pluginOf = (args: string[]) => (args.includes('--plugin-dir') ? args[args.indexOf('--plugin-dir') + 1]! : null)
   const hooked = (plugin: string | null) => {
     expect(plugin).not.toBeNull()
-    expect(Object.keys(JSON.parse(readFileSync(join(plugin!, 'hooks', 'hooks.json'), 'utf8')).hooks)).toEqual(['SessionStart', 'UserPromptSubmit'])
+    expect(Object.keys(JSON.parse(readFileSync(join(plugin!, 'hooks', 'hooks.json'), 'utf8')).hooks)).toEqual(['SessionStart', 'UserPromptSubmit', 'SubagentStart', 'PreToolUse'])
     expect(existsSync(join(plugin!, 'context.sh'))).toBe(true)
     return readFileSync(join(plugin!, 'kehikot', 'token'), 'utf8')
   }

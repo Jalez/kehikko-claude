@@ -374,8 +374,11 @@ export function writeComposer(dir: string, runtime: string | null): boolean {
   }
 }
 
-/** The events a session is told of its place at: its start (any kind) and each prompt. */
-export const CONTEXT_EVENTS = ['SessionStart', 'UserPromptSubmit'] as const
+/** The events a session is told of its place at: its start (any kind), each prompt, and each subagent's start (protocol 2.61.0). */
+export const CONTEXT_EVENTS = ['SessionStart', 'UserPromptSubmit', 'SubagentStart'] as const
+
+/** The script a session's Bash commands are held to the placed modules' guards by (see `guard.sh`, guards.ts). */
+export const GUARD_SCRIPT = join(import.meta.dirname, 'guard.sh')
 
 /**
  * The plugin's hooks (`hooks/hooks.json`): `context.sh` at a session's start and at each prompt,
@@ -384,10 +387,13 @@ export const CONTEXT_EVENTS = ['SessionStart', 'UserPromptSubmit'] as const
  */
 function writeContextHooks(dir: string, token: string, registration: string): void {
   const command = (event: string) => `/bin/sh "\${CLAUDE_PLUGIN_ROOT}/context.sh" ${event}`
-  const hooks = Object.fromEntries(CONTEXT_EVENTS.map((event) => [event, [{ hooks: [{ type: 'command', command: command(event), timeout: 10 }] }]]))
+  const hooks: Record<string, unknown[]> = Object.fromEntries(CONTEXT_EVENTS.map((event) => [event, [{ hooks: [{ type: 'command', command: command(event), timeout: 10 }] }]]))
+  /* Every Bash command, the session's own and its subagents', held to the guards of the modules placed on its kehikko (protocol 2.61.0). */
+  hooks.PreToolUse = [{ matcher: 'Bash', hooks: [{ type: 'command', command: '/bin/sh "${CLAUDE_PLUGIN_ROOT}/guard.sh" PreToolUse', timeout: 5 }] }]
   mkdirSync(join(dir, 'hooks'), { mode: 0o700 })
   writeFileSync(join(dir, 'hooks', 'hooks.json'), `${JSON.stringify({ hooks }, null, 2)}\n`, { mode: 0o600 })
   writeFileSync(join(dir, 'context.sh'), readFileSync(CONTEXT_SCRIPT), { mode: 0o700 })
+  writeFileSync(join(dir, 'guard.sh'), readFileSync(GUARD_SCRIPT), { mode: 0o700 })
   writeFileSync(join(dir, STATUS_FILE), readFileSync(STATUS_SCRIPT), { mode: 0o700 })
   writeFileSync(join(dir, LINE_FILE), readFileSync(LINE_SCRIPT), { mode: 0o600 })
   mkdirSync(join(dir, 'kehikot'), { recursive: true, mode: 0o700 })
