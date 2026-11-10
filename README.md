@@ -28,7 +28,7 @@ The asking was later taken out, on the same person's word: *"picking from the un
 UI … the Claude module itself alerts if it doesn't have an assigned conversation for the current
 kehikko, at the top, with a suggestion to use /kehikot-here … And then we'll have a view menu at the top
 that shows all the conversations that you have connected with /kehikot-here to that instance."* So the
-container always shows Claude Code, a bar says when nothing is connected, and the header's View menu
+container always shows Claude Code, a bar says when nothing is connected, and the header's conversation chooser
 holds this kehikko's conversations.
 
 It is a module of its own and not a mode of Terminal, because the two keep opposite promises. A shell
@@ -126,7 +126,7 @@ answer is never kept: a session can start or stop between two opens.
 | Claude Code says the session is… | what opening it here does |
 |---|---|
 | not running | `claude --resume <id>`, exactly as before |
-| running in the **background** | `claude attach <handle>` in this module's terminal: a view of the process that is already there. No second process, and Remote Control stays where it is. The View menu says *background* |
+| running in the **background** | `claude attach <handle>` in this module's terminal: a view of the process that is already there. No second process, and Remote Control stays where it is. The conversation chooser says *(running elsewhere)* |
 | open in **another process** with a terminal of its own | nothing is started. The place says where and since when, and puts two answers in words |
 | *(cannot be asked)* | `claude --resume <id>` as before — and it is said |
 
@@ -144,7 +144,7 @@ answer is never kept: a session can start or stop between two opens.
 *Leave it* is first and where Enter lands: a question somebody did not expect should start nothing.
 One sentence then says the conversation stays open in the other process and nothing was started here,
 with *Open a copy anyway* still one press away. What a copy means is beside the word **before** it is
-chosen, and the View menu says *copy* beside it afterwards. Coming back to the place asks Claude Code
+chosen, and the conversation chooser says *(running elsewhere)* under it afterwards. Coming back to the place asks Claude Code
 again.
 
 **Nothing here stops, signals or takes over a process this module did not start** — it may be
@@ -179,7 +179,7 @@ Such a copy resumes a session as it always did, and says so on the terminal's fi
 > no `agents --json` or no `attach`), so this one was resumed without checking. Update Claude Code to
 > have that checked.
 
-— and in the View menu (*unchecked*). The same when a copy that has the commands could not be asked.
+— and in the footer. The same when a copy that has the commands could not be asked.
 
 Measured on the real 2.1.296, with a scratch config folder and a stand-in for the model API:
 
@@ -228,45 +228,44 @@ bottom row as a sentence with its button as a run: **Restart in the new folder**
 **Restart**, **Resume**, **Try again**. The breakdown has no place in a host's footer: the meter's
 tooltip carries the summary. Any other host gets no footer and the page draws its own, as above.
 
-The footer leads with the conversation on screen — what it is doing (**● Working**, **◆ Needs you**, *warn*, **○ Finished**), its title and what it is besides this module's own (*background*, *copy*), which the View menu then leaves out of its option — so a container folded to its header and footer still says what is going on. The strips the page drew above the terminal are the footer's too: "No conversation is connected…" with **Copy /kehikot-here** beside it, a run the app copies inside the person's click (`copy`, protocol 2.40.0; an app that does not copy keeps the page's own bar, where the click is), and "Disconnected …" with **Dismiss**. The header keeps only what sets the module up or starts something: the View menu, Make own, Connected, What this conversation was told, Disconnect, Connect, and the settings toggles.
+The footer leads with the conversation on screen — what it is doing (**● Working**, **◆ Needs you**, *warn*, **○ Finished**), its title and what it is besides this module's own (*background*, *copy*), said in the chooser only as *(running elsewhere)* — so a container folded to its header and footer still says what is going on. The strips the page drew above the terminal are the footer's too: "No conversation is connected…" with **Copy /kehikot-here** beside it, a run the app copies inside the person's click (`copy`, protocol 2.40.0; an app that does not copy keeps the page's own bar, where the click is), and "Disconnected …" with **Dismiss**. The header keeps only what sets the module up or starts something: the conversation chooser (with New conversation and Disconnect this conversation in it), Make own, What this conversation was told, and the settings toggles.
 
-A host that draws headers (protocol 1.1.0, `kehikot.header`) is given one **View** menu — a `switch`,
-*This kehikko’s conversations* — listing every conversation connected to this place, and nothing else:
-the own one first, then by when each was last active. Each line is its mark, its title, when it was
-last active and *own* for the place's own, cut to the protocol's 48 characters with the time and *own*
-kept whole:
+A host that draws headers (protocol 1.1.0, `kehikot.header`) is given one **conversation chooser** — a
+`switch` in its View menu, labelled with the conversation on screen (*Conversation: tighten the methods*),
+because which conversation the container shows is a choice of what the module shows, not a jump. It lists
+this place's conversations and nothing else, under two headings (an option's `group`, protocol 2.68.0),
+each with its title and, as a second line (`detail`), what it is doing in words and when it was last active:
 
-> ◆ tighten the methods · 2 h ago · own
-> draft the results · 5 min ago
+> **This kehikko’s conversation**
+> tighten the methods — *needs you · 2 h ago*
+> **Other conversations here**
+> draft the results — *idle · 5 min ago*
+> New conversation
+> Disconnect this conversation
 
-The value is the one on screen (*· copy*, *· background* or *· unchecked* beside it when it is one of
-those). Choosing another resumes it in the container. Beside it, in the host's Run menu, for the one
-on screen:
+- What it is doing is said in words: *working*, *needs you*, *finished*, or *idle* when it has not said.
+  *(running elsewhere)* follows when another process has it (a background session, a copy, or one open in
+  another terminal). No session ids, and nothing from another place or from no place.
+- Choosing a conversation resumes it in the container. The value is the one on screen.
+- **New conversation** opens a new one at this place; it stays on screen until spoken to, when it is filed
+  here (as the own when the place has none). Not offered while a new one is already on screen, which the
+  chooser then lists as *New conversation — new · joins this kehikko once you say something*.
+- **Disconnect this conversation** — for the one on screen, not confirmed (it is kept). The record no longer
+  lists it at any place, and it stays disconnected until a person connects it again: reopening it, its run
+  going on, or Claude Code carrying it on under a new id does not put it back. The conversation itself is not
+  ended, and the place opens what it has left — another of its conversations, or a new one. A strip says it
+  was kept and that typing `/kehikot-here` in it connects it again, until dismissed. `/kehikot-here off`, typed in the
+  conversation, does the same for one on screen in no container.
 
-- **Make this the kehikko’s own** — only when it is not; rewrites the record (`own`).
-- **Connected to this kehikko** — a checkbox in the View menu, checked for the one on screen. Unchecking it
-  is "Disconnect from this kehikko" (below).
-- **Disconnect from this kehikko** — a run in the Run menu, not confirmed (it is kept and can be connected
-  again). The record no longer lists it at any place, and it stays disconnected until a person connects it
-  again: reopening it, its run going on, or Claude Code carrying it on under a new id does not put it back.
-  The conversation itself is not ended, and the place opens what it has left — another of its conversations,
-  or a new one. A strip above Claude Code says it was kept and where to connect it again, until dismissed.
-  `/kehikot-here off`, typed in the conversation, does the same for one on screen in no container.
-- **Connect a conversation to this kehikko** — a jump in the Go menu, present while the project has
-  conversations that belong to no place (never assigned, or disconnected). Choosing one connects it here and
-  shows it. Typing `/kehikot-here` in a conversation does the same.
+Beside it, in the host's Run menu, for the one on screen: **Make this the kehikko’s own** (only when it is
+connected and not the own; rewrites the record, `own`) and **What this conversation was told**. There is no
+Go menu: nothing here is a jump. A conversation that belongs to no place (never assigned, or disconnected)
+is connected by typing `/kehikot-here` in it.
 
-The protocol draws a switch's options as plain choices, so there is no action per row: Disconnect acts on the
-conversation on screen, and choosing another row first is one press. None of these is for agents.
-
-None of them is marked `agents: true`: no agent presses them. With nothing connected, the header is
-`[]` and the bar says why. The host lays the menus out at every width (words, icons under 300 px, one
-"⋯" under 220); each item has an icon and every label fits one line.
-
-What a session is doing is one glyph before its title in that menu: `●` working, `◆` needs you, `○`
-finished — three shapes, so it does not rest on colour. A session that has not said what it is doing
-has no mark. How full its context is follows its title, `41%`, and `82% soon` near where Claude Code
-compacts by itself.
+None of them is marked `agents: true`: no agent presses them. With nothing connected and a new conversation
+on screen, the header holds only the settings toggles, and the footer (or the bar) says why. The host lays the
+menus out at every width (words, icons under 300 px, one "⋯" under 220); each item has an icon and every
+label fits one line. A host before protocol 2.68.0 draws the titles alone, without headings or second lines.
 
 ### How full the context is: the line under the session
 
@@ -384,7 +383,7 @@ its `attach`), over the page's own socket. Never anything else, and:
   the last line sent to it. A line typed at the prompt is counted, not read (`promptAfter` in
   `input.ts`).
 - **Clear asks for a second press**, and says first: *Clear starts this session over as a new
-  conversation. This one is kept: reopen it from the View menu or with /resume.* The old one stays in
+  conversation. This one is kept: reopen it from the conversation chooser or with /resume.* The old one stays in
   the place's list; the new one becomes the place's current conversation — for a session in a
   terminal here by its process (`track`), for a background one by its job, whose handle stays while
   its session id changes (`movedOn`, measured on 2.1.310).
@@ -710,7 +709,7 @@ Kehikot door:
   token). At a prompt it is told only what changed — a module put on the
   kehikko or taken off, one newly absent, or the conversation moved by the
   person — and nothing when nothing did; what it was told is kept beside its
-  doors, so a restart of this module does not tell it twice. The View menu's
+  doors, so a restart of this module does not tell it twice. The Run menu's
   *What this conversation was told* shows the person those notes, as plain
   text. Example:
 
@@ -723,7 +722,7 @@ Kehikot door:
 
 - **Its place's own.** A place has one conversation of its own (`own`): the
   first started or connected there, or the one a person made its own. Viewing
-  another one here changes nothing in the record; the View menu marks which is
+  another one here changes nothing in the record; the conversation chooser marks which is
   the own one and offers *Make this the kehikko's own* for the one on screen.
 - **Started outside Kehikot.** It belongs nowhere until `/kehikot-here` is
   typed in it. Nothing lists it, counts it or asks about it — no line on the
@@ -917,7 +916,7 @@ rule does not untrack a file. `git rm --cached .kehikot/claude/places.json` does
 between computers, or simply this computer after Claude Code cleaned an old transcript away — a
 recorded session that Claude Code has nothing for here is:
 
-- **not offered**: the View menu lists only what this computer can open, and the MCP tool marks it
+- **not offered**: the conversation chooser lists only what this computer can open, and the MCP tool marks it
   `missing: true`.
 - **not counted**: a place whose only recorded session is elsewhere opens a new one at once, with the
   bar, as an empty place does; one session here plus one elsewhere opens the one here.
@@ -1054,7 +1053,7 @@ already running elsewhere and how one of those is opened without starting anothe
 | `here.ts` | `/kehikot-here`: which conversation is believed, which place it goes to, and what is said |
 | `skills.ts`, `plugin/` | the skills offered (`declares.skills`), and the plugin folder a session started here is given |
 | `src/view/places.ts` | what the page does when the canvas names a place. Pure |
-| `src/view/conversations.ts` | which conversations are connected here, the bar's words and the View menu. Pure |
+| `src/view/conversations.ts` | which conversations are connected here, the bar's words and the conversation chooser. Pure |
 | `src/view/bar.tsx` | the bar above Claude Code while none is connected |
 | `src/view/meter.tsx` | the context line under the session, its breakdown, and Compact and Clear |
 | `src/view/elsewhere.tsx` | the question, when a session is open in another process |
@@ -1064,7 +1063,7 @@ already running elsewhere and how one of those is opened without starting anothe
 ## Checks
 
 ```bash
-bun test                    # the key, the record, the adapter against a stand-in claude, the runs and their states, the report, the View menu, the bar, the page
+bun test                    # the key, the record, the adapter against a stand-in claude, the runs and their states, the report, the conversation chooser, the bar, the page
 bun run typecheck
 bunx kehikot-check-parts .
 ```
