@@ -19,6 +19,7 @@ import { isKehikkoKey, kehikkoOf, placeKey, sortedParts, type Kehikko } from './
 import { cutOffs, cutOffWords, lastPrompt, midTurn, type CutOff } from './cutoff.ts'
 import { PROGRAM, headOf, home, recordFile, sessionName, type Active, type ActiveStatus, type Able, type Program, type Running, type State } from './program.ts'
 import { PLACE_TOKEN, assign, attach, born, byToken, follow, homeOf, isDetached, markSession, markSessions, note, ownOf, projectRoot, readPlaces, readSettings, recordedIds, sighted, stayDetached, tokenFor, type NamedPlace, type PlaceEntry, type Places, type SessionEntry } from './record.ts'
+import { readKeptGuards, writeKeptGuards } from './restarted.ts'
 import { heldSkills, removePlugin, sessionPlugin, statusScriptIn, sweepKits, writeComposer, writeOwnStatusLine } from './skills.ts'
 import { freshToken, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, removeConfig, sweepKept, writeConfig, writeKeptConfig, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
@@ -2494,15 +2495,24 @@ export class Runs {
         log: this.log,
         later: (run, ms) => setTimeout(run, ms).unref?.(),
         keepGuards: (one, guards) => this.keepGuards(one, guards),
+        keptGuards: (one) => this.keptGuards(one),
       },
     )
   }
 
   private keepGuards(token: string, guards: PlacedGuard[]): void {
+    const before = this.guardsKept.get(token)
     this.guardsKept.delete(token)
     this.guardsKept.set(token, { at: Date.now(), guards })
     /* Bounded: the oldest tokens go first. */
     while (this.guardsKept.size > 256) this.guardsKept.delete(this.guardsKept.keys().next().value!)
+    /* On disk too, so a restart of this module while the host is away still knows them (restarted.ts). Written when they change. */
+    if (JSON.stringify(before?.guards ?? null) !== JSON.stringify(guards)) writeKeptGuards(join(keptDirOf(token, this.options.configBase), 'guards.json'), guards)
+  }
+
+  /** The guards kept for a token's session: this process's, else those a process before it kept on disk (old: the host is asked first). */
+  private keptGuards(token: string): { at: number; guards: PlacedGuard[] } | null {
+    return this.guardsKept.get(token) ?? (PLACE_TOKEN.test(token) ? readKeptGuards(join(keptDirOf(token, this.options.configBase), 'guards.json')) : null)
   }
 
   /**
@@ -2510,14 +2520,14 @@ export class Runs {
    * becomes of one command, the session's or a subagent's, under the guards of the modules placed on
    * its kehikko. Null: run it as written.
    */
-  async guard(session: string, token: string | null, input: unknown, direct: boolean): Promise<GuardAnswer | null> {
+  async guard(session: string, token: string | null, input: unknown, direct: boolean): Promise<GuardAnswer | null | 'unknown'> {
     return guard(
       { session, token, input, direct },
       {
         program: this.program,
         startedOf: (one) => this.startedOf(one),
         host: (asked) => (this.options.place ?? hostPlace)(asked),
-        keptGuards: (one) => this.guardsKept.get(one) ?? null,
+        keptGuards: (one) => this.keptGuards(one),
         keepGuards: (one, guards) => this.keepGuards(one, guards),
       },
     )

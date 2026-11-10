@@ -58,11 +58,16 @@ ask() {
       --request POST "$1/api/context?event=$event&session=$session" 2>/dev/null
 }
 
-said=$(ask "$origin")
-asked=$?
-# No answer from there (nothing listening, or something else answering): the module may have moved
-# to another port since this session started, and its registration says where. An answer with
-# nothing in it is an answer.
+# Kehikot's stable address for this module first (`kehikot/stable`, the host's `/m/<this module>`, which
+# follows it to whatever port it bound), then the origin it served on, then what its registration says now.
+stable=$(/bin/cat "$here/stable" 2>/dev/null)
+said=
+asked=1
+[ -n "$stable" ] && said=$(ask "$stable") && asked=0
+if [ "$asked" -ne 0 ]; then
+  said=$(ask "$origin")
+  asked=$?
+fi
 if [ "$asked" -ne 0 ] && [ -f "$here/registration" ]; then
   reg=$(/bin/cat "$here/registration" 2>/dev/null)
   if [ -f "$reg" ]; then
