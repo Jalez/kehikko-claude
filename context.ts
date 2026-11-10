@@ -378,8 +378,17 @@ export function guardAnswer(input: unknown, guards: readonly PlacedGuard[], dire
   const decision = guardDecision(guards, toolInput.command, { tool: 'shell', env: direct ? { KEHIKOT_DIRECT: '1' } : {} })
   if (decision.action === 'pass') return null
   if (decision.action === 'deny') return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: guardSays(decision) } }
-  return { hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput: { ...toolInput, command: decision.command }, additionalContext: guardSays(decision) } }
+  /* The wrapper may wait in line for many minutes, and a Bash call that times out cancels the queued run: so it runs in the
+     background (Claude Code tells the session when it exits) — unless the agent already chose, either way. */
+  const chose = 'run_in_background' in toolInput && toolInput.run_in_background !== undefined
+  const updatedInput = { ...toolInput, command: decision.command, ...(chose ? {} : { run_in_background: true }) }
+  const note = chose ? '' : ` ${QUEUED_IN_BACKGROUND}`
+  return { hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput, additionalContext: guardSays(decision) + note } }
 }
+
+/** What an agent is told when its command was queued and set to run in the background. */
+export const QUEUED_IN_BACKGROUND = "Queued in the background; you'll be told when it finishes."
+
 
 export interface GuardNeeds extends Pick<ContextNeeds, 'program' | 'startedOf' | 'host'> {
   /** The guards kept for a token's session, and when; null when none are kept. */
