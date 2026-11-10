@@ -174,7 +174,7 @@ describe('the skills a session is given', () => {
     const plugin = (await sessionPlugin([], { ...options({ claudeDir }), token, registration: join(dir(), 'none.json') }))!
     expect(plugin).toBeTruthy()
     expect(existsSync(join(plugin, 'skills'))).toBe(false)
-    expect(Object.keys(JSON.parse(readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8')).hooks)).toEqual(['SessionStart', 'UserPromptSubmit'])
+    expect(Object.keys(JSON.parse(readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8')).hooks)).toEqual(['SessionStart', 'UserPromptSubmit', 'SubagentStart', 'PreToolUse'])
     expect(statSync(join(plugin, 'context.sh')).mode & 0o777).toBe(0o700)
     expect(readFileSync(join(plugin, 'kehikot', 'token'), 'utf8')).toBe(token)
     expect(existsSync(join(plugin, '.claude-plugin', 'plugin.json'))).toBe(true)

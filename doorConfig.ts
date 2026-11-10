@@ -1,4 +1,4 @@
-import { NOTES_MESSAGES_MOST, agentMessageSchema, kehikkoSkillsSchema, type AgentMessage, type KehikkoSkill, oneLine, type AbsentModule, type SessionModule } from 'kehikot-module-protocol'
+import { NOTES_MESSAGES_MOST, agentMessageSchema, kehikkoSkillsSchema, placedGuardsSchema, type PlacedGuard, type AgentMessage, type KehikkoSkill, oneLine, type AbsentModule, type SessionModule } from 'kehikot-module-protocol'
 import { createHash, randomBytes } from 'node:crypto'
 import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -68,6 +68,11 @@ export interface DoorsAsked {
   token: string
   /** The kehikko's key, or null. */
   kehikko: string | null
+  /**
+   * Whether the session's unread messages are asked for, and so counted delivered (protocol 2.41.0).
+   * Absent: true. False for an ask that does not say them (a subagent's notes, a guard lookup).
+   */
+  messages?: boolean
 }
 
 /**
@@ -100,6 +105,11 @@ export interface HostPlace {
    * too old to say, or a place with no kehikko.
    */
   kehikkoSkills?: KehikkoSkill[] | null
+  /**
+   * The guards of the modules placed on the session's kehikko (protocol 2.61.0): what its Bash
+   * commands, and its subagents', are held to (`guard.sh`, guards.ts). Null from a host too old to say.
+   */
+  guards?: PlacedGuard[] | null
 }
 
 /**
@@ -116,11 +126,11 @@ export async function hostPlace(asked: DoorsAsked, options: { env?: Record<strin
       const response = await (options.fetch ?? fetch)(`${origin}/host/place`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ module: ID, token: asked.token, project: asked.projectPath, projectId: asked.projectId, kehikko: asked.kehikko, messages: true }),
+        body: JSON.stringify({ module: ID, token: asked.token, project: asked.projectPath, projectId: asked.projectId, kehikko: asked.kehikko, messages: asked.messages !== false }),
         signal: control.signal,
       })
       if (!response.ok) continue
-      const said = (await response.json()) as { ok?: unknown; token?: unknown; doors?: unknown; modules?: unknown; absent?: unknown; messages?: unknown; messagesMore?: unknown; kehikkoSkills?: unknown }
+      const said = (await response.json()) as { ok?: unknown; token?: unknown; doors?: unknown; modules?: unknown; absent?: unknown; messages?: unknown; messagesMore?: unknown; kehikkoSkills?: unknown; guards?: unknown }
       if (said.ok !== true || said.token !== asked.token || !Array.isArray(said.doors)) continue
       return {
         doors: said.doors.filter(isDoor).slice(0, 64),
@@ -129,6 +139,7 @@ export async function hostPlace(asked: DoorsAsked, options: { env?: Record<strin
         messages: Array.isArray(said.messages) ? said.messages.flatMap((one) => { const read = agentMessageSchema.safeParse(one); return read.success ? [read.data] : [] }).slice(0, NOTES_MESSAGES_MOST) : null,
         messagesMore: typeof said.messagesMore === 'number' && Number.isInteger(said.messagesMore) && said.messagesMore > 0 ? said.messagesMore : 0,
         kehikkoSkills: kehikkoSkillsOf(said.kehikkoSkills),
+        guards: said.guards === undefined ? null : placedGuardsSchema.parse(said.guards),
       }
     } catch {
       /* Not this origin. */

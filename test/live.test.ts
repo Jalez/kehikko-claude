@@ -13,7 +13,7 @@ import { KEHIKKO_SKILLS_HEAD, NOTES_VERSION, UPDATED_HEAD, finishLine, kehikkoSk
 import { readFileSync as fsRead, writeFileSync as fsWrite } from 'node:fs'
 import { PROGRAM, REFUSAL_EVENTS, SUBAGENT_EVENTS, readActive, type Active, type Program, type Recorded } from '../program.ts'
 import { assign, attach, detach, ignore, readPlaces, sessionsAt, tokenFor, writeSettings, type NamedPlace } from '../record.ts'
-import type { AbsentModule } from 'kehikot-module-protocol'
+import type { AbsentModule, PlacedGuard } from 'kehikot-module-protocol'
 import { freshToken, keptDirOf, writeKeptPlace, type DoorsAsked, type HostPlace, type ModuleOn, type SessionDoor } from '../doorConfig.ts'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { skillText } from '../skills.ts'
@@ -2615,9 +2615,10 @@ describe('a session started here knows its place and its kehikko’s modules, an
   const TERMINAL: ModuleOn = { module: 'kehikot.terminal', name: 'Terminal', summary: 'A shell.', door: null, skills: [] }
   const SELF: ModuleOn = { module: 'kehikot.claude', name: 'Claude', summary: 'This.', door: 'kehikko-claude', skills: ['kehikot-here'] }
   /** A host whose kehikko holds `on`, changed by a test as a person would. */
-  const host = (on: ModuleOn[], asked: DoorsAsked[] = [], absent: AbsentModule[] = [], kehikkoSkills?: KehikkoSkill[]) => ({
+  const host = (on: ModuleOn[], asked: DoorsAsked[] = [], absent: AbsentModule[] = [], kehikkoSkills?: KehikkoSkill[], guards?: PlacedGuard[]) => ({
     on,
     asked,
+    guards,
     absent,
     kehikkoSkills,
     doors: async (one: DoorsAsked): Promise<SessionDoor[]> => [
@@ -2626,7 +2627,7 @@ describe('a session started here knows its place and its kehikko’s modules, an
     ],
     place: async (one: DoorsAsked): Promise<HostPlace | null> => {
       asked.push(one)
-      return { doors: [{ module: 'kehikko', name: 'kehikko', url: 'http://127.0.0.1:4180/mcp', transport: 'http' }], modules: [...on], absent: [...absent], messages: null, messagesMore: 0, ...(kehikkoSkills ? { kehikkoSkills: [...kehikkoSkills] } : {}) }
+      return { doors: [{ module: 'kehikko', name: 'kehikko', url: 'http://127.0.0.1:4180/mcp', transport: 'http' }], modules: [...on], absent: [...absent], messages: null, messagesMore: 0, ...(kehikkoSkills ? { kehikkoSkills: [...kehikkoSkills] } : {}), ...(guards ? { guards: [...guards] } : {}) }
     },
   })
   const started = async (h: ReturnType<typeof host>, dir: string, place: NamedPlace = KEYED) => {
@@ -2660,13 +2661,89 @@ describe('a session started here knows its place and its kehikko’s modules, an
     const args = w.ptys[0]!.args
     const plugin = args[args.indexOf('--plugin-dir') + 1]!
     const hooks = JSON.parse(readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8'))
-    expect(Object.keys(hooks.hooks)).toEqual(['SessionStart', 'UserPromptSubmit'])
+    expect(Object.keys(hooks.hooks)).toEqual(['SessionStart', 'UserPromptSubmit', 'SubagentStart', 'PreToolUse'])
+    expect(hooks.hooks.PreToolUse[0].matcher).toBe('Bash')
+    expect(hooks.hooks.PreToolUse[0].hooks[0].command).toBe('/bin/sh "${CLAUDE_PLUGIN_ROOT}/guard.sh" PreToolUse')
+    expect(readFileSync(join(plugin, 'guard.sh'), 'utf8')).toBe(readFileSync(join(import.meta.dir, '..', 'guard.sh'), 'utf8'))
     expect(hooks.hooks.SessionStart[0].hooks[0].command).toBe('/bin/sh "${CLAUDE_PLUGIN_ROOT}/context.sh" SessionStart')
     expect(readFileSync(join(plugin, 'context.sh'), 'utf8')).toBe(readFileSync(join(import.meta.dir, '..', 'context.sh'), 'utf8'))
     expect(readFileSync(join(plugin, 'kehikot', 'token'), 'utf8')).toBe(token)
     expect(statSync(join(plugin, 'kehikot', 'token')).mode & 0o777).toBe(0o600)
     expect(readFileSync(join(plugin, 'kehikot', 'origin'), 'utf8')).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
     expect(args.join(' ')).not.toContain(token)
+  })
+
+  const GUARD_QUEUE: PlacedGuard = {
+    module: 'kehikot.queue',
+    name: 'Test runs',
+    guard: { id: 'heavy', tool: 'shell', match: { commands: ['tsc', 'bun test'], scripts: ['test'] }, action: 'rewrite', rewrite: 'kehikot-queue run -- sh -c {command}', why: 'Heavy runs go through the queue.' },
+  }
+  const GUARD_DEV: PlacedGuard = { module: 'kehikot.dev', name: 'Dev servers', guard: { id: 'no-vite', tool: 'shell', match: { commands: ['vite'] }, action: 'deny', why: 'Ask Dev servers for a lease.' } }
+  const bash = (command: string, session = B) => ({ session_id: session, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command, description: 'Run it', timeout: 60000 }, agent_id: 'agent-1' })
+
+  test('a subagent is told the place, what the modules say to agents and the guards — without messages being asked for (protocol 2.61.0)', async () => {
+    const dir = project()
+    const queue: ModuleOn = { module: 'kehikot.queue', name: 'Test runs', summary: 'Runs.', says: 'Queue heavy test runs here.', door: 'queue', skills: [] }
+    const h = host([NOTES, queue], [], [], undefined, [GUARD_QUEUE])
+    const { w, token } = await started(h, dir)
+    h.asked.length = 0
+    const answer = await w.runs.context('SubagentStart', B, token)
+    expect(answer?.hookSpecificOutput.hookEventName).toBe('SubagentStart')
+    const text = said(answer)!
+    expect(text).toContain('you are a subagent')
+    expect(text).toContain('"Queue heavy test runs here."')
+    expect(text).toContain('- Test runs: tsc, bun test, script test — "Heavy runs go through the queue."')
+    expect(text).not.toContain('End every turn')
+    expect(h.asked.map((one) => one.messages)).toEqual([false])
+    /* Nothing is kept of it: the session's next prompt is told as if the subagent had not been. */
+    expect(said(await w.runs.context('UserPromptSubmit', B, token))).toContain('belongs to project')
+  })
+
+  test('a Bash command is rewritten to the guard’s command, the whole input kept, with no permission decision', async () => {
+    const dir = project()
+    const h = host([NOTES], [], [], undefined, [GUARD_QUEUE])
+    const { w, token } = await started(h, dir)
+    const got = await w.runs.guard(B, token, bash('cd x && bun test'), false)
+    expect(got).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        updatedInput: { command: `kehikot-queue run -- sh -c 'cd x && bun test'`, description: 'Run it', timeout: 60000 },
+        additionalContext: expect.stringContaining('Test runs (a module on this kehikko) ran this command through its own instead'),
+      },
+    })
+    expect(JSON.stringify(got)).not.toContain('permissionDecision')
+    expect(await w.runs.guard(B, token, bash('git status'), false)).toBeNull()
+    expect(await w.runs.guard(B, token, bash('KEHIKOT_DIRECT=1 bun test'), false)).toBeNull()
+    expect(await w.runs.guard(B, token, bash('bun test'), true)).toBeNull()
+    expect(await w.runs.guard(B, token, { ...bash('bun test'), tool_name: 'Read' }, false)).toBeNull()
+    expect(await w.runs.guard(B, 'not-a-token', bash('bun test'), false)).toBeNull()
+  })
+
+  test('a deny guard refuses with the module’s reason', async () => {
+    const dir = project()
+    const { w, token } = await started(host([NOTES], [], [], undefined, [GUARD_QUEUE, GUARD_DEV]), dir)
+    const got = await w.runs.guard(B, token, bash('vite --port 5000'), false)
+    expect(got?.hookSpecificOutput).toMatchObject({ hookEventName: 'PreToolUse', permissionDecision: 'deny' })
+    const reason = (got!.hookSpecificOutput as { permissionDecisionReason: string }).permissionDecisionReason
+    expect(reason).toContain('Dev servers')
+    expect(reason).toContain('"Ask Dev servers for a lease."')
+    expect(reason).toContain('KEHIKOT_DIRECT=1')
+  })
+
+  test('the guards are the host’s for the session’s kehikko, kept a while and asked again: a module taken off guards nothing', async () => {
+    const dir = project()
+    const h = host([NOTES], [], [], undefined, [GUARD_QUEUE])
+    const { w, token } = await started(h, dir)
+    h.asked.length = 0
+    expect((await w.runs.guard(B, token, bash('tsc'), false))?.hookSpecificOutput).toHaveProperty('updatedInput')
+    expect(h.asked.map((one) => one.messages)).toEqual([false])
+    /* Kept: the next command does not ask. */
+    await w.runs.guard(B, token, bash('tsc'), false)
+    expect(h.asked).toHaveLength(1)
+    /* The module is taken off the kehikko; the next prompt asks the host, and the guard is gone. */
+    h.guards!.length = 0
+    await w.runs.context('UserPromptSubmit', B, token)
+    expect(await w.runs.guard(B, token, bash('tsc'), false)).toBeNull()
   })
 
   test('the skills the person wrote for its kehikko are in its plugin, held, and said in its notes; one added later is said with where to read it', async () => {
