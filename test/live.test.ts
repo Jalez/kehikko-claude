@@ -2707,10 +2707,17 @@ describe('a session started here knows its place and its kehikko’s modules, an
     expect(got).toEqual({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
-        updatedInput: { command: `kehikot-queue run -- sh -c 'cd x && bun test'`, description: 'Run it', timeout: 60000 },
+        updatedInput: { command: `kehikot-queue run -- sh -c 'cd x && bun test'`, description: 'Run it', timeout: 60000, run_in_background: true },
         additionalContext: expect.stringContaining('Test runs (a module on this kehikko) ran this command through its own instead'),
       },
     })
+    expect((got!.hookSpecificOutput as { additionalContext: string }).additionalContext).toContain("Queued in the background; you'll be told when it finishes.")
+    /* An agent's own choice is kept, either way, and not announced. */
+    for (const chosen of [false, true]) {
+      const kept = await w.runs.guard(B, token, { ...bash('bun test'), tool_input: { ...bash('bun test').tool_input, run_in_background: chosen } }, false)
+      expect((kept!.hookSpecificOutput as { updatedInput: Record<string, unknown> }).updatedInput.run_in_background).toBe(chosen)
+      expect((kept!.hookSpecificOutput as { additionalContext: string }).additionalContext).not.toContain('Queued in the background')
+    }
     expect(JSON.stringify(got)).not.toContain('permissionDecision')
     expect(await w.runs.guard(B, token, bash('git status'), false)).toBeNull()
     expect(await w.runs.guard(B, token, bash('KEHIKOT_DIRECT=1 bun test'), false)).toBeNull()
@@ -2728,6 +2735,7 @@ describe('a session started here knows its place and its kehikko’s modules, an
     expect(reason).toContain('Dev servers')
     expect(reason).toContain('"Ask Dev servers for a lease."')
     expect(reason).toContain('KEHIKOT_DIRECT=1')
+    expect(JSON.stringify(got)).not.toContain('run_in_background')
   })
 
   test('the guards are the host’s for the session’s kehikko, kept a while and asked again: a module taken off guards nothing', async () => {
