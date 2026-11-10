@@ -8,13 +8,14 @@ import { join } from 'node:path'
 import { listing, runOf, type Listing } from '../doors.ts'
 import { CLOSED, Runs, activityRows, sameProject, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type RunsOptions, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
 import { placeKey } from '../place.ts'
-import { RESEARCH_LINE, SELF as CONTEXT_SELF } from '../context.ts'
+import { RESEARCH_LINE, SELF as CONTEXT_SELF, type GuardAnswer } from '../context.ts'
 import { KEHIKKO_SKILLS_HEAD, NOTES_VERSION, UPDATED_HEAD, finishLine, kehikkoSkillText, sessionNotes, type KehikkoSkill } from 'kehikot-module-protocol'
 import { readFileSync as fsRead, writeFileSync as fsWrite } from 'node:fs'
 import { PROGRAM, REFUSAL_EVENTS, SUBAGENT_EVENTS, readActive, type Active, type Program, type Recorded } from '../program.ts'
 import { assign, attach, detach, ignore, readPlaces, sessionsAt, tokenFor, writeSettings, type NamedPlace } from '../record.ts'
 import type { AbsentModule, PlacedGuard } from 'kehikot-module-protocol'
 import { freshToken, keptDirOf, writeKeptPlace, type DoorsAsked, type HostPlace, type ModuleOn, type SessionDoor } from '../doorConfig.ts'
+import { readKeptGuards } from '../restarted.ts'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { skillText } from '../skills.ts'
 import { CONFIG } from './setup.ts'
@@ -2631,9 +2632,10 @@ describe('a session started here knows its place and its kehikko’s modules, an
     },
   })
   const started = async (h: ReturnType<typeof host>, dir: string, place: NamedPlace = KEYED) => {
-    const w = world({ fetch, configures: true, plugins: true, doors: h.doors, place: h.place, configBase: project() })
+    const configBase = project()
+    const w = world({ fetch, configures: true, plugins: true, doors: h.doors, place: h.place, configBase })
     const run = (await w.runs.open(ask(dir, null, place), new Watcher())) as Run
-    return { w, run, token: run.token! }
+    return { w, run, token: run.token!, configBase }
   }
   const recordOf = (dir: string) => {
     const read = readPlaces(dir)
@@ -2711,12 +2713,12 @@ describe('a session started here knows its place and its kehikko’s modules, an
         additionalContext: expect.stringContaining('Test runs (a module on this kehikko) ran this command through its own instead'),
       },
     })
-    expect((got!.hookSpecificOutput as { additionalContext: string }).additionalContext).toContain("Queued in the background; you'll be told when it finishes.")
+    expect(((got as GuardAnswer).hookSpecificOutput as { additionalContext: string }).additionalContext).toContain("Queued in the background; you'll be told when it finishes.")
     /* An agent's own choice is kept, either way, and not announced. */
     for (const chosen of [false, true]) {
       const kept = await w.runs.guard(B, token, { ...bash('bun test'), tool_input: { ...bash('bun test').tool_input, run_in_background: chosen } }, false)
-      expect((kept!.hookSpecificOutput as { updatedInput: Record<string, unknown> }).updatedInput.run_in_background).toBe(chosen)
-      expect((kept!.hookSpecificOutput as { additionalContext: string }).additionalContext).not.toContain('Queued in the background')
+      expect(((kept as GuardAnswer).hookSpecificOutput as { updatedInput: Record<string, unknown> }).updatedInput.run_in_background).toBe(chosen)
+      expect(((kept as GuardAnswer).hookSpecificOutput as { additionalContext: string }).additionalContext).not.toContain('Queued in the background')
     }
     expect(JSON.stringify(got)).not.toContain('permissionDecision')
     expect(await w.runs.guard(B, token, bash('git status'), false)).toBeNull()
@@ -2730,8 +2732,8 @@ describe('a session started here knows its place and its kehikko’s modules, an
     const dir = project()
     const { w, token } = await started(host([NOTES], [], [], undefined, [GUARD_QUEUE, GUARD_DEV]), dir)
     const got = await w.runs.guard(B, token, bash('vite --port 5000'), false)
-    expect(got?.hookSpecificOutput).toMatchObject({ hookEventName: 'PreToolUse', permissionDecision: 'deny' })
-    const reason = (got!.hookSpecificOutput as { permissionDecisionReason: string }).permissionDecisionReason
+    expect((got as GuardAnswer | null)?.hookSpecificOutput).toMatchObject({ hookEventName: 'PreToolUse', permissionDecision: 'deny' })
+    const reason = ((got as GuardAnswer).hookSpecificOutput as { permissionDecisionReason: string }).permissionDecisionReason
     expect(reason).toContain('Dev servers')
     expect(reason).toContain('"Ask Dev servers for a lease."')
     expect(reason).toContain('KEHIKOT_DIRECT=1')
@@ -2743,7 +2745,7 @@ describe('a session started here knows its place and its kehikko’s modules, an
     const h = host([NOTES], [], [], undefined, [GUARD_QUEUE])
     const { w, token } = await started(h, dir)
     h.asked.length = 0
-    expect((await w.runs.guard(B, token, bash('tsc'), false))?.hookSpecificOutput).toHaveProperty('updatedInput')
+    expect(((await w.runs.guard(B, token, bash('tsc'), false)) as GuardAnswer | null)?.hookSpecificOutput).toHaveProperty('updatedInput')
     expect(h.asked.map((one) => one.messages)).toEqual([false])
     /* Kept: the next command does not ask. */
     await w.runs.guard(B, token, bash('tsc'), false)
@@ -2752,6 +2754,57 @@ describe('a session started here knows its place and its kehikko’s modules, an
     h.guards!.length = 0
     await w.runs.context('UserPromptSubmit', B, token)
     expect(await w.runs.guard(B, token, bash('tsc'), false)).toBeNull()
+  })
+
+  test('Kehikot away and nothing kept: the guards are not known — guard.sh asks again — never taken for "no guards"; once kept, they are used while it is away', async () => {
+    const dir = project()
+    const h = host([NOTES], [], [], undefined, [GUARD_QUEUE])
+    let down = false
+    const place = h.place
+    h.place = async (one: DoorsAsked) => {
+      if (down) throw new Error('ECONNREFUSED')
+      return place(one)
+    }
+    const { w, token, configBase } = await started(h, dir)
+    down = true
+    expect(await w.runs.guard(B, token, bash('bun test'), false)).toBe('unknown')
+    down = false
+    expect(((await w.runs.guard(B, token, bash('bun test'), false)) as GuardAnswer | null)?.hookSpecificOutput).toHaveProperty('updatedInput')
+    /* Kept on disk beside what the session was told, for a process that starts while the host is still away. */
+    expect(readKeptGuards(join(keptDirOf(token, configBase), 'guards.json'))?.guards).toEqual([GUARD_QUEUE])
+  })
+
+  test('a session that outlived a restart is told once, at its next prompt, that its tools may be gone and how to queue from the shell', async () => {
+    const dir = project()
+    const queueGuard: PlacedGuard = { ...GUARD_QUEUE, guard: { ...GUARD_QUEUE.guard, rewrite: "'/Users/x/Application Support/queue/bin/kehikot-queue' run --guard -- sh -c {command}" } }
+    const h = host([NOTES], [], [], undefined, [queueGuard])
+    const { w, token, configBase } = await started(h, dir)
+    await w.runs.context('SessionStart', B, token)
+    expect(said(await w.runs.context('UserPromptSubmit', B, token)) ?? '').not.toContain('Kehikot restarted')
+    /* The marker an earlier process of this module left: it started again in between. */
+    writeFileSync(join(keptDirOf(token, configBase), 'boot'), '1-1')
+    const told = said(await w.runs.context('UserPromptSubmit', B, token))!
+    expect(told).toContain('Kehikot restarted since your last turn')
+    expect(told).toContain("`'/Users/x/Application Support/queue/bin/kehikot-queue' run --kind verify -- <command>`")
+    expect(told).toContain('/mcp reconnect all')
+    expect(said(await w.runs.context('UserPromptSubmit', B, token)) ?? '').not.toContain('Kehikot restarted')
+    /* A start after a restart has its tools: marked, not told. */
+    writeFileSync(join(keptDirOf(token, configBase), 'boot'), '1-1')
+    expect(said(await w.runs.context('SessionStart', B, token)) ?? '').not.toContain('Kehikot restarted')
+    expect(said(await w.runs.context('UserPromptSubmit', B, token)) ?? '').not.toContain('Kehikot restarted')
+  })
+
+  test('its plugin names Kehikot’s stable address for this module when the doors are written on it, and gives the guard time to wait for a restart', async () => {
+    const dir = project()
+    const h = host([NOTES])
+    const doors = h.doors
+    h.doors = async (one: DoorsAsked) => (await doors(one)).map((door) => ({ ...door, url: `http://127.0.0.1:4170/m/${door.module}/mcp?kehikot-place=${one.token}` }))
+    const { w } = await started(h, dir)
+    const args = w.ptys[0]!.args
+    const plugin = args[args.indexOf('--plugin-dir') + 1]!
+    expect(readFileSync(join(plugin, 'kehikot', 'stable'), 'utf8')).toBe('http://127.0.0.1:4170/m/kehikot.claude')
+    const hooks = JSON.parse(readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8'))
+    expect(hooks.hooks.PreToolUse[0].hooks[0].timeout).toBeGreaterThanOrEqual(25)
   })
 
   test('the skills the person wrote for its kehikko are in its plugin, held, and said in its notes; one added later is said with where to read it', async () => {

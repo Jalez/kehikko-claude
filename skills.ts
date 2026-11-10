@@ -8,6 +8,7 @@ import { originFor, preferred, registryDir } from 'kehikot-module-protocol/serve
 import { configDirOf, type SessionDoor } from './doorConfig.ts'
 import { ID, MANIFEST, PREFERRED_PORT } from './manifest.ts'
 import { configDir } from './program.ts'
+import { stableAddress } from './restarted.ts'
 import { PLACE_TOKEN } from './record.ts'
 
 /**
@@ -297,7 +298,7 @@ export async function sessionPlugin(doors: readonly SessionDoor[], options: Gath
     mkdirSync(join(dir, 'skills', name), { recursive: true, mode: 0o700 })
     writeFileSync(join(dir, 'skills', name, 'SKILL.md'), text, { mode: 0o600 })
   }
-  if (hooked) writeContextHooks(dir, hooked, options.registration ?? join(registryDir(), `${ID}.json`))
+  if (hooked) writeContextHooks(dir, hooked, options.registration ?? join(registryDir(), `${ID}.json`), stableAddress(doors, ID))
   writeFileSync(join(dir, HELD_FILE), `${JSON.stringify([...held].sort())}\n`, { mode: 0o600 })
   /* Last, so a folder with its plugin.json is a whole one. */
   writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), readFileSync(join(PLUGIN_DIR, '.claude-plugin', 'plugin.json')), { mode: 0o600 })
@@ -385,11 +386,11 @@ export const GUARD_SCRIPT = join(import.meta.dirname, 'guard.sh')
  * from the plugin's own folder. Beside it, in `kehikot/`, 0600: the session's token, the origin
  * this module serves on now, and where its registration is.
  */
-function writeContextHooks(dir: string, token: string, registration: string): void {
+function writeContextHooks(dir: string, token: string, registration: string, stable: string | null): void {
   const command = (event: string) => `/bin/sh "\${CLAUDE_PLUGIN_ROOT}/context.sh" ${event}`
   const hooks: Record<string, unknown[]> = Object.fromEntries(CONTEXT_EVENTS.map((event) => [event, [{ hooks: [{ type: 'command', command: command(event), timeout: 10 }] }]]))
   /* Every Bash command, the session's own and its subagents', held to the guards of the modules placed on its kehikko (protocol 2.61.0). */
-  hooks.PreToolUse = [{ matcher: 'Bash', hooks: [{ type: 'command', command: '/bin/sh "${CLAUDE_PLUGIN_ROOT}/guard.sh" PreToolUse', timeout: 5 }] }]
+  hooks.PreToolUse = [{ matcher: 'Bash', hooks: [{ type: 'command', command: '/bin/sh "${CLAUDE_PLUGIN_ROOT}/guard.sh" PreToolUse', timeout: GUARD_TIMEOUT }] }]
   mkdirSync(join(dir, 'hooks'), { mode: 0o700 })
   writeFileSync(join(dir, 'hooks', 'hooks.json'), `${JSON.stringify({ hooks }, null, 2)}\n`, { mode: 0o600 })
   writeFileSync(join(dir, 'context.sh'), readFileSync(CONTEXT_SCRIPT), { mode: 0o700 })
@@ -400,7 +401,17 @@ function writeContextHooks(dir: string, token: string, registration: string): vo
   writeFileSync(join(dir, 'kehikot', 'token'), token, { mode: 0o600 })
   writeFileSync(join(dir, 'kehikot', 'origin'), served, { mode: 0o600 })
   writeFileSync(join(dir, 'kehikot', 'registration'), registration, { mode: 0o600 })
+  /* Kehikot's stable address for this module (restarted.ts): asked first by the hooks, so a module that came back on another port is found through the host. */
+  if (stable) writeFileSync(join(dir, 'kehikot', 'stable'), stable, { mode: 0o600 })
+  else rmSync(join(dir, 'kehikot', 'stable'), { force: true })
 }
+
+/**
+ * How long Claude Code lets `guard.sh` run, in seconds: it waits up to 20 for Kehikot to come back
+ * from a restart before letting a command through unguarded (see guard.sh), and a hook that runs out
+ * of time is skipped — the very thing the wait is for.
+ */
+export const GUARD_TIMEOUT = 30
 
 /** Remove a session's plugin folder. Never throws. */
 export function removePlugin(dir: string | null): void {
