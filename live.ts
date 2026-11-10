@@ -21,7 +21,7 @@ import { PROGRAM, headOf, home, recordFile, sessionName, type Active, type Activ
 import { PLACE_TOKEN, assign, attach, born, byToken, follow, homeOf, isDetached, markSession, markSessions, note, ownOf, projectRoot, readPlaces, readSettings, recordedIds, sighted, stayDetached, tokenFor, type NamedPlace, type PlaceEntry, type Places, type SessionEntry } from './record.ts'
 import { readKeptGuards, writeKeptGuards } from './restarted.ts'
 import { heldSkills, removePlugin, sessionPlugin, statusScriptIn, sweepKits, writeComposer, writeOwnStatusLine } from './skills.ts'
-import { freshToken, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, removeConfig, sweepKept, writeConfig, writeKeptConfig, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
+import { freshToken, handedDoors, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, removeConfig, sweepKept, writeConfig, withOwnDoor, writeKeptConfig, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
 import { extraFolders, folderFlags, sameFolders } from './folders.ts'
 import { AGENT_ID, AGENT_TYPE, FOUND_MOST, isResearch, subagentMeta, type Found, type Told } from './research.ts'
@@ -2425,13 +2425,14 @@ export class Runs {
    * doors, and its `place`, when it has one, for the skills.
    */
   private async startPlace(asked: DoorsAsked): Promise<{ doors: SessionDoor[] | null; kehikkoSkills: KehikkoSkill[] | null }> {
+    /* This module's own door is always among them, with the token (`withOwnDoor`, issue #80). */
     if (this.options.doors) {
       const doors = await this.options.doors(asked).catch(() => null)
       const placed = this.options.place ? await this.options.place(asked).catch(() => null) : null
-      return { doors, kehikkoSkills: placed?.kehikkoSkills ?? null }
+      return { doors: withOwnDoor(doors, this.port(), asked.token), kehikkoSkills: placed?.kehikkoSkills ?? null }
     }
     const got = await hostPlace(asked).catch(() => null)
-    return { doors: got?.doors ?? null, kehikkoSkills: got?.kehikkoSkills ?? null }
+    return { doors: withOwnDoor(got?.doors ?? null, this.port(), asked.token), kehikkoSkills: got?.kehikkoSkills ?? null }
   }
 
   private issue(token: string, started: Started, kept: string | null = null): void {
@@ -2466,6 +2467,14 @@ export class Runs {
     return kept.length ? kept.map((door) => door.name) : null
   }
 
+  /** The doors the conversation behind a token was started with, with their URLs, when known: whether its door of this module carries its place (protocol 2.66.0). */
+  doorsHandedTo(token: string): { name: string; url: string; module?: string }[] | null {
+    const run = [...this.runs.values()].find((one) => one.what === 'session' && one.token === token && !one.ended)
+    if (run?.doors.length) return handedDoors(run.doors, this.port())
+    const kept = keptDoors(keptDirOf(token, this.options.configBase))
+    return kept.length ? handedDoors(kept, this.port()) : null
+  }
+
   /** The skills the conversation behind a token has: what its plugin lists (`heldSkills`), from its run or its kept folder. Null when unknown. */
   skillsOf(token: string): string[] | null {
     const run = [...this.runs.values()].find((one) => one.what === 'session' && one.token === token && !one.ended)
@@ -2489,6 +2498,7 @@ export class Runs {
         startedOf: (one) => this.startedOf(one),
         host: (asked) => (this.options.place ?? hostPlace)(asked),
         doorsOf: (one) => this.doorNamesOf(one),
+        handedDoors: (one) => this.doorsHandedTo(one),
         holdsOf: (one) => this.skillsOf(one),
         toldFile: (one) => join(keptDirOf(one, this.options.configBase), 'told.json'),
         told: (projectPath, assigned) => this.told(projectPath, assigned),
