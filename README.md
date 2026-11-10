@@ -689,7 +689,10 @@ Kehikot door:
   (this module restarted, the view closed, the conversation was cleared into a
   new one). One the record already files somewhere stays where the person put
   it; one a person took off its place (`detached`) or said is not a Kehikot one
-  (`ignored`) is never filed on its own again.
+  (`ignored`) is never filed on its own again. That holds at any container size: in a box too small for a terminal the session is started behind
+  the tile all the same, so the tile shows a real one. Until it is spoken to, the bar above it says
+  so ("A new Claude Code conversation: it becomes this kehikko's own…") rather than that nothing is
+  connected; `/kehikot-here` is only for a conversation started elsewhere.
 - **Told where it is, from its first turn.** The session's plugin holds two
   hooks (`SessionStart`, `UserPromptSubmit`) that run `context.sh`, which posts
   the session's id and token to `POST /api/context` and prints the answer as
