@@ -1,9 +1,9 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, join } from 'node:path'
 
-import { checkoutOf } from 'kehikot-module-protocol/serve'
-import { doorCarriesPlace, editDecision, editedPaths, guardDecision, guardSays, researchLine, sessionNotes, subagentNotes, type NotesPlace, type NotesTold, type PlacedGuard } from 'kehikot-module-protocol'
+import { checkToolCall, checkoutOf } from 'kehikot-module-protocol/serve'
+import { CLI_TOOLS, doorCarriesPlace, guardSays, toolReading, researchLine, sessionNotes, subagentNotes, type NotesPlace, type NotesTold, type PlacedGuard } from 'kehikot-module-protocol'
 
 import type { DoorsAsked, HostPlace } from './doorConfig.ts'
 import { ID } from './manifest.ts'
@@ -393,38 +393,45 @@ export type GuardAnswer =
   | { hookSpecificOutput: { hookEventName: 'PreToolUse'; permissionDecision: 'deny'; permissionDecisionReason: string } }
 
 /**
- * THE ANSWER to one Bash call, from Claude Code's PreToolUse input and the session's guards: pure.
- * A rewrite gives the WHOLE input back with only `command` changed (Claude Code replaces the input
+ * THE ANSWER to one tool call, from Claude Code's PreToolUse input and the session's guards: pure but
+ * for what `files` reads. Every call goes through the protocol's one check (`checkToolCall`, protocol
+ * 2.80.0), which applies every guard kind the placed modules declare to whichever of Claude Code's tools
+ * it holds (`CLI_TOOLS.claude`): a shell guard to Bash, an edit guard to each file Edit, Write,
+ * MultiEdit or NotebookEdit edits (a relative path read against the hook's `cwd`).
+ *
+ * A rewrite gives the WHOLE input back with only the command changed (Claude Code replaces the input
  * with `updatedInput`), and no `permissionDecision`, so the person's permission rules judge the command
  * that will run, as they would any other. A deny refuses with the module's words (`guardSays`). Null:
- * run it as written — another tool, no command, no guard, or `direct` (KEHIKOT_DIRECT in the session's
+ * run it as written — a tool no guard holds, no guard, or `direct` (KEHIKOT_DIRECT in the session's
  * environment).
  */
 export function guardAnswer(input: unknown, guards: readonly PlacedGuard[], direct = false, files: EditFiles = EDIT_FILES): GuardAnswer | null {
   const said = input && typeof input === 'object' ? (input as { tool_name?: unknown; tool_input?: unknown; cwd?: unknown }) : null
-  if (said && typeof said.tool_name === 'string' && EDIT_TOOLS.includes(said.tool_name)) return editAnswer(said, guards, direct, files)
-  if (!said || said.tool_name !== 'Bash' || !said.tool_input || typeof said.tool_input !== 'object' || Array.isArray(said.tool_input)) return null
+  if (!said || !said.tool_input || typeof said.tool_input !== 'object' || Array.isArray(said.tool_input)) return null
   const toolInput = said.tool_input as Record<string, unknown>
-  if (typeof toolInput.command !== 'string') return null
-  const decision = guardDecision(guards, toolInput.command, { tool: 'shell', env: direct ? { KEHIKOT_DIRECT: '1' } : {} })
+  const cwd = typeof said.cwd === 'string' ? said.cwd : null
+  const decision = checkToolCall({ cli: CLI, tool: said.tool_name, input: toolInput, cwd }, guards, { home: files.home, checkoutOf: files.checkoutOf, env: direct ? { KEHIKOT_DIRECT: '1' } : {} })
   if (decision.action === 'pass') return null
   if (decision.action === 'deny') return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: guardSays(decision) } }
   /* The wrapper may wait in line for many minutes, and a Bash call that times out cancels the queued run: so it runs in the
      background (Claude Code tells the session when it exits) — unless the agent already chose, either way. */
   const chose = 'run_in_background' in toolInput && toolInput.run_in_background !== undefined
-  const updatedInput = { ...toolInput, command: decision.command, ...(chose ? {} : { run_in_background: true }) }
+  const updatedInput = { ...toolInput, [decision.field]: decision.command, ...(chose ? {} : { run_in_background: true }) }
   const note = chose ? '' : ` ${QUEUED_IN_BACKGROUND}`
   return { hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput, additionalContext: guardSays(decision) + note } }
 }
 
-/**
- * Edit guards (protocol 2.78.0): Claude Code's file-editing tools, held by the same hook. The tools
- * the hook's matcher names (`GUARD_MATCHER`), and what the answer reads of this computer: the home
- * folder for `~/` patterns, and which kind of git checkout a file is in (`checkoutOf`).
- */
-export const EDIT_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
-export const GUARD_MATCHER = ['Bash', ...EDIT_TOOLS].join('|')
+/** This CLI's name in the protocol's table of agent CLIs' tools. */
+export const CLI = 'claude'
 
+/**
+ * The tools the guard hook is matched on: every Claude Code tool the protocol's table says a guard
+ * kind holds (`CLI_TOOLS.claude`; Bash and the edit tools at 2.80.0). A tool the table gains later is
+ * hooked on the next protocol pin, with nothing written here.
+ */
+export const GUARD_MATCHER = Object.keys(CLI_TOOLS[CLI]).join('|')
+
+/** What the answer reads of this computer: the home folder for `~/` patterns, and which kind of git checkout a file is in (`checkoutOf`). */
 export interface EditFiles {
   home: string | null
   checkoutOf(path: string): 'main' | 'linked' | null
@@ -433,19 +440,6 @@ export interface EditFiles {
 export const EDIT_FILES: EditFiles = {
   home: homedir(), // kehikot-storage: allow read-only: the home folder an edit guard's ~/ patterns name
   checkoutOf: (path) => checkoutOf(path),
-}
-
-/** The answer to one edit: a refusal with the module's words when an edit guard holds any file it edits, else null. */
-function editAnswer(said: { tool_name?: unknown; tool_input?: unknown; cwd?: unknown }, guards: readonly PlacedGuard[], direct: boolean, files: EditFiles): GuardAnswer | null {
-  if (!guards.some((one) => one.guard.tool === 'edit')) return null
-  const cwd = typeof said.cwd === 'string' && isAbsolute(said.cwd) ? said.cwd : null
-  for (const raw of editedPaths(said.tool_name, said.tool_input)) {
-    const path = isAbsolute(raw) ? raw : cwd ? resolve(cwd, raw) : null
-    if (!path) continue
-    const decision = editDecision(guards, path, { home: files.home, checkout: files.checkoutOf(path), env: direct ? { KEHIKOT_DIRECT: '1' } : {} })
-    if (decision.action === 'deny') return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: guardSays(decision) } }
-  }
-  return null
 }
 
 /** What an agent is told when its command was queued and set to run in the background. */
@@ -470,7 +464,7 @@ export async function guard(asked: { session: string; token: string | null; inpu
   const { session, token } = asked
   if (!needs.program.isId(session) || !token || !PLACE_TOKEN.test(token)) return null
   const said = asked.input && typeof asked.input === 'object' ? (asked.input as { tool_name?: unknown }) : null
-  if (said?.tool_name !== 'Bash' && !(typeof said?.tool_name === 'string' && EDIT_TOOLS.includes(said.tool_name))) return null
+  if (!toolReading(CLI, said?.tool_name)) return null
   const now = needs.now?.() ?? Date.now()
   const kept = needs.keptGuards(token)
   let guards = kept && now - kept.at < GUARDS_FRESH_MS ? kept.guards : null
