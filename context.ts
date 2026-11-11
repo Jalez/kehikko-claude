@@ -3,13 +3,14 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import { checkToolCall, checkoutOf } from 'kehikot-module-protocol/serve'
-import { CLI_TOOLS, doorCarriesPlace, guardSays, toolReading, researchLine, sessionNotes, subagentNotes, type NotesPlace, type NotesTold, type PlacedGuard } from 'kehikot-module-protocol'
+import { CLI_TOOLS, doorCarriesPlace, guardSays, toolReading, researchLine, sessionNotes, subagentNotes, type NotesPlace, type NotesTold, type PlacedGuard, type WorkQueue } from 'kehikot-module-protocol'
 
 import type { DoorsAsked, HostPlace } from './doorConfig.ts'
 import { ID } from './manifest.ts'
 import { placeKey, readPlaceKey } from './place.ts'
 import type { Program } from './program.ts'
-import { BOOT, queueCli, restartNote, restartedSince } from './restarted.ts'
+import { BOOT, restartedSince } from './restarted.ts'
+import { restartNote, unguardedSaid } from './workQueue.ts'
 import { PLACE_TOKEN, born, byToken, homeOf, projectRoot, readPlaces, readSettings, type NamedPlace, type Places } from './record.ts'
 
 /**
@@ -86,8 +87,10 @@ export interface ContextNeeds {
   later?(run: () => void, ms: number): void
   /** Keep the guards the host handed for a token's session (protocol 2.61.0), for its Bash hook (`guard`). Absent: not kept. */
   keepGuards?(token: string, guards: PlacedGuard[]): void
-  /** The guards last kept for a token's session: what names Queue's CLI in the note after a restart when the host does not answer yet. */
+  /** The guards last kept for a token's session, for its Bash hook when the host does not answer yet. */
   keptGuards?(token: string): { at: number; guards: PlacedGuard[] } | null
+  /** The work queue the host names (`services.find`, protocol 2.81.0), for the note after a restart. Absent or null: none, and no queue is mentioned. */
+  workQueue?(): Promise<WorkQueue | null>
   /** This process's start (`BOOT`), for the marker that says a session outlived a restart; a test passes its own. */
   boot?: string
 }
@@ -316,9 +319,9 @@ export async function context(asked: { event: string; session: string; token: st
     event === 'SessionStart' ? 'start' : 'prompt',
     told,
   )
-  /* A session that outlived a restart of this module (and so of its door, and likely Kehikot's) is told once, at its first prompt after it, that its tools may be gone and how to queue work from the shell (restarted.ts). Marked at a start too: a session started or woken now has its tools. */
+  /* A session that outlived a restart of this module (and so of its door, and likely Kehikot's) is told once, at its first prompt after it, that its tools may be gone and how to hand heavy work to the work queue from the shell, when one is provided (restarted.ts, workQueue.ts). Marked at a start too: a session started or woken now has its tools. */
   const restarted = restartedSince(join(dirname(file), 'boot'), needs.boot ?? BOOT)
-  const note = event === 'UserPromptSubmit' && restarted ? restartNote(queueCli(answer?.guards ?? needs.keptGuards?.(token)?.guards), RECONNECT) : null
+  const note = event === 'UserPromptSubmit' && restarted ? restartNote((await needs.workQueue?.().catch(() => null)) ?? null, RECONNECT) : null
   let text = notes.text
   if (text === null) return note ? { hookSpecificOutput: { hookEventName: event, additionalContext: note } } : null
   const at = Date.now()
@@ -440,6 +443,16 @@ export interface EditFiles {
 export const EDIT_FILES: EditFiles = {
   home: homedir(), // kehikot-storage: allow read-only: the home folder an edit guard's ~/ patterns name
   checkoutOf: (path) => checkoutOf(path),
+}
+
+/**
+ * What `guard.sh` prints when Kehikot did not answer and the command runs unguarded: one line, kept
+ * beside the session's token (`kehikot/unguarded`) and rewritten when the work queue the host names
+ * changes, so its words are that queue's own. Without the file the script says only that the guards
+ * were not asked.
+ */
+export function unguardedHook(queue: WorkQueue | null): string {
+  return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: unguardedSaid(queue) } })
 }
 
 /** What an agent is told when its command was queued and set to run in the background. */

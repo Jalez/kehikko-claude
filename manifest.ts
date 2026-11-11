@@ -108,6 +108,9 @@ export const PREFERRED_PORT = 8010
  *   that does not answer the method is not asked: the tile shows the conversation in place.
  * - **`uses: ['state:keep']`** (protocol 2.70.0): the client keeps the container's view with the host
  *   (`keepView`); every header switch and toggle here is excepted, so it is the document's scroll.
+ * - **`uses: ['services:read']`** (protocol 2.81.0): `services.find` for `work.queue`, so what a session
+ *   is told about handing heavy work to a queue (after a restart, when its guards went unasked) is the
+ *   providing module's own words from its descriptor. With none provided, no queue is mentioned.
  * - **`uses: ['events:emit']`, `emits: [NOTICES]`.** The one thing it asks a
  *   host: to carry a line saying that a session a person is not looking at
  *   has finished, or has stopped to wait for them. Reading the context is not
@@ -178,7 +181,7 @@ export const MANIFEST: Manifest = manifestSchema.parse({
   extensions: { emits: [NOTICES], consumes: [] },
   reacts: ['parts'],
   /* Another module may ask for one of a place's conversations to be shown (`view.goto { show }`,
-     protocol 2.28.0): Queue, going to the session that queued a run. See `showStep`. */
+     protocol 2.28.0): a work queue, going to the session that queued a run. See `showStep`. */
   shows: ['agent-session'],
   /* "Research complete" (protocol 2.31.0): a finished turn or subagent that was research names it,
      and the host may give it a sound of its own. A case of `done`; an older host ignores it. See research.ts. */
@@ -192,7 +195,7 @@ export const MANIFEST: Manifest = manifestSchema.parse({
   reveal: 'over',
   declares: {
     protocol: `>=${PROTOCOL} <${PROTOCOL + 1}`,
-    uses: ['events:emit', 'activity:report', 'agents:message', 'view:expand', 'state:keep'],
+    uses: ['events:emit', 'activity:report', 'agents:message', 'view:expand', 'state:keep', 'services:read'],
     /* This module runs Claude Code sessions and loads the kehikko-bound skills of the modules on a
        session's kehikko into them (protocol 2.21.0). A host routes those skills to a module that
        says so; one built with 2.21.0 that says nothing is not treated as a skill loader. */

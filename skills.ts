@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { WELL_KNOWN, moduleSkillsSchema, skillPath, skillTextIssue, skillsThatLoad, type KehikkoSkill, type ModuleSkill, type ProvidingManifest } from 'kehikot-module-protocol'
@@ -136,6 +136,8 @@ export interface GatherOptions {
    * each put in the plugin as it is, before any module's, so a name the person chose is theirs.
    */
   kehikkoSkills?: readonly KehikkoSkill[] | null
+  /** What `guard.sh` prints when Kehikot does not answer (`unguardedHook`): written beside the token. Absent: the script's own words. */
+  unguarded?: string | null
 }
 
 /** Whether the person already installed `name` at `version` through Kehikot (its marker says the same version). */
@@ -299,7 +301,10 @@ export async function sessionPlugin(doors: readonly SessionDoor[], options: Gath
     mkdirSync(join(dir, 'skills', name), { recursive: true, mode: 0o700 })
     writeFileSync(join(dir, 'skills', name, 'SKILL.md'), text, { mode: 0o600 })
   }
-  if (hooked) writeContextHooks(dir, hooked, options.registration ?? join(registryDir(), `${ID}.json`), stableAddress(doors, ID))
+  if (hooked) {
+    writeContextHooks(dir, hooked, options.registration ?? join(registryDir(), `${ID}.json`), stableAddress(doors, ID))
+    if (options.unguarded) writeUnguarded(dir, options.unguarded)
+  }
   writeFileSync(join(dir, HELD_FILE), `${JSON.stringify([...held].sort())}\n`, { mode: 0o600 })
   /* Last, so a folder with its plugin.json is a whole one. */
   writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), readFileSync(join(PLUGIN_DIR, '.claude-plugin', 'plugin.json')), { mode: 0o600 })
@@ -405,6 +410,26 @@ function writeContextHooks(dir: string, token: string, registration: string, sta
   /* Kehikot's stable address for this module (restarted.ts): asked first by the hooks, so a module that came back on another port is found through the host. */
   if (stable) writeFileSync(join(dir, 'kehikot', 'stable'), stable, { mode: 0o600 })
   else rmSync(join(dir, 'kehikot', 'stable'), { force: true })
+}
+
+/** Where a session's plugin keeps what `guard.sh` prints when Kehikot does not answer. */
+export const UNGUARDED_FILE = join('kehikot', 'unguarded')
+
+/**
+ * Write what `guard.sh` prints when Kehikot does not answer into a session's plugin, 0600, beside its
+ * token — at its start and again whenever the work queue the host names changes. A folder without
+ * its `kehikot/` is not a session's and is left alone. Never throws: false says it was not written.
+ */
+export function writeUnguarded(dir: string, line: string): boolean {
+  try {
+    const file = join(dir, UNGUARDED_FILE)
+    const temporary = `${file}.${process.pid}.tmp`
+    writeFileSync(temporary, line, { mode: 0o600 })
+    renameSync(temporary, file)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**
