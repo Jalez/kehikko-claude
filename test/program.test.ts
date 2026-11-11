@@ -113,7 +113,10 @@ describe('starting and resuming', () => {
 
   test('the session’s environment does not say it is inside another session', () => {
     const env = PROGRAM.environment({ PATH: '/bin', CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'x', CLAUDE_CONFIG_DIR: '/kept', ANTHROPIC_API_KEY: 'kept' })
-    expect(env).toEqual({ PATH: '/bin', CLAUDE_CONFIG_DIR: '/kept', ANTHROPIC_API_KEY: 'kept' })
+    /* A UTF-8 locale is the person's environment's default when none names one (protocol 2.75.0). */
+    const { LC_CTYPE, ...rest } = env
+    expect(rest).toEqual({ PATH: '/bin', CLAUDE_CONFIG_DIR: '/kept', ANTHROPIC_API_KEY: 'kept' })
+    expect(LC_CTYPE).toMatch(/UTF-8$/)
   })
 
   test('a session runs the person’s bun, never the one the host put first on this module’s PATH (#37)', () => {
