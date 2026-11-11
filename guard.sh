@@ -7,7 +7,7 @@
 #
 #   /bin/sh guard.sh PreToolUse
 #
-# A hook of the session's own plugin (`hooks/hooks.json`, matcher Bash), beside context.sh and the
+# A hook of the session's own plugin (`hooks/hooks.json`, matcher Bash and the edit tools, protocol 2.78.0), beside context.sh and the
 # same `kehikot/token`, `kehikot/stable`, `kehikot/origin` and `kehikot/registration`.
 #
 #   - Unlike context.sh, the hook's input leaves this script: the command is what is decided on. It
