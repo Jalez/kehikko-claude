@@ -20,12 +20,13 @@ import { cutOffs, cutOffWords, lastPrompt, midTurn, type CutOff } from './cutoff
 import { PROGRAM, headOf, home, recordFile, sessionName, type Active, type ActiveStatus, type Able, type Program, type Running, type State } from './program.ts'
 import { PLACE_TOKEN, assign, attach, born, byToken, follow, homeOf, isDetached, markSession, markSessions, note, ownOf, projectRoot, readPlaces, readSettings, recordedIds, sighted, stayDetached, tokenFor, type NamedPlace, type PlaceEntry, type Places, type SessionEntry } from './record.ts'
 import { readKeptGuards, writeKeptGuards } from './restarted.ts'
-import { heldSkills, removePlugin, sessionPlugin, statusScriptIn, sweepKits, writeComposer, writeOwnStatusLine } from './skills.ts'
-import { freshToken, handedDoors, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, removeConfig, sweepKept, writeConfig, withOwnDoor, writeKeptConfig, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
+import { heldSkills, removePlugin, sessionPlugin, statusScriptIn, sweepKits, writeComposer, writeOwnStatusLine, writeUnguarded } from './skills.ts'
+import { WorkQueueLookup, askedProviders, type FindProviders } from './workQueue.ts'
+import { configDirOf, freshToken, handedDoors, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, removeConfig, sweepKept, writeConfig, withOwnDoor, writeKeptConfig, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
 import { extraFolders, folderFlags, sameFolders } from './folders.ts'
 import { AGENT_ID, AGENT_TYPE, FOUND_MOST, isResearch, subagentMeta, type Found, type Told } from './research.ts'
-import { context, guard, toldWords, type GuardAnswer, type HookAnswer, type Said, type Started } from './context.ts'
+import { context, guard, toldWords, unguardedHook, type GuardAnswer, type HookAnswer, type Said, type Started } from './context.ts'
 import type { PlacedGuard } from 'kehikot-module-protocol'
 import { ID } from './manifest.ts'
 
@@ -1245,6 +1246,8 @@ export interface RunsOptions {
   configBase?: string
   /** The program a session's status line runs this module's own line with (`statusline-line.mjs`): this process's own runtime by default. */
   runtime?: string
+  /** Asks the host who provides the work queue (`askedProviders`, protocol 2.81.0); a test stands one in. Absent: none is provided. */
+  services?: FindProviders
 }
 
 /**
@@ -1255,6 +1258,8 @@ export class Runs {
   readonly runs = new Map<string, Run>()
   /** The guards the host last handed for each session token (protocol 2.61.0), for its Bash hook. In memory: a restart asks again. */
   private readonly guardsKept = new Map<string, { at: number; guards: PlacedGuard[] }>()
+  /** The work queue the host names (workQueue.ts): what a session is told about handing it heavy work, in its own words. */
+  readonly workQueue: WorkQueueLookup
   private readonly program: Program
   private readonly grace: number
   private readonly quiet: number
@@ -1341,6 +1346,12 @@ export class Runs {
     this.watchEvery = options.watchEvery === undefined ? WATCH_EVERY : options.watchEvery
     const meterEvery = options.meterEvery === undefined ? METER_EVERY : options.meterEvery
     if (meterEvery !== null) setInterval(() => this.meters(), meterEvery).unref?.()
+    this.workQueue = new WorkQueueLookup(options.services ?? (async () => []), options.services ? join(configDirOf(options.configBase), 'work-queue.json') : null, this.now)
+    /* What a running session's guard hook says when Kehikot is away follows the work queue now named. */
+    this.workQueue.onChange((queue) => {
+      const line = unguardedHook(queue)
+      for (const run of this.runs.values()) if (run.plugin && !run.ended) writeUnguarded(run.plugin, line)
+    })
   }
 
   /** Whether an asking about background sessions is due or under way. */
@@ -1642,7 +1653,7 @@ export class Runs {
         this.log('claude: no host gave this session its doors; it starts with the agent’s own configuration')
       }
     }
-    const plugin = able.plugins ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log, into: join(kept, 'plugin'), token, kehikkoSkills }) : null
+    const plugin = able.plugins ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log, into: join(kept, 'plugin'), token, kehikkoSkills, unguarded: unguardedHook(await this.workQueue.fresh()) }) : null
     const name = able.names ? placeName(projectPath, place) : ''
     /* Its status line, which says its context here (statusline.sh). Written into the plugin at every start and wake, so a woken one runs the person's line as their settings say it now. */
     const status = plugin && able.tells ? this.statusLineFor(projectPath, plugin) : null
@@ -2506,6 +2517,7 @@ export class Runs {
         later: (run, ms) => setTimeout(run, ms).unref?.(),
         keepGuards: (one, guards) => this.keepGuards(one, guards),
         keptGuards: (one) => this.keptGuards(one),
+        workQueue: () => this.workQueue.fresh(),
       },
     )
   }
@@ -2870,7 +2882,7 @@ export class Runs {
     /* The skills of every module on the kehikko, for this one process: one folder, removed with it. */
     const plugin =
       !joined && (await this.program.supports(found.file)).plugins
-        ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log, token, kehikkoSkills })
+        ? await sessionPlugin(doors, { base: this.options.configBase, fetch: this.options.fetch, log: this.log, token, kehikkoSkills, unguarded: unguardedHook(await this.workQueue.fresh()) })
         : null
     /* Its own status line, which also says its context here (statusline.sh): only beside its plugin, which holds the script and the token. */
     const status = !joined && plugin && token && able.tells ? this.statusLineFor(projectPath, plugin) : null
@@ -3874,6 +3886,7 @@ export function theRuns(log: (line: string) => void = () => {}): Runs {
       return spawnPty(file, args, { name: TERM, ...options })
     },
     screen: headless,
+    services: askedProviders(ID),
   })
   held[HELD] = runs
   /* A message to a session idle at its prompt wakes it (protocol 2.43.0): the protocol's rule, typed through `wake`. */

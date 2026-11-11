@@ -8,12 +8,13 @@ import { join } from 'node:path'
 import { listing, runOf, type Listing } from '../doors.ts'
 import { CLOSED, Runs, activityRows, keptProjects, sameProject, TELL_ENV, TICKET, fenced, headless, opening, quoted, readPlace, sayable, tellLine, type Follower, type RunsOptions, type Notice, type Opening, type Pty, type Run, type Stated, type Viewer } from '../live.ts'
 import { placeKey } from '../place.ts'
-import { RESEARCH_LINE, SELF as CONTEXT_SELF, type GuardAnswer } from '../context.ts'
+import { RESEARCH_LINE, SELF as CONTEXT_SELF, unguardedHook, type GuardAnswer } from '../context.ts'
+import { WORK_QUEUE_FRESH_MS } from '../workQueue.ts'
 import { KEHIKKO_SKILLS_HEAD, NOTES_VERSION, UPDATED_HEAD, finishLine, kehikkoSkillText, sessionNotes, type KehikkoSkill } from 'kehikot-module-protocol'
 import { readFileSync as fsRead, writeFileSync as fsWrite } from 'node:fs'
 import { PROGRAM, REFUSAL_EVENTS, SUBAGENT_EVENTS, readActive, type Active, type Program, type Recorded } from '../program.ts'
 import { assign, attach, detach, ignore, readPlaces, sessionsAt, tokenFor, writeSettings, type NamedPlace } from '../record.ts'
-import type { AbsentModule, PlacedGuard } from 'kehikot-module-protocol'
+import type { AbsentModule, PlacedGuard, ServiceProvider, WorkQueue } from 'kehikot-module-protocol'
 import { freshToken, keptDirOf, writeKeptPlace, type DoorsAsked, type HostPlace, type ModuleOn, type SessionDoor } from '../doorConfig.ts'
 import { readKeptGuards } from '../restarted.ts'
 import { existsSync, readFileSync, statSync } from 'node:fs'
@@ -200,7 +201,7 @@ class Watcher implements Viewer {
 /** Long enough for the emulator's write queue and the promises behind an open to have run. */
 const settle = () => new Promise((done) => setTimeout(done, 25))
 
-function world(options: { found?: string | null; able?: boolean; tells?: boolean; lists?: boolean; names?: boolean; configures?: boolean; plugins?: boolean; doors?: (asked: DoorsAsked) => Promise<SessionDoor[] | null>; place?: (asked: DoorsAsked) => Promise<HostPlace | null>; fetch?: typeof fetch; configBase?: string; runtime?: string; asking?: 'fails'; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number; watchEvery?: number | null; subagentOf?: RunsOptions['subagentOf'] } = {}) {
+function world(options: { found?: string | null; able?: boolean; tells?: boolean; lists?: boolean; names?: boolean; configures?: boolean; plugins?: boolean; doors?: (asked: DoorsAsked) => Promise<SessionDoor[] | null>; place?: (asked: DoorsAsked) => Promise<HostPlace | null>; fetch?: typeof fetch; configBase?: string; runtime?: string; asking?: 'fails'; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number; watchEvery?: number | null; subagentOf?: RunsOptions['subagentOf']; services?: RunsOptions['services'] } = {}) {
   const logged: string[] = []
   const ptys: FakePty[] = []
   /* What the stand-in program holds a record for, by folder. */
@@ -249,6 +250,7 @@ function world(options: { found?: string | null; able?: boolean; tells?: boolean
     ...(options.configBase ? { configBase: options.configBase } : {}),
     ...(options.runtime ? { runtime: options.runtime } : {}),
     ...(options.subagentOf ? { subagentOf: options.subagentOf } : {}),
+    ...(options.services ? { services: options.services } : {}),
     screen: headless,
     spawn: (file, args, opts) => {
       const pty = new FakePty(file, args, opts)
@@ -2631,9 +2633,9 @@ describe('a session started here knows its place and its kehikko’s modules, an
       return { doors: [{ module: 'kehikko', name: 'kehikko', url: 'http://127.0.0.1:4180/mcp', transport: 'http' }], modules: [...on], absent: [...absent], messages: null, messagesMore: 0, ...(kehikkoSkills ? { kehikkoSkills: [...kehikkoSkills] } : {}), ...(guards ? { guards: [...guards] } : {}) }
     },
   })
-  const started = async (h: ReturnType<typeof host>, dir: string, place: NamedPlace = KEYED) => {
+  const started = async (h: ReturnType<typeof host>, dir: string, place: NamedPlace = KEYED, services?: RunsOptions['services']) => {
     const configBase = project()
-    const w = world({ fetch, configures: true, plugins: true, doors: h.doors, place: h.place, configBase })
+    const w = world({ fetch, configures: true, plugins: true, doors: h.doors, place: h.place, configBase, services })
     const run = (await w.runs.open(ask(dir, null, place), new Watcher())) as Run
     return { w, run, token: run.token!, configBase }
   }
@@ -2774,24 +2776,42 @@ describe('a session started here knows its place and its kehikko’s modules, an
     expect(readKeptGuards(join(keptDirOf(token, configBase), 'guards.json'))?.guards).toEqual([GUARD_QUEUE])
   })
 
-  test('a session that outlived a restart is told once, at its next prompt, that its tools may be gone and how to queue from the shell', async () => {
+  test('a session that outlived a restart is told once, at its next prompt, that its tools may be gone and how to hand work to the work queue the host names', async () => {
     const dir = project()
-    const queueGuard: PlacedGuard = { ...GUARD_QUEUE, guard: { ...GUARD_QUEUE.guard, rewrite: "'/Users/x/Application Support/queue/bin/kehikot-queue' run --guard -- sh -c {command}" } }
-    const h = host([NOTES], [], [], undefined, [queueGuard])
-    const { w, token, configBase } = await started(h, dir)
+    const lane: WorkQueue = { name: 'Lane Keeper', run: { test: "'/Users/x/Application Support/lanes/bin/lane' take --kind verify -- {command}" }, tool: 'lane_take', marks: [] }
+    let providers: ServiceProvider[] | null = [{ module: 'kehikot.lanes', name: 'Lanes', descriptor: lane, placed: null }]
+    const h = host([NOTES], [], [], undefined, [GUARD_QUEUE])
+    const { w, run, token, configBase } = await started(h, dir, KEYED, async () => providers)
     await w.runs.context('SessionStart', B, token)
     expect(said(await w.runs.context('UserPromptSubmit', B, token)) ?? '').not.toContain('Kehikot restarted')
     /* The marker an earlier process of this module left: it started again in between. */
     writeFileSync(join(keptDirOf(token, configBase), 'boot'), '1-1')
     const told = said(await w.runs.context('UserPromptSubmit', B, token))!
     expect(told).toContain('Kehikot restarted since your last turn')
-    expect(told).toContain("`'/Users/x/Application Support/queue/bin/kehikot-queue' run --kind verify -- <command>`")
+    expect(told).toContain('(lane_take and the others)')
+    expect(told).toContain("through Lane Keeper from the shell instead: `'/Users/x/Application Support/lanes/bin/lane' take --kind verify -- <command>`")
     expect(told).toContain('/mcp reconnect all')
     expect(said(await w.runs.context('UserPromptSubmit', B, token)) ?? '').not.toContain('Kehikot restarted')
     /* A start after a restart has its tools: marked, not told. */
     writeFileSync(join(keptDirOf(token, configBase), 'boot'), '1-1')
     expect(said(await w.runs.context('SessionStart', B, token)) ?? '').not.toContain('Kehikot restarted')
     expect(said(await w.runs.context('UserPromptSubmit', B, token)) ?? '').not.toContain('Kehikot restarted')
+    /* The running session's guard hook says the queue's words, and follows it when none is named any more. */
+    expect(readFileSync(join(run.plugin!, 'kehikot', 'unguarded'), 'utf8')).toBe(unguardedHook(lane))
+    providers = []
+    w.later(WORK_QUEUE_FRESH_MS)
+    await w.runs.workQueue.fresh()
+    expect(readFileSync(join(run.plugin!, 'kehikot', 'unguarded'), 'utf8')).toBe(unguardedHook(null))
+  })
+
+  test('with no work queue named, the note after a restart mentions none', async () => {
+    const dir = project()
+    const { w, token, configBase } = await started(host([NOTES], [], [], undefined, [GUARD_QUEUE]), dir, KEYED, async () => [])
+    await w.runs.context('SessionStart', B, token)
+    writeFileSync(join(keptDirOf(token, configBase), 'boot'), '1-1')
+    const told = said(await w.runs.context('UserPromptSubmit', B, token))!
+    expect(told).toContain('Kehikot restarted since your last turn')
+    expect(told.slice(told.indexOf('Kehikot restarted'))).not.toMatch(/queue/i)
   })
 
   test('its plugin names Kehikot’s stable address for this module when the doors are written on it, and gives the guard time to wait for a restart', async () => {
