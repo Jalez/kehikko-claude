@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { WELL_KNOWN, moduleSkillsSchema, skillPath, skillTextIssue, skillsThatLoad, type KehikkoSkill, type ModuleSkill, type ProvidingManifest } from 'kehikot-module-protocol'
 import { originFor, preferred, registryDir } from 'kehikot-module-protocol/serve'
 
+import { GUARD_MATCHER } from './context.ts'
 import { configDirOf, type SessionDoor } from './doorConfig.ts'
 import { ID, MANIFEST, PREFERRED_PORT } from './manifest.ts'
 import { configDir } from './program.ts'
@@ -389,8 +390,8 @@ export const GUARD_SCRIPT = join(import.meta.dirname, 'guard.sh')
 function writeContextHooks(dir: string, token: string, registration: string, stable: string | null): void {
   const command = (event: string) => `/bin/sh "\${CLAUDE_PLUGIN_ROOT}/context.sh" ${event}`
   const hooks: Record<string, unknown[]> = Object.fromEntries(CONTEXT_EVENTS.map((event) => [event, [{ hooks: [{ type: 'command', command: command(event), timeout: 10 }] }]]))
-  /* Every Bash command, the session's own and its subagents', held to the guards of the modules placed on its kehikko (protocol 2.61.0). */
-  hooks.PreToolUse = [{ matcher: 'Bash', hooks: [{ type: 'command', command: '/bin/sh "${CLAUDE_PLUGIN_ROOT}/guard.sh" PreToolUse', timeout: GUARD_TIMEOUT }] }]
+  /* Every Bash command and file edit, the session's own and its subagents', held to the guards of the modules placed on its kehikko (protocol 2.61.0; edits 2.78.0). */
+  hooks.PreToolUse = [{ matcher: GUARD_MATCHER, hooks: [{ type: 'command', command: '/bin/sh "${CLAUDE_PLUGIN_ROOT}/guard.sh" PreToolUse', timeout: GUARD_TIMEOUT }] }]
   mkdirSync(join(dir, 'hooks'), { mode: 0o700 })
   writeFileSync(join(dir, 'hooks', 'hooks.json'), `${JSON.stringify({ hooks }, null, 2)}\n`, { mode: 0o600 })
   writeFileSync(join(dir, 'context.sh'), readFileSync(CONTEXT_SCRIPT), { mode: 0o700 })

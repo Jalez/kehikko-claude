@@ -1,7 +1,9 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { homedir } from 'node:os'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 
-import { doorCarriesPlace, guardDecision, guardSays, researchLine, sessionNotes, subagentNotes, type NotesPlace, type NotesTold, type PlacedGuard } from 'kehikot-module-protocol'
+import { checkoutOf } from 'kehikot-module-protocol/serve'
+import { doorCarriesPlace, editDecision, editedPaths, guardDecision, guardSays, researchLine, sessionNotes, subagentNotes, type NotesPlace, type NotesTold, type PlacedGuard } from 'kehikot-module-protocol'
 
 import type { DoorsAsked, HostPlace } from './doorConfig.ts'
 import { ID } from './manifest.ts'
@@ -398,8 +400,9 @@ export type GuardAnswer =
  * run it as written — another tool, no command, no guard, or `direct` (KEHIKOT_DIRECT in the session's
  * environment).
  */
-export function guardAnswer(input: unknown, guards: readonly PlacedGuard[], direct = false): GuardAnswer | null {
-  const said = input && typeof input === 'object' ? (input as { tool_name?: unknown; tool_input?: unknown }) : null
+export function guardAnswer(input: unknown, guards: readonly PlacedGuard[], direct = false, files: EditFiles = EDIT_FILES): GuardAnswer | null {
+  const said = input && typeof input === 'object' ? (input as { tool_name?: unknown; tool_input?: unknown; cwd?: unknown }) : null
+  if (said && typeof said.tool_name === 'string' && EDIT_TOOLS.includes(said.tool_name)) return editAnswer(said, guards, direct, files)
   if (!said || said.tool_name !== 'Bash' || !said.tool_input || typeof said.tool_input !== 'object' || Array.isArray(said.tool_input)) return null
   const toolInput = said.tool_input as Record<string, unknown>
   if (typeof toolInput.command !== 'string') return null
@@ -412,6 +415,37 @@ export function guardAnswer(input: unknown, guards: readonly PlacedGuard[], dire
   const updatedInput = { ...toolInput, command: decision.command, ...(chose ? {} : { run_in_background: true }) }
   const note = chose ? '' : ` ${QUEUED_IN_BACKGROUND}`
   return { hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput, additionalContext: guardSays(decision) + note } }
+}
+
+/**
+ * Edit guards (protocol 2.78.0): Claude Code's file-editing tools, held by the same hook. The tools
+ * the hook's matcher names (`GUARD_MATCHER`), and what the answer reads of this computer: the home
+ * folder for `~/` patterns, and which kind of git checkout a file is in (`checkoutOf`).
+ */
+export const EDIT_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
+export const GUARD_MATCHER = ['Bash', ...EDIT_TOOLS].join('|')
+
+export interface EditFiles {
+  home: string | null
+  checkoutOf(path: string): 'main' | 'linked' | null
+}
+
+export const EDIT_FILES: EditFiles = {
+  home: homedir(), // kehikot-storage: allow read-only: the home folder an edit guard's ~/ patterns name
+  checkoutOf: (path) => checkoutOf(path),
+}
+
+/** The answer to one edit: a refusal with the module's words when an edit guard holds any file it edits, else null. */
+function editAnswer(said: { tool_name?: unknown; tool_input?: unknown; cwd?: unknown }, guards: readonly PlacedGuard[], direct: boolean, files: EditFiles): GuardAnswer | null {
+  if (!guards.some((one) => one.guard.tool === 'edit')) return null
+  const cwd = typeof said.cwd === 'string' && isAbsolute(said.cwd) ? said.cwd : null
+  for (const raw of editedPaths(said.tool_name, said.tool_input)) {
+    const path = isAbsolute(raw) ? raw : cwd ? resolve(cwd, raw) : null
+    if (!path) continue
+    const decision = editDecision(guards, path, { home: files.home, checkout: files.checkoutOf(path), env: direct ? { KEHIKOT_DIRECT: '1' } : {} })
+    if (decision.action === 'deny') return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: guardSays(decision) } }
+  }
+  return null
 }
 
 /** What an agent is told when its command was queued and set to run in the background. */
@@ -436,7 +470,7 @@ export async function guard(asked: { session: string; token: string | null; inpu
   const { session, token } = asked
   if (!needs.program.isId(session) || !token || !PLACE_TOKEN.test(token)) return null
   const said = asked.input && typeof asked.input === 'object' ? (asked.input as { tool_name?: unknown }) : null
-  if (said?.tool_name !== 'Bash') return null
+  if (said?.tool_name !== 'Bash' && !(typeof said?.tool_name === 'string' && EDIT_TOOLS.includes(said.tool_name))) return null
   const now = needs.now?.() ?? Date.now()
   const kept = needs.keptGuards(token)
   let guards = kept && now - kept.at < GUARDS_FRESH_MS ? kept.guards : null

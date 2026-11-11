@@ -2664,7 +2664,7 @@ describe('a session started here knows its place and its kehikko’s modules, an
     const plugin = args[args.indexOf('--plugin-dir') + 1]!
     const hooks = JSON.parse(readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8'))
     expect(Object.keys(hooks.hooks)).toEqual(['SessionStart', 'UserPromptSubmit', 'SubagentStart', 'PreToolUse'])
-    expect(hooks.hooks.PreToolUse[0].matcher).toBe('Bash')
+    expect(hooks.hooks.PreToolUse[0].matcher).toBe('Bash|Edit|Write|MultiEdit|NotebookEdit')
     expect(hooks.hooks.PreToolUse[0].hooks[0].command).toBe('/bin/sh "${CLAUDE_PLUGIN_ROOT}/guard.sh" PreToolUse')
     expect(readFileSync(join(plugin, 'guard.sh'), 'utf8')).toBe(readFileSync(join(import.meta.dir, '..', 'guard.sh'), 'utf8'))
     expect(hooks.hooks.SessionStart[0].hooks[0].command).toBe('/bin/sh "${CLAUDE_PLUGIN_ROOT}/context.sh" SessionStart')
