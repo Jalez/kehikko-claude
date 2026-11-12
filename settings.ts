@@ -1,4 +1,4 @@
-import { SETUP_FIELDS } from './setup.ts'
+import { SETUP_FIELDS } from './setupFields.ts'
 import { ACT_ON_MESSAGES_SETTING, KEHIKOT_DIR, REMIND_TURN_SETTING, WAKE_ON_MESSAGES_SETTING, settingsDeclarationSchema, type SettingField } from 'kehikot-module-protocol'
 
 /**

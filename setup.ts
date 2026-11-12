@@ -1,8 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { AGENT_SETUP_CARRIED_PATH, AGENT_SETUP_KEYS, agentSetupSettings, settingValueIssue, type SettingField } from 'kehikot-module-protocol'
+import { AGENT_SETUP_CARRIED_PATH, settingValueIssue } from 'kehikot-module-protocol'
 import { frameOrigins, registryDir } from 'kehikot-module-protocol/serve'
+
+import { SETUP_FIELDS, SETUP_KEYS } from './setupFields.ts'
+
+export { SETUP_FIELDS }
 
 /**
  * "Use every module's tools and skills in Claude Code outside Kehikot too" (protocol 2.91.0,
@@ -22,8 +26,7 @@ import { frameOrigins, registryDir } from 'kehikot-module-protocol/serve'
  * the read's `problem`, so a host never takes the defaults for the person's choice.
  */
 
-export const SETUP_FIELDS: SettingField[] = agentSetupSettings('Claude Code')
-const KEYS = Object.values(AGENT_SETUP_KEYS) as string[]
+const KEYS = SETUP_KEYS
 
 export const isSetupKey = (key: string): boolean => KEYS.includes(key)
 
