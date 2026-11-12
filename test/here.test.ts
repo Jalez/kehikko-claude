@@ -153,7 +153,7 @@ describe('which conversation the door believes', () => {
     const [records] = recordDirs(p)
     mkdirSync(records!, { recursive: true })
     writeFileSync(join(records!, `${A}.jsonl`), '{}\n')
-    expect(await here(A, '', m.needs)).toStartWith(`${SAID} Assigned to writing · thesis (methods).`)
+    expect(await here(A, '', m.needs)).toStartWith(`${SAID} Assigned to writing · space thesis › methods.`)
   })
 })
 
@@ -165,7 +165,7 @@ describe('what it assigns to', () => {
     m.runsIn(A, join(p))
     m.runs.feeds('page-dddddddd')
     m.runs.show('page-dddddddd', { projectPath: p, key: placeKey(WRITING), place: { ...WRITING, partNames: ['Methods'] }, onScreen: true })
-    expect(await here(A, '', m.needs)).toBe(`${SAID} Assigned to writing · thesis (Methods). It’s now this kehikko’s own (it had none).`)
+    expect(await here(A, '', m.needs)).toBe(`${SAID} Assigned to writing · space thesis › Methods. It’s now this kehikko’s own (it had none).`)
     const record = read(p)
     expect(record.sessions[A]?.home).toBe(placeKey(WRITING))
     expect(record.places[placeKey(WRITING)]?.own).toBe(A)
@@ -173,7 +173,7 @@ describe('what it assigns to', () => {
     /* The lists are said again, with where it went: the page on that place puts it on screen. */
     expect(m.told).toEqual([p])
     expect(m.where).toEqual([{ key: placeKey(WRITING), session: A }])
-    expect(await here(A, '', m.needs)).toBe(`${SAID} This conversation is already this kehikko’s own (writing · thesis (Methods)). Nothing changed.`)
+    expect(await here(A, '', m.needs)).toBe(`${SAID} This conversation is already this kehikko’s own (writing · space thesis › Methods). Nothing changed.`)
   })
 
   test('a kehikko with an own conversation keeps it; with “own” this one replaces it', async () => {
@@ -185,11 +185,11 @@ describe('what it assigns to', () => {
     m.runsIn(A, p)
     m.runsIn(B, p)
     expect(await here(A, '', m.needs)).toBe(
-      `${SAID} Assigned to writing · thesis (methods). “tighten the methods” stays this kehikko’s own conversation; type /kehikot-here own to make this one its own instead.`,
+      `${SAID} Assigned to writing · space thesis › methods. “tighten the methods” stays this kehikko’s own conversation; type /kehikot-here own to make this one its own instead.`,
     )
     expect(read(p).places[placeKey(WRITING)]?.own).toBe(C)
     expect(read(p).sessions[A]?.home).toBe(placeKey(WRITING))
-    expect(await here(B, 'own', m.needs)).toBe(`${SAID} Assigned to writing · thesis (methods), as this kehikko’s own: it replaced “tighten the methods”.`)
+    expect(await here(B, 'own', m.needs)).toBe(`${SAID} Assigned to writing · space thesis › methods, as this kehikko’s own: it replaced “tighten the methods”.`)
     expect(read(p).places[placeKey(WRITING)]?.own).toBe(B)
   })
 
@@ -205,7 +205,7 @@ describe('what it assigns to', () => {
     expect(said).toContain('/kehikot-here kehikko: r9z8y7x6  (review)')
     expect(readFileSync(join(p, '.kehikot', 'claude', 'places.json'), 'utf8')).toBe(before)
     /* Named, it goes there. */
-    expect(await here(A, 'kehikko: r9z8y7x6', m.needs)).toStartWith(`${SAID} Assigned to review · thesis (whole epic).`)
+    expect(await here(A, 'kehikko: r9z8y7x6', m.needs)).toStartWith(`${SAID} Assigned to review · space thesis.`)
   })
 
   test('a framed page whose open kehikko has no Claude container is not “on screen”', async () => {
@@ -226,10 +226,10 @@ describe('what it assigns to', () => {
     m.page('page-hhhhhhhh', p, REVIEW)
     const said = await here(A, '', m.needs)
     expect(said).toStartWith(`${SAID} 2 kehikot with a Claude container are on screen in`)
-    expect(said).toContain('/kehikot-here kehikko: k1a2b3c4  (writing · thesis (methods), on screen)')
-    expect(said).toContain('/kehikot-here kehikko: r9z8y7x6  (review · thesis (whole epic), on screen)')
+    expect(said).toContain('/kehikot-here kehikko: k1a2b3c4  (writing · space thesis › methods, on screen)')
+    expect(said).toContain('/kehikot-here kehikko: r9z8y7x6  (review · space thesis, on screen)')
     expect(existsSync(join(p, '.kehikot', 'claude', 'places.json'))).toBe(false)
-    expect(await here(A, 'kehikko: k1a2b3c4 own', m.needs)).toStartWith(`${SAID} Assigned to writing · thesis (methods).`)
+    expect(await here(A, 'kehikko: k1a2b3c4 own', m.needs)).toStartWith(`${SAID} Assigned to writing · space thesis › methods.`)
     /* A page that stops following is forgotten. */
     m.runs.unshow('page-gggggggg')
     expect(m.runs.showingIn(p).map((one) => one.key)).toEqual([placeKey(REVIEW)])
@@ -246,7 +246,7 @@ describe('“off”: disconnecting a conversation no container has on screen', (
     assign(p, REVIEW, A)
     assign(p, WRITING, A, { own: true })
     expect(await here(A, 'off', m.needs)).toBe(
-      `${SAID} Disconnected from writing · thesis (methods). It belongs to no kehikko now, and nothing connects it again on its own; type /kehikot-here in it to connect it to the kehikko on screen.`,
+      `${SAID} Disconnected from writing · space thesis › methods. It belongs to no kehikko now, and nothing connects it again on its own; type /kehikot-here in it to connect it to the kehikko on screen.`,
     )
     const record = read(p)
     expect(record.sessions[A]?.home).toBeUndefined()
@@ -258,7 +258,7 @@ describe('“off”: disconnecting a conversation no container has on screen', (
     expect(await here(A, 'off', m.needs)).toStartWith(`${SAID} This conversation is already disconnected from every kehikko. Nothing changed`)
     /* /kehikot-here again is the person's say: connected, and the mark goes. */
     m.page('page-iiiiiiii', p, WRITING)
-    expect(await here(A, '', m.needs)).toStartWith(`${SAID} Assigned to writing · thesis (methods).`)
+    expect(await here(A, '', m.needs)).toStartWith(`${SAID} Assigned to writing · space thesis › methods.`)
     expect(read(p).sessions[A]?.detached).toBeUndefined()
   })
 
