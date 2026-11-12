@@ -57,7 +57,7 @@ describe('the declaration', () => {
   test('is in the manifest, parses, is the person’s, and defaults to on as the file does', () => {
     expect(MANIFEST.declares.settings).toEqual(SETTINGS)
     expect(settingsDeclarationSchema.parse(SETTINGS)).toEqual(SETTINGS)
-    expect(SETTINGS.map((one) => one.key)).toEqual(["resumeCutOff", "statusLine", "folders", "remindTurnEnd", "wakeOnMessages", "actOnMessages"])
+    expect(SETTINGS.map((one) => one.key)).toEqual(["resumeCutOff", "statusLine", "folders", "remindTurnEnd", "wakeOnMessages", "actOnMessages", "agentSetup.tools", "agentSetup.toolsExcept", "agentSetup.skills", "agentSetup.skillsExcept"])
     expect(SETTINGS[0]).toMatchObject({ key: 'resumeCutOff', type: 'boolean', default: true, scope: 'project', personOnly: true })
     expect(readSettings(project).resumeCutOff).toBe(SETTINGS[0]!.default as boolean)
     expect(SETTINGS[1]).toMatchObject({ key: 'statusLine', label: 'Status line in sessions', type: 'boolean', default: true, scope: 'project', personOnly: true })
@@ -67,12 +67,12 @@ describe('the declaration', () => {
 
 describe('read and change, round trip', () => {
   test('get reads the default with no file, then what the toggle wrote', async () => {
-    expect(await get()).toEqual({ ok: true, values: { resumeCutOff: true, statusLine: true, folders: [], wakeOnMessages: true, actOnMessages: true, remindTurnEnd: true }, file: '.kehikot/claude/settings.json' } as never)
+    expect(await get()).toEqual({ ok: true, values: { resumeCutOff: true, statusLine: true, folders: [], wakeOnMessages: true, actOnMessages: true, remindTurnEnd: true, 'agentSetup.tools': false, 'agentSetup.toolsExcept': [], 'agentSetup.skills': false, 'agentSetup.skillsExcept': [] }, file: '.kehikot/claude/settings.json' } as never)
     writeSettings(project, { resumeCutOff: false })
-    expect((await get()).values).toEqual({ resumeCutOff: false, statusLine: true, folders: [], wakeOnMessages: true, actOnMessages: true, remindTurnEnd: true })
+    expect((await get()).values).toEqual({ resumeCutOff: false, statusLine: true, folders: [], wakeOnMessages: true, actOnMessages: true, remindTurnEnd: true, 'agentSetup.tools': false, 'agentSetup.toolsExcept': [], 'agentSetup.skills': false, 'agentSetup.skillsExcept': [] })
     /* One key written keeps the other. */
     writeSettings(project, { statusLine: false })
-    expect((await get()).values).toEqual({ resumeCutOff: false, statusLine: false, folders: [], wakeOnMessages: true, actOnMessages: true, remindTurnEnd: true })
+    expect((await get()).values).toEqual({ resumeCutOff: false, statusLine: false, folders: [], wakeOnMessages: true, actOnMessages: true, remindTurnEnd: true, 'agentSetup.tools': false, 'agentSetup.toolsExcept': [], 'agentSetup.skills': false, 'agentSetup.skillsExcept': [] })
   })
 
   test("the page's ticket is the person: saved, in the format the toggle writes", async () => {
@@ -117,7 +117,11 @@ describe('who may change it', () => {
     const asked = host(true)
     const said = await set({ key: 'resumeCutOff', value: false, by: 'person', pass: PASS, host: 'http://evil.example' })
     expect(said.outcome).toBe('saved')
-    expect(asked).toHaveLength(1)
+    /* The pass, asked once (the agent setup's carry-over may ask the host too, at its own path). */
+    const passes = asked.filter((one) => one.includes('/host/settings-pass'))
+    expect(passes).toHaveLength(1)
+    expect(asked.every((one) => one.startsWith(`${process.env.KEHIKOT_ORIGINS}/`))).toBe(true)
+    asked.splice(0, asked.length, ...passes)
     expect(asked[0]!.startsWith(`${process.env.KEHIKOT_ORIGINS}/host/settings-pass?`)).toBe(true)
     expect(asked[0]).toContain('module=kehikot.claude')
     expect(asked[0]).toContain('key=resumeCutOff')

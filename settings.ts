@@ -1,3 +1,4 @@
+import { SETUP_FIELDS } from './setup.ts'
 import { ACT_ON_MESSAGES_SETTING, KEHIKOT_DIR, REMIND_TURN_SETTING, WAKE_ON_MESSAGES_SETTING, settingsDeclarationSchema, type SettingField } from 'kehikot-module-protocol'
 
 /**
@@ -53,4 +54,6 @@ export const SETTINGS: SettingField[] = settingsDeclarationSchema.parse([
   REMIND_TURN_SETTING,
   WAKE_ON_MESSAGES_SETTING,
   ACT_ON_MESSAGES_SETTING,
+  /* "Use every module's tools and skills in Claude Code outside Kehikot too" (protocol 2.91.0): machine settings. See `setup.ts`. */
+  ...SETUP_FIELDS,
 ])

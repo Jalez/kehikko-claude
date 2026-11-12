@@ -2,6 +2,7 @@ import { PROJECT_ID, doorContext, manifestSchema, readTellFinished, tellFinished
 import { answerMessageTool, messageToolsFor, establishBuild, hostHasProject, hostVouches, refuseTicket, sameTicket, settingsDoor, type Reply, type Stream } from 'kehikot-module-protocol/serve'
 import { foldersIssue } from './folders.ts'
 import { SETTINGS, SETTINGS_FILE } from './settings.ts'
+import { isSetupKey, readSetup, writeSetup } from './setup.ts'
 
 import { TICKET, elsewhereOf, sameProject, theRuns, type Elsewhere, type Run, type Runs } from './live.ts'
 import { ID, MANIFEST as DECLARED, VERSION } from './manifest.ts'
@@ -97,12 +98,17 @@ const settings = settingsDoor({
   ticket: TICKET,
   vouch: (pass, about) => hostVouches(pass, about, { env: process.env }),
   read: async (project) => {
+    /* The agent setup is this computer's (`setup.ts`): read with or without a project. */
+    const machine = await readSetup()
+    /* A choice not yet carried over is said where the host reads the choice: with no project. */
+    if (project === null) return { values: machine.values, ...(machine.problem ? { problem: machine.problem } : {}) }
     const root = projectRoot(project)
-    if (!root.ok) return { values: {}, problem: root.error }
-    if (!(await hostCheck.has(root.value))) return { values: {}, problem: `${root.value} is not a project open in Kehikot.` }
-    return { values: { ...readSettings(root.value) }, file: SETTINGS_FILE }
+    if (!root.ok) return { values: machine.values, problem: root.error }
+    if (!(await hostCheck.has(root.value))) return { values: machine.values, problem: `${root.value} is not a project open in Kehikot.` }
+    return { values: { ...readSettings(root.value), ...machine.values }, file: SETTINGS_FILE }
   },
   write: async (project, key, value) => {
+    if (isSetupKey(key)) return writeSetup(key, value)
     const root = projectRoot(project)
     if (!root.ok) return root.error
     if (!(await hostCheck.has(root.value))) return `${root.value} is not a project open in Kehikot.`

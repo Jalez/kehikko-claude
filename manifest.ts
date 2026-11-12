@@ -212,6 +212,8 @@ export const MANIFEST: Manifest = manifestSchema.parse({
   services: {
     'conversations.finder': { name: 'Claude', program: 'Claude Code', find: '/api/conversations/find', bring: '/api/conversations/bring' },
     'agent.tasks': { name: 'Claude', program: 'Claude Code', start: '/api/tasks/start', view: '/app?session={session}' },
+    /* Its program's setup outside Kehikot (protocol 2.91.0): this module holds the choice (`setup.ts`); the host writes Claude Code's config. */
+    'agent.setup': { name: 'Claude', program: 'Claude Code', cli: 'claude' },
   },
   health: '/healthz',
 })
