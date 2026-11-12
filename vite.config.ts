@@ -2,10 +2,11 @@ import { resolve } from 'node:path'
 
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
-import { doors, originFor, serves } from 'kehikot-module-protocol/serve'
+import { beforeDoors, doors, originFor, serves } from 'kehikot-module-protocol/serve'
 import { defineConfig, type Plugin } from 'vite'
 
 import { BUILD, MANIFEST, MOST_READ, TICKET, answer, ours, servingAt, stream } from './doors.ts'
+import { HOST_DOOR } from './hostServices.ts'
 import { serveSessions } from './live.ts'
 import { ID, PREFERRED_PORT } from './manifest.ts'
 
@@ -64,6 +65,8 @@ export default defineConfig({
   plugins: [
     serves({ id: ID, prefer: PREFERRED_PORT }),
     sockets(),
+    /* The host's own services (protocol 2.88.0, hostServices.ts): they read headers, which the doors do not hand on. */
+    beforeDoors(HOST_DOOR, { name: 'claude-host-services' }),
     doors({ manifest: MANIFEST, answer, stream, build: BUILD, page: { title: 'Claude', ticket: TICKET }, maxBodyBytes: MOST_READ, ours }),
     react(),
     tailwindcss(),

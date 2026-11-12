@@ -838,6 +838,16 @@ export async function answer(
     return said.ok ? ok(said) : bad(said.error)
   }
 
+  /* Where one conversation is, for the page that shows it alone (`agent.tasks`'s view, `/app?session=`):
+     the project and place of the run holding it, or of a task started here. A read, through the
+     page's ticket like the one above. */
+  if (path === '/api/task' && method === 'GET') {
+    const id = query.get('session') ?? ''
+    if (!PROGRAM.isId(id)) return bad('that is not a session id')
+    const at = theRuns().taskAt(id)
+    return ok({ ok: true, at: at ? { projectPath: at.projectPath, place: { epic: at.place.epic, parts: at.place.parts, kehikko: at.place.kehikko, kehikkoName: at.place.kehikkoName ?? '' } } : null })
+  }
+
   /* Bring the entries an older release filed under this kehikko's row number
      across to its key (see `rekey` in record.ts). A write, so a POST: the read
      above never moves anything. */

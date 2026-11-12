@@ -317,6 +317,8 @@ const ENTER_AFTER = 250
 const ASLEEP_FOR = 24 * 60 * 60_000
 /** How long a session resumed for a message, opened here, is given to come to its prompt before what came is typed. */
 const RESUME_READY_MS = 60_000
+/** The place of the project itself: no epic, no parts, no kehikko (an Inbox line carries no place for it, `rowPlace`). */
+export const NOWHERE: NamedPlace = { epic: null, parts: [], kehikko: null }
 /**
  * A sighting of the prompt (`agents --json` saying `idle`) has to be this much later than a line
  * sent to it to count as the program having taken that line: measured on 2.1.310, a process still
@@ -2205,6 +2207,68 @@ export class Runs {
     }
     return false
   }
+
+  /**
+   * Start a NEW conversation for one of Kehikot's own tasks (`agent.tasks`, protocol 2.88.0), fed
+   * `brief` as its first prompt, filed under `place` like any conversation a place starts. The way
+   * `resumeFor` starts one: `start` with no viewer, in the background with the brief as its first
+   * prompt (`launch`), or — when this copy cannot run one there — in this module's terminal, and the
+   * brief typed in once it is at its prompt. Its id is the one `find`, `bring` and the record use.
+   */
+  async startTask(projectPath: string, place: NamedPlace, brief: string, title: string): Promise<{ ok: true; session: string } | { ok: false; why: string }> {
+    const root = projectRoot(projectPath)
+    if (!root.ok) return { ok: false, why: root.error }
+    const project = root.value
+    this.know(project)
+    /* A first prompt that reads as a flag is not given on the command line (`backgroundArgs`): it is typed in. */
+    const line = brief.trimStart().startsWith('-') ? undefined : brief
+    const run = await this.start(project, this.program.newId(), {
+      what: 'session',
+      projectPath: project,
+      projectId: projectIdAt(project),
+      place,
+      session: null,
+      unwatched: true,
+      cols: 120,
+      rows: 40,
+      ...(line ? { line } : {}),
+    })
+    if ('code' in run) {
+      this.log(`claude: a task could not be started in ${project} — ${run.why}`)
+      return { ok: false, why: run.why }
+    }
+    const session = run.settled ?? run.id
+    this.tasks.set(session, { projectPath: project, place })
+    if (this.tasks.size > 256) this.tasks.delete(this.tasks.keys().next().value!)
+    /* Filed under its place at once, with its title, before its program has recorded it. */
+    const written = born(project, place, session, run.token, { label: title })
+    if (!written.ok) this.log(`claude: ${written.error}`)
+    this.changed()
+    this.log(`claude: a task started ${session} in ${project}${run.lined ? ' with its brief as its first prompt' : ', and its brief is typed in at its prompt'}`)
+    if (!run.lined) {
+      void (async () => {
+        const until = this.now() + RESUME_READY_MS
+        while (!run.ended && this.now() < until) {
+          if (this.standing(run).state === 'idle') return void this.deliver(run.settled ?? run.id, brief)
+          await new Promise((done) => setTimeout(done, 500))
+        }
+      })()
+    }
+    return { ok: true, session }
+  }
+
+  /**
+   * Where a conversation is, for the page that shows it alone (`agent.tasks`'s view): the project and
+   * place of the run holding it, or of a task started here. Null for one this process knows nothing of.
+   */
+  taskAt(session: string): { projectPath: string; place: NamedPlace } | null {
+    const run = this.find(session)
+    if (run && run.what === 'session' && !run.ended) return { projectPath: run.projectPath, place: run.at ?? run.place ?? this.tasks.get(session)?.place ?? NOWHERE }
+    return this.tasks.get(session) ?? null
+  }
+
+  /** The tasks started here (`startTask`), by session: where each was started. */
+  private readonly tasks = new Map<string, { projectPath: string; place: NamedPlace }>()
 
   /** Whether the person allowed the session behind a token to act on messages (protocol 2.43.0): its project's setting. */
   actsOnMessages(token: string): boolean {

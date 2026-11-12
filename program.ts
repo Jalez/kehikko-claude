@@ -264,6 +264,12 @@ export interface Recorded {
   /** The pull requests the session opened or pushed to, newest last. */
   prs?: { number: number; url: string }[]
   /**
+   * The git branches its rows say it was on (`gitBranch`), oldest first, out of the head and the
+   * tail of the record this module already reads: what `conversations.finder` matches a change's
+   * branch against. Only that field is read off a row; nothing of the conversation.
+   */
+  branches?: string[]
+  /**
    * The sessions this conversation was carried on in, oldest first. Claude
    * Code resumes a conversation under a NEW id and writes `continued-in`
    * into the old record; the old id is then a step behind the conversation.
@@ -697,10 +703,36 @@ export function tailOf(text: string): Tail {
   return out
 }
 
-/** What one record says, read once per version of it (its size and when it last changed). */
-const read = new Map<string, { stamp: string; first: string; tail: Tail }>()
+/** How many branches of one record are kept. */
+const BRANCHES_MOST = 16
 
-async function described(file: string, size: number, mtimeMs: number): Promise<{ first: string; tail: Tail }> {
+/**
+ * The git branches named by `gitBranch` on the rows of a slice of a record, oldest first, each once.
+ * Claude Code writes the branch the session's folder was on into every message row. Read by that
+ * field's spelling alone: nothing else of a row is parsed. `HEAD` (a detached checkout) is no branch.
+ */
+export function branchesIn(text: string): string[] {
+  const out: string[] = []
+  for (const found of text.matchAll(/"gitBranch":"((?:[^"\\\n]|\\.){1,400})"/g)) {
+    let branch = ''
+    try {
+      branch = String(JSON.parse(`"${found[1]}"`))
+    } catch {
+      continue
+    }
+    branch = branch.trim()
+    if (!branch || branch === 'HEAD' || /[\u0000-\u001f\u007f]/.test(branch)) continue
+    const at = out.indexOf(branch)
+    if (at >= 0) out.splice(at, 1)
+    out.push(branch)
+  }
+  return out.slice(-BRANCHES_MOST)
+}
+
+/** What one record says, read once per version of it (its size and when it last changed). */
+const read = new Map<string, { stamp: string; first: string; tail: Tail; branches: string[] }>()
+
+async function described(file: string, size: number, mtimeMs: number): Promise<{ first: string; tail: Tail; branches: string[] }> {
   const stamp = `${size}@${mtimeMs}`
   const known = read.get(file)
   if (known?.stamp === stamp) return known
@@ -720,11 +752,13 @@ async function described(file: string, size: number, mtimeMs: number): Promise<{
       await handle.close()
     }
   } catch {
-    return { first: '', tail: tailOf('') }
+    return { first: '', tail: tailOf(''), branches: [] }
   }
   /* The first prompt never changes once written, so one found is kept across versions. */
   const first = known?.first || firstPrompt(head)
-  const said = { stamp, first, tail: tailOf(end) }
+  /* In a short record the head and the tail are the same bytes: read once. */
+  const branches = branchesIn(size <= HEAD_BYTES ? head : `${head}\n${end}`)
+  const said = { stamp, first, tail: tailOf(end), branches }
   read.set(file, said)
   return said
 }
@@ -737,13 +771,14 @@ const SESSION_FILE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 async function recorded(id: string, file: string): Promise<Recorded | null> {
   try {
     const { mtimeMs, size } = await stat(file)
-    const { first, tail } = await described(file, size, mtimeMs)
+    const { first, tail, branches } = await described(file, size, mtimeMs)
     return {
       id,
       label: tail.name || tail.title || first,
       firstPrompt: first,
       lastPrompt: tail.lastPrompt,
       prs: tail.prs,
+      ...(branches.length ? { branches } : {}),
       next: tail.next.filter((one) => one !== id),
       lastActive: mtimeMs,
     }
