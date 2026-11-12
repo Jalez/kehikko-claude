@@ -6,6 +6,7 @@ import { KEHIKOT_DIR, kehikotDir, moduleDir, moduleFile, within } from 'kehikot-
 import type { CutOff } from './cutoff.ts'
 import { foldersOf } from './folders.ts'
 import { ID } from './manifest.ts'
+import type { SpaceStep } from './spaces.ts'
 import { isKehikkoKey, placeKey, readPlaceKey, sortedParts, type Place } from './place.ts'
 
 /** A place token's spelling (protocol 2.4.0, `PLACE_TOKEN`). Written out here until the protocol pin moves. */
@@ -260,6 +261,8 @@ export interface NamedPlace extends Place {
    * words (see `Notice` in live.ts).
    */
   partNames?: string[]
+  /** The space the host said the place is (`context.space`, root first). Never stored, never compared: carried to name the place as a space. */
+  space?: SpaceStep[]
 }
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string }
