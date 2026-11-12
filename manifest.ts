@@ -43,6 +43,7 @@ export const HELP = {
         'The session is yours. No agent can type into it as you, start one or end one; another session’s message is typed in marked as theirs.',
         'A message is never typed into a session waiting for your answer, or with something typed and not sent: it waits.',
         'Claude Code keeps its own conversations. Which place each belongs to is kept in the project’s .kehikot folder.',
+        'When you adopt a pull request into an epic, Kehikot itself may ask which conversation worked on it, file that one under the epic if it belongs to no other place, and start a new one with a brief for a task you started. No agent or other module can.',
       ],
     },
   ],
@@ -204,6 +205,13 @@ export const MANIFEST: Manifest = manifestSchema.parse({
     prompt: false,
     /* "Resume conversations cut off by a restart", in the host's Settings too (protocol 2.15.0). See `settings.ts`. */
     settings: SETTINGS,
+  },
+  /* What it provides to the HOST (protocol 2.88.0, hostServices.ts): which conversation worked on a
+     change and filing it under a place, and a new conversation fed a brief. Only the host's own
+     server is answered (`vouchHost`). */
+  services: {
+    'conversations.finder': { name: 'Claude', program: 'Claude Code', find: '/api/conversations/find', bring: '/api/conversations/bring' },
+    'agent.tasks': { name: 'Claude', program: 'Claude Code', start: '/api/tasks/start', view: '/app?session={session}' },
   },
   health: '/healthz',
 })

@@ -66,9 +66,20 @@ export interface Api {
    * stops following.
    */
   feed?(notices: boolean, heard: { state(stated: Stated): void; notice(notice: Notice): void; activity?(items: ActivityRow[]): void; sessions?(event?: SessionsChanged): void; context?(said: Metered): void; attached?(): void }, project?: string | null, page?: string): () => void
+  /** Where one conversation is, for the page that shows it alone (`agent.tasks`'s view); null when this server knows nothing of it. */
+  task?(session: string): Promise<TaskAt | null>
+}
+
+/** A conversation's project and place, as `/api/task` says them. */
+export interface TaskAt {
+  projectPath: string
+  place: { epic: string | null; parts: string[]; kehikko: { key: string } | { id: number } | null; kehikkoName: string }
 }
 
 export const api: Api = {
+  async task(session) {
+    return answered(await ask<{ ok: true; at: TaskAt | null }>('./api/task', { query: { session }, ticket: true })).at
+  },
   async place(projectPath, key, projectId) {
     return answered(await ask<Listing>('./api/place', { query: { projectPath, key, ...(projectId ? { projectId } : {}) }, ticket: true }))
   },

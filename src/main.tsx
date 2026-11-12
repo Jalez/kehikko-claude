@@ -9,6 +9,7 @@ import 'kehikot-module-protocol/client'
 import { mountPage } from 'kehikot-module-protocol/client/mount'
 import { App } from './app.tsx'
 import { keepFramesComing } from './view/frames.ts'
+import { TaskPage, taskSession } from './view/task.tsx'
 
 /* Before anything on this page asks for a frame. WebKit serves a framed page
    one animation frame every ten seconds in some states, and xterm draws only
@@ -16,4 +17,6 @@ import { keepFramesComing } from './view/frames.ts'
    timer instead. `src/view/frames.ts` is Terminal's, with its measurements. */
 keepFramesComing()
 
-mountPage('root', <App />)
+/* `/app?session=<id>`: one conversation alone, as the host frames a task it started (agent.tasks, view/task.tsx). */
+const task = taskSession(location.search)
+mountPage('root', task ? <TaskPage session={task} /> : <App />)
