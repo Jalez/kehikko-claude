@@ -72,8 +72,8 @@ describe('the door', () => {
     expect(said?.isError).toBe(true)
   })
 
-  test('the person’s own entry, with no token, lists none', async () => {
-    expect(hasMessaging(await listed(new URLSearchParams()))).toBe(false)
+  test('the person’s own entry, with no token, lists them too: a tool a caller cannot use yet answers why (protocol 2.96.0)', async () => {
+    expect(hasMessaging(await listed(new URLSearchParams()))).toBe(true)
   })
 })
 
@@ -133,7 +133,7 @@ describe('the notes say what the door has', () => {
     expect(hasMessaging(await listed(new URL(doors[0]!.url).searchParams))).toBe(true)
   })
 
-  test('a session with no tokened door of this module is not promised them, and is told how to get them — and the door has none', async () => {
+  test('a session with no tokened door of this module is not promised them, and is told how to get them — the door lists them anyway and answers why', async () => {
     for (const doors of [null, [{ name: 'kehikko', url: `http://127.0.0.1:4170/mcp?kehikot-place=${TOKEN}`, module: 'kehikko' }], [{ name: OWN_DOOR, url: `http://127.0.0.1:${PORT}/mcp` }]]) {
       const text = await notes(doors)
       expect(text).not.toContain('can message each other: send_message')
@@ -141,7 +141,7 @@ describe('the notes say what the door has', () => {
       expect(text).toContain('but not from this conversation')
       expect(text).toContain('open it again from the Claude container')
     }
-    expect(hasMessaging(await listed(new URLSearchParams()))).toBe(false)
+    expect(hasMessaging(await listed(new URLSearchParams()))).toBe(true)
   })
 })
 
