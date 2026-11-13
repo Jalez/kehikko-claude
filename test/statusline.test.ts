@@ -1,6 +1,6 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
 import { spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -65,11 +65,22 @@ async function plugin(own: string | null, runtime: string | null = null): Promis
   return dir
 }
 
+const jobs: string[] = []
+afterEach(async () => {
+  const pending = jobs.splice(0)
+  const end = Date.now() + 10_000
+  while (pending.some((dir) => readdirSync(dir).length > 0) && Date.now() < end) await new Promise((done) => setTimeout(done, 20))
+})
+
 /** Run a command line as Claude Code would (bash, the JSON on stdin), and what came out, as bytes. */
 function ran(argv: string[], cwd: string, env: NodeJS.ProcessEnv = {}): Promise<{ code: number | null; out: Buffer; err: Buffer; ms: number }> {
   const started = Date.now()
   return new Promise((done) => {
-    const child = spawn(argv[0]!, argv.slice(1), { cwd, env: { PATH: '/usr/bin:/bin', ...env } })
+    /* The script posts from a detached background job that deletes its temp file when it is done; a
+     * private TMPDIR per run lets a test wait for exactly that, so no post outlives its own test. */
+    const tmp = mkdtempSync(join(scratch, 'tmp-'))
+    jobs.push(tmp)
+    const child = spawn(argv[0]!, argv.slice(1), { cwd, env: { PATH: '/usr/bin:/bin', TMPDIR: tmp, ...env } })
     const out: Buffer[] = []
     const err: Buffer[] = []
     child.stdout.on('data', (chunk: Buffer) => out.push(chunk))
