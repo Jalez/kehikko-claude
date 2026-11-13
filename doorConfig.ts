@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { askedHosts, doorConfigProblems, doorUrl, keptFolderName, legacyKeptFolderName, stableDoors, startingHost, tokenOnDoor } from 'kehikot-module-protocol/serve'
+import { askedHosts, loopbackOrigin, doorConfigProblems, doorUrl, keptFolderName, legacyKeptFolderName, stableDoors, startingHost, tokenOnDoor } from 'kehikot-module-protocol/serve'
 
 import { ID } from './manifest.ts'
 import { PLACE_TOKEN } from './record.ts'
@@ -61,7 +61,7 @@ export const OWN_DOOR = 'kehikko-claude'
  */
 export function withOwnDoor(doors: readonly SessionDoor[] | null, host: string | null, token: string): SessionDoor[] | null {
   if (doors?.some((door) => door.module === ID)) return [...doors]
-  if (!host || !PLACE_TOKEN.test(token)) return doors ? [...doors] : null
+  if (!host || !loopbackOrigin(host) || !PLACE_TOKEN.test(token)) return doors ? [...doors] : null
   const own: SessionDoor = { module: ID, name: OWN_DOOR, url: doorUrl(host, ID, token), transport: 'http' }
   /* A door of another module under this name would be one server in the config: this module's own wins, as its notes name it. */
   return [...(doors ?? []).filter((door) => door.name !== OWN_DOOR), own]
