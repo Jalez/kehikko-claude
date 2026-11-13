@@ -74,6 +74,13 @@ export interface Api {
 export interface TaskAt {
   projectPath: string
   place: { epic: string | null; parts: string[]; kehikko: { key: string } | { id: number } | null; kehikkoName: string }
+  /**
+   * The conversation, when the id asked was the handle `start` answered (protocol 2.99.0): its own id
+   * once Claude Code has said it, null while it is still starting. Absent from an older server.
+   */
+  session?: string | null
+  /** Why Claude Code could not start it, for a handle whose start failed. */
+  failed?: string
 }
 
 export const api: Api = {

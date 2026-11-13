@@ -859,6 +859,20 @@ export interface Stated {
  * server knows every running session's state, label and place, so it is the one that
  * writes the list, and a page only passes it on. The shape is the protocol's `ActivityItem`.
  */
+/**
+ * The keys this process gave conversations it placed but does not run (`/kehikot-here`, protocol
+ * 2.96.0), by key: the project they are in. How `tell_finished` with a `placeToken` (protocol 2.99.0)
+ * finds an adopted conversation's record without being told the project. The records are read too.
+ */
+const placedKeys = new Map<string, string>()
+
+/** A key given to a conversation placed here (here.ts). */
+export function rememberPlaced(token: string, projectPath: string): void {
+  placedKeys.delete(token)
+  placedKeys.set(token, projectPath)
+  while (placedKeys.size > 500) placedKeys.delete(placedKeys.keys().next().value!)
+}
+
 export interface ActivityRow {
   id: string
   state: 'working' | 'attention' | 'done'
@@ -2238,10 +2252,12 @@ export class Runs {
    * prompt (`launch`), or — when this copy cannot run one there — in this module's terminal, and the
    * brief typed in once it is at its prompt. Its id is the one `find`, `bring` and the record use.
    */
-  async startTask(projectPath: string, place: NamedPlace, brief: string, title: string): Promise<{ ok: true; session: string } | { ok: false; why: string }> {
+  async startTask(projectPath: string, place: NamedPlace, brief: string, title: string, handle?: string): Promise<{ ok: true; session: string } | { ok: false; why: string }> {
     const root = projectRoot(projectPath)
     if (!root.ok) return { ok: false, why: root.error }
     const project = root.value
+    /* The handle `start` answered (protocol 2.99.0) is where the task is, until the program says its id. */
+    if (handle) this.taskHandles.set(handle, { session: null, projectPath: project, place })
     this.know(project)
     /* A first prompt that reads as a flag is not given on the command line (`backgroundArgs`): it is typed in. */
     const line = brief.trimStart().startsWith('-') ? undefined : brief
@@ -2258,24 +2274,36 @@ export class Runs {
     })
     if ('code' in run) {
       this.log(`claude: a task could not be started in ${project} — ${run.why}`)
+      if (handle) this.taskHandles.set(handle, { session: null, projectPath: project, place, failed: run.why })
       return { ok: false, why: run.why }
     }
     const session = run.settled ?? run.id
     this.tasks.set(session, { projectPath: project, place })
+    if (handle) this.taskHandles.set(handle, { session, projectPath: project, place })
+    while (this.taskHandles.size > 256) this.taskHandles.delete(this.taskHandles.keys().next().value!)
     if (this.tasks.size > 256) this.tasks.delete(this.tasks.keys().next().value!)
     /* Filed under its place at once, with its title, before its program has recorded it. */
     const written = born(project, place, session, run.token, { label: title })
     if (!written.ok) this.log(`claude: ${written.error}`)
     this.changed()
     this.log(`claude: a task started ${session} in ${project}${run.lined ? ' with its brief as its first prompt' : ', and its brief is typed in at its prompt'}`)
+    /* In this module's terminal: started once it is at its prompt and has the brief (this runs after
+       `start` answered, protocol 2.99.0, so it is waited for). One that ends first did not start. */
     if (!run.lined) {
-      void (async () => {
-        const until = this.now() + RESUME_READY_MS
-        while (!run.ended && this.now() < until) {
-          if (this.standing(run).state === 'idle') return void this.deliver(run.settled ?? run.id, brief)
-          await new Promise((done) => setTimeout(done, 500))
+      const until = this.now() + RESUME_READY_MS
+      while (!run.ended && this.now() < until) {
+        if (this.standing(run).state === 'idle') {
+          void this.deliver(run.settled ?? run.id, brief)
+          return { ok: true, session }
         }
-      })()
+        await new Promise((done) => setTimeout(done, 250))
+      }
+      if (run.ended) {
+        const said = this.backgroundRefused.get(project)
+        const why = `${this.program.name} ended before it was ready for the task${said ? ` (${said.replace(/\.$/, '')})` : ''}`
+        if (handle) this.taskHandles.set(handle, { session: null, projectPath: project, place, failed: why })
+        return { ok: false, why }
+      }
     }
     return { ok: true, session }
   }
@@ -2284,7 +2312,11 @@ export class Runs {
    * Where a conversation is, for the page that shows it alone (`agent.tasks`'s view): the project and
    * place of the run holding it, or of a task started here. Null for one this process knows nothing of.
    */
-  taskAt(session: string): { projectPath: string; place: NamedPlace } | null {
+  taskAt(asked: string): { projectPath: string; place: NamedPlace } | null {
+    /* A handle `start` answered (protocol 2.99.0): its conversation once known, where it was started until then. */
+    const handled = this.taskHandles.get(asked)
+    if (handled && !handled.session) return { projectPath: handled.projectPath, place: handled.place }
+    const session = handled?.session ?? asked
     const run = this.find(session)
     if (run && run.what === 'session' && !run.ended) return { projectPath: run.projectPath, place: run.at ?? run.place ?? this.tasks.get(session)?.place ?? NOWHERE }
     return this.tasks.get(session) ?? null
@@ -2292,6 +2324,23 @@ export class Runs {
 
   /** The tasks started here (`startTask`), by session: where each was started. */
   private readonly tasks = new Map<string, { projectPath: string; place: NamedPlace }>()
+
+  /** What Claude Code last said when it would not run a conversation in the background, by project: the reason a task gives when its terminal also ends. */
+  private readonly backgroundRefused = new Map<string, string>()
+
+  /** The handles `start` answered (protocol 2.99.0), by handle: the conversation once its program said it. */
+  private readonly taskHandles = new Map<string, { session: string | null; projectPath: string; place: NamedPlace; failed?: string }>()
+
+  /** A handle `start` answered (protocol 2.99.0), and the conversation it stands for (null while starting); null for anything else. */
+  handled(asked: string): { session: string | null; failed?: string } | null {
+    const one = this.taskHandles.get(asked)
+    return one ? { session: one.session, ...(one.failed ? { failed: one.failed } : {}) } : null
+  }
+
+  /** The conversation a handle `start` answered stands for, once known; the id itself for anything else. */
+  sessionOf(asked: string): string {
+    return this.taskHandles.get(asked)?.session ?? asked
+  }
 
   /** Whether the person allowed the session behind a token to act on messages (protocol 2.43.0): its project's setting. */
   actsOnMessages(token: string): boolean {
@@ -3004,6 +3053,7 @@ export class Runs {
         else id = woke.session
       } else {
         this.log(`claude: ${settled ?? 'a new conversation'} could not be run in the background (${woke.why}) — opened in this terminal instead, where it ends with this module`)
+        this.backgroundRefused.set(projectPath, woke.why)
       }
     }
 
@@ -3399,6 +3449,51 @@ export class Runs {
     return toldReply(told, run.secret !== null)
   }
 
+  /** How the turns of conversations this module does not run ended (`tellAdopted`), by session: an Inbox line each. */
+  private readonly toldAdopted = new Map<string, ActivityRow>()
+
+  /**
+   * `tell_finished` from a conversation placed with this module after it started (protocol 2.99.0): it
+   * has no token on its door's URL, so it gives its key (`placeToken`), and no run here holds it. Its
+   * record is found by the key, and how its turn ended is its own Inbox line, as a run's would be.
+   * Null for a key no record of a known project holds.
+   */
+  tellAdopted(token: string, kind: string, label: string, choices: readonly string[] = []): string | null {
+    if (!PLACE_TOKEN.test(token) || !(TURN_KINDS as readonly string[]).includes(kind)) return null
+    const projects = [...new Set([...(placedKeys.has(token) ? [placedKeys.get(token)!] : []), ...this.projects])]
+    for (const projectPath of projects) {
+      const read = readPlaces(projectPath)
+      const hit = read.ok ? byToken(read.value, token) : null
+      if (!read.ok || !hit) continue
+      const words = label.replace(/\s+/g, ' ').trim().slice(0, kind === 'needs-decision' ? 1000 : 120)
+      const told = { kind: kind as TurnKind, label: words, ...(choices.length ? { choices: [...choices] } : {}) }
+      const end = turnEnd({ told, waking: 0 })
+      const at = hit.home ? readPlaceKey(hit.home) : null
+      const place: NonNullable<ActivityRow['place']> = {}
+      if (at?.epic) place.epic = at.epic
+      if (at && at.parts.length > 0 && at.parts.length <= PLACE_PARTS) place.parts = [...at.parts]
+      if (at?.kehikko && 'key' in at.kehikko) place.kehikko = at.kehikko.key
+      const entry = read.value.sessions[hit.id]
+      const question = turnQuestion(end, { module: ID, session: hit.id })
+      this.toldAdopted.delete(hit.id)
+      this.toldAdopted.set(hit.id, {
+        id: hit.id,
+        state: end.state,
+        label: clip((end.label ?? entry?.label ?? '').replace(/\s+/g, ' ').trim() || 'Claude session', ACTIVITY_LABEL),
+        ...(Object.keys(place).length > 0 ? { place } : {}),
+        since: this.now(),
+        detail: clip(end.detail, ACTIVITY_DETAIL),
+        ...(end.event ? { event: end.event } : {}),
+        ...(question ? { question } : {}),
+        project: projectPath,
+      })
+      while (this.toldAdopted.size > 64) this.toldAdopted.delete(this.toldAdopted.keys().next().value!)
+      this.changed()
+      return toldReply({ kind: told.kind, label: end.label ?? words }, false)
+    }
+    return null
+  }
+
   /** A subagent finished: an item when it was research, or said so while it ran (research.ts). */
   private async subagentDone(run: Run, agent: string, agentType: string | null): Promise<void> {
     const started = run.agents.get(agent)
@@ -3668,7 +3763,7 @@ export class Runs {
   activity(project: string | null = null): ActivityRow[] {
     /* The sessions, and nothing about conversations that belong to no kehikko: that is said on the
        page of the kehikko that has none, not in the Inbox. A host closes an item absent from the list. */
-    return activityRows(this.runs.values(), project, this.unviewed.values(), [...this.extras.values()].flat())
+    return activityRows(this.runs.values(), project, this.unviewed.values(), [...this.extras.values()].flat().concat([...this.toldAdopted.values()]))
       .filter((row) => !this.outlived(row))
       .slice(0, ACTIVITY_ITEMS)
   }

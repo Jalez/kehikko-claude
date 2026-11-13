@@ -66,10 +66,15 @@ if [ "$1" = "--help" ]; then
     [ -z "$STANDIN_MUTE" ] && echo "  --settings <file-or-json>  Path to a settings JSON file or a JSON string to load additional settings from"
     [ -z "$STANDIN_NOMCP" ] && echo "  --mcp-config <configs...>  Load MCP servers from JSON files or strings (space-separated)"
     [ -z "$STANDIN_NOPLUGINS" ] && echo "  --plugin-dir <path>      Load a plugin from a directory or .zip for this session only"
+    [ -n "$STANDIN_BG" ] && echo "  --bg, --background       Start the session in the background and return immediately"
     if [ -z "$STANDIN_NOAGENTS" ]; then
       echo "Commands:"
       echo "  agents [options]         Manage background agents"
       echo "  attach <id|name>         Open a background session in this terminal"
+      if [ -n "$STANDIN_BG" ]; then
+        echo "  stop|kill <id>           Stop a background session"
+        echo "  rm <id>                  Delete a background session"
+      fi
     fi
   fi
   exit 0
@@ -79,7 +84,7 @@ config="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 running="$config/sessions"
 jobs="$config/jobs"
 
-if [ "$1" = "agents" ] || [ "$1" = "attach" ] || [ "$1" = "stop" ] || [ "$1" = "--bg" ]; then
+if [ "$1" = "agents" ] || [ "$1" = "attach" ] || [ "$1" = "stop" ] || [ "$1" = "rm" ] || [ "$1" = "--bg" ]; then
   if [ -n "$STANDIN_OLD$STANDIN_NOAGENTS" ]; then echo "error: unknown option or command '$1 $2'" >&2; exit 1; fi
 fi
 
@@ -94,6 +99,25 @@ if [ "$1" = "agents" ]; then
   $(cat "$file")"
   done
   if [ -z "$out" ]; then echo "[]"; else printf '[%s\n]\n' "$out"; fi
+  exit 0
+fi
+
+if [ "$1" = "--bg" ] && [ "$2" != "--resume" ] && [ -n "$STANDIN_BG" ]; then
+  # A NEW conversation in the background, as `--bg <first prompt>` starts one: it takes
+  # STANDIN_BOOT_MS to boot (the real program boots a process and its session), then is listed
+  # by `agents --json` under an id of its own choosing — or, with STANDIN_BOOT_FAILS, says why
+  # it cannot start and exits non-zero, as a program that is not signed in does.
+  sleep "$(awk "BEGIN { printf \"%.3f\", ${STANDIN_BOOT_MS:-0} / 1000 }")"
+  if [ -n "$STANDIN_BOOT_FAILS" ]; then echo "Error: stand-in claude could not start: not signed in" >&2; exit 1; fi
+  hex=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+  id="$(printf '%s' "$hex" | cut -c1-8)-$(printf '%s' "$hex" | cut -c9-12)-4$(printf '%s' "$hex" | cut -c14-16)-8$(printf '%s' "$hex" | cut -c18-20)-$(printf '%s' "$hex" | cut -c21-32)"
+  short=$(printf '%s' "$id" | cut -c1-8)
+  mkdir -p "$running" "$jobs/$short"
+  nohup /bin/sh -c 'trap "exit 0" TERM INT; while :; do sleep 1; done' >/dev/null 2>&1 &
+  bg=$!
+  printf '{"pid":%s,"id":"%s","cwd":"%s","kind":"background","startedAt":%s000,"sessionId":"%s","name":"stand-in","status":"busy","state":"working"}' "$bg" "$short" "$(pwd -P)" "$(date +%s)" "$id" > "$running/$bg.json"
+  printf '%s' "$bg" > "$jobs/$short/pid"; printf '%s' "$id" > "$jobs/$short/session"; pwd -P > "$jobs/$short/cwd"
+  echo "backgrounded · $short · stand-in"
   exit 0
 fi
 
@@ -112,12 +136,19 @@ if [ "$1" = "--bg" ]; then
   exit 0
 fi
 
-if [ "$1" = "stop" ]; then
+if [ "$1" = "stop" ] || [ "$1" = "rm" ]; then
   pid=$(cat "$jobs/$2/pid" 2>/dev/null)
   if [ -z "$pid" ]; then echo "No job matching '$2'. Run 'claude agents' to list running sessions."; exit 1; fi
   kill "$pid" 2>/dev/null; rm -f "$running/$pid.json"; rm -rf "$jobs/$2"
-  echo "stopped $2"
+  if [ "$1" = "rm" ]; then echo "removed $2"; else echo "stopped $2"; fi
   exit 0
+fi
+
+# A program that cannot start (STANDIN_BOOT_FAILS) fails in a terminal too: it says why after its boot and ends.
+if [ -n "$STANDIN_BOOT_FAILS" ] && [ "$1" != "attach" ]; then
+  sleep "$(awk "BEGIN { printf \"%.3f\", ${STANDIN_BOOT_MS:-0} / 1000 }")"
+  echo "Error: stand-in claude could not start: not signed in" >&2
+  exit 1
 fi
 
 attached=""

@@ -1,5 +1,5 @@
 import { PROJECT_ID, doorContext, doorSpace, epicPartsOf, manifestSchema, readTellFinished, tellFinishedTool, type Manifest } from 'kehikot-module-protocol'
-import { answerMessageTool, deliveryReply, messageToolsFor, establishBuild, hostHasProject, hostVouches, refuseTicket, sameTicket, settingsDoor, type Reply, type Stream } from 'kehikot-module-protocol/serve'
+import { answerMessageTool, callToken, deliveryReply, messageToolsFor, establishBuild, hostHasProject, hostVouches, refuseTicket, sameTicket, settingsDoor, type Reply, type Stream } from 'kehikot-module-protocol/serve'
 import { foldersIssue } from './folders.ts'
 import { SETTINGS, SETTINGS_FILE } from './settings.ts'
 import { isSetupKey, readSetup, writeSetup } from './setup.ts'
@@ -537,10 +537,13 @@ function tools() {
  * `research-complete`. Known by the place token on this door's URL, which only the conversation's
  * own doors carry: nothing here can tag another conversation.
  */
-function tellFinished(args: Record<string, unknown>, token: string | null): string {
+function tellFinished(args: Record<string, unknown>, urlToken: string | null): string {
   const read = readTellFinished(args)
   if (!read.ok) throw new Error(read.error)
-  const said = token ? theRuns().tellFinished(token, read.told.kind, read.told.label, read.told.choices ?? []) : null
+  /* The door's token, else the conversation's key given as `placeToken` (protocol 2.99.0): an adopted conversation's door carries none. */
+  const token = callToken(urlToken, args)
+  const runs = theRuns()
+  const said = token ? (runs.tellFinished(token, read.told.kind, read.told.label, read.told.choices ?? []) ?? runs.tellAdopted(token, read.told.kind, read.told.label, read.told.choices ?? [])) : null
   if (said === null) {
     throw new Error(
       'This conversation is not one Kehikot’s Claude module is running with its doors (it was not started from the Claude container, '
@@ -862,8 +865,14 @@ export async function answer(
   if (path === '/api/task' && method === 'GET') {
     const id = query.get('session') ?? ''
     if (!PROGRAM.isId(id)) return bad('that is not a session id')
-    const at = theRuns().taskAt(id)
-    return ok({ ok: true, at: at ? { projectPath: at.projectPath, place: { epic: at.place.epic, parts: at.place.parts, kehikko: at.place.kehikko, kehikkoName: at.place.kehikkoName ?? '' } } : null })
+    const runs = theRuns()
+    const at = runs.taskAt(id)
+    /* A handle `start` answered (protocol 2.99.0): the conversation it stands for, or null while Claude Code starts it. */
+    const handled = runs.handled(id)
+    return ok({
+      ok: true,
+      at: at ? { projectPath: at.projectPath, place: { epic: at.place.epic, parts: at.place.parts, kehikko: at.place.kehikko, kehikkoName: at.place.kehikkoName ?? '' }, ...(handled ? { session: handled.session, ...(handled.failed ? { failed: handled.failed } : {}) } : {}) } : null,
+    })
   }
 
   /* Bring the entries an older release filed under this kehikko's row number
