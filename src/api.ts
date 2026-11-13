@@ -38,7 +38,7 @@ export interface Api {
   /** A person's say: make the conversation on screen this place's own (`own`). Rewrites the record. */
   assign?(projectPath: string, key: string, session: string, own: boolean, kehikkoName?: string): Promise<void>
   /** Which doors a running session would be given now that it was not; null when not known. */
-  doors?(session: string): Promise<{ added: string[]; removed: string[] } | null>
+  doors?(session: string): Promise<{ added: string[]; removed: string[]; moved?: string[] } | null>
   /**
    * Say what this page has on screen — its place, and whether the open kehikko has a Claude
    * container — or `null` for nothing. What `/kehikot-here` typed in a conversation assigns to.
@@ -96,7 +96,7 @@ export const api: Api = {
     answered(await ask('./api/assign', { body: { projectPath, key, session, own, ...(kehikkoName ? { names: { kehikko: kehikkoName } } : {}) } }))
   },
   async doors(session) {
-    return answered(await ask<{ ok: true; changed: { added: string[]; removed: string[] } | null }>('./api/doors', { query: { session }, ticket: true })).changed
+    return answered(await ask<{ ok: true; changed: { added: string[]; removed: string[]; moved?: string[] } | null }>('./api/doors', { query: { session }, ticket: true })).changed
   },
   async showing(page, at) {
     answered(await ask('./api/showing', { body: at ? { page, ...at } : { page } }))

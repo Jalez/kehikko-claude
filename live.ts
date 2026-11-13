@@ -7,7 +7,7 @@ import type { Duplex } from 'node:stream'
 
 import { PROJECT_ID, projectFile, readProjectFile } from 'kehikot-module-protocol'
 import type { RunSockets } from 'kehikot-module-protocol/run'
-import { messageDelivery, mintTicket, pasted, sameTicket, watchKnownProjects, type DeliverySession, type KnownProjects, type KnownProjectsOptions } from 'kehikot-module-protocol/serve'
+import { HOST_DOOR_MODULE, isStableDoor, messageDelivery, mintTicket, pasted, sameTicket, startingHost, watchKnownProjects, type DeliverySession, type KnownProjects, type KnownProjectsOptions } from 'kehikot-module-protocol/serve'
 import type { DeliveryState, KehikkoSkill } from 'kehikot-module-protocol'
 import { REFUSED_EVENT, RESEARCH_COMPLETE_EVENT, STALLED_EVENT, TURN_EVENTS, TURN_KINDS, refusalEnd, refusalOf, refusalWords, toldReply, turnEnd, turnQuestion, type ActivityQuestion, type Refusal as Refused, type TurnEnd, type TurnKind } from 'kehikot-module-protocol'
 
@@ -23,7 +23,7 @@ import { PLACE_TOKEN, assign, attach, born, byToken, follow, homeOf, isDetached,
 import { readKeptGuards, writeKeptGuards } from './restarted.ts'
 import { heldSkills, removePlugin, sessionPlugin, statusScriptIn, sweepKits, writeComposer, writeOwnStatusLine, writeUnguarded } from './skills.ts'
 import { WorkQueueLookup, askedProviders, type FindProviders } from './workQueue.ts'
-import { configDirOf, freshToken, handedDoors, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, removeConfig, sweepKept, writeConfig, withOwnDoor, writeKeptConfig, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
+import { answersAt, claimable, configDirOf, freshToken, handedDoors, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, keptProblems, legacyKeptDirOf, onStartingHost, removeConfig, sweepKept, writeConfig, withOwnDoor, writeKeptConfig, writeKeptOwner, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
 import { readPlaceKey } from './place.ts'
 import { extraFolders, folderFlags, sameFolders } from './folders.ts'
 import { AGENT_ID, AGENT_TYPE, FOUND_MOST, isResearch, subagentMeta, type Found, type Told } from './research.ts'
@@ -1250,6 +1250,14 @@ export interface RunsOptions {
   fetch?: typeof fetch
   /** Where `--mcp-config` files are written; this user's temporary folder by default. */
   configBase?: string
+  /**
+   * The host that started this module (`startingHost`, protocol 2.95.0): every door a session is
+   * written is on its stable address, and its kept folders are its own. Read from the start
+   * environment by default; a test names one. Null: nobody started it.
+   */
+  host?: string | null
+  /** Whether anything answers at an origin (`answersAt`); a test stands one in. */
+  answers?: (origin: string) => Promise<boolean>
   /** The program a session's status line runs this module's own line with (`statusline-line.mjs`): this process's own runtime by default. */
   runtime?: string
   /** Asks the host who provides the work queue (`askedProviders`, protocol 2.81.0); a test stands one in. Absent: none is provided. */
@@ -1431,6 +1439,9 @@ export class Runs {
       const swept = sweepKept(this.options.configBase)
       if (swept) this.log(`claude: removed ${swept} kept folder${swept === 1 ? '' : 's'} of background conversations nothing has written to in two weeks`)
     }
+    /* Every background conversation's kept doors back on the host that started this module (protocol 2.95.0). */
+    const repaired = await this.repairKept(projectPath).catch(() => 0)
+    if (repaired) this.changed()
     const read = readPlaces(projectPath)
     if (!read.ok) return
     /* The ones that may have been cut off first, from the record and their transcripts; the program
@@ -1636,9 +1647,14 @@ export class Runs {
     const entry = settled && read?.ok && Object.hasOwn(read.value.sessions, settled) ? read.value.sessions[settled] : undefined
     /* The project's other folders now (folders.ts). A session whose saved options hold other ones is carried on with these: a flag given is what changes them. */
     const folders = extraFolders(readSettings(projectPath).folders, projectPath)
-    const saved = Boolean(entry?.background) && sameFolders(entry?.folders ?? [], folders)
     const token = (settled ? tokenFor(projectPath, settled, freshToken) : null) ?? freshToken()
-    const kept = keptDirOf(token, this.options.configBase)
+    /* A conversation started before 2.95.0 was kept in a folder named by its token alone, which its saved options name: claimed for this host when it is this host's (`claimLegacy`). */
+    await this.claimLegacy(token, projectPath)
+    const kept = keptDirOf(token, this.options.configBase, this.host())
+    const legacy = legacyKeptDirOf(token, this.options.configBase)
+    /* Woken with no flag only when its saved options name the folder written now; otherwise it is given this one, and carried on as a copy. */
+    const saved = Boolean(entry?.background) && sameFolders(entry?.folders ?? [], folders) && (legacy === null || legacy === kept)
+    this.moved.delete(token)
     this.issue(token, { projectPath, projectId, place }, kept)
     let doors: SessionDoor[] = []
     let config: string | null = null
@@ -2498,21 +2514,92 @@ export class Runs {
     return [...this.projects]
   }
 
+  /** The host that started this module (protocol 2.95.0), or null when nobody did. */
+  host(): string | null {
+    return this.options.host !== undefined ? this.options.host : startingHost()
+  }
+
+  /**
+   * The doors each conversation's process holds that are not where the host's door is now, by token:
+   * set when `repairKept` rewrote its kept file under it, cleared when it is started or woken again.
+   * What the line offering a restart says (`doorsChanged`).
+   */
+  private readonly moved = new Map<string, string[]>()
+
+  /**
+   * Claim a conversation's kept folder from before 2.95.0 for this host (`claimable`): its saved
+   * options name that folder, so a woken conversation reads the files written there. Never throws.
+   */
+  private async claimLegacy(token: string, projectPath: string): Promise<void> {
+    const host = this.host()
+    const legacy = host ? legacyKeptDirOf(token, this.options.configBase) : null
+    if (!host || !legacy) return
+    try {
+      if (await claimable(legacy, projectPath, host, this.options.answers ?? ((origin) => answersAt(origin)))) writeKeptOwner(legacy, host)
+    } catch {
+      /* Left as it was: a woken conversation is then carried on with a folder of its own. */
+    }
+  }
+
+  /**
+   * Put every background conversation of a project back on the host that started this module: its
+   * kept doors file rewritten when anything in it is not that host's stable door (`keptProblems`) —
+   * a door at a module's old port, or at another host, such as a scratch copy an agent ran that
+   * wrote over the person's files. The doors are asked of the host again, or, when it does not
+   * answer, the ones the file named are moved onto its stable address. Claude Code reads the file
+   * when the conversation starts or is woken, not when `/mcp` reconnects, so a conversation running
+   * now keeps the old doors until it restarts: its view says so, with a restart (`doorsChanged`).
+   */
+  async repairKept(projectPath: string): Promise<number> {
+    const host = this.host()
+    if (!host) return 0
+    const read = readPlaces(projectPath)
+    if (!read.ok) return 0
+    let repaired = 0
+    for (const [id, entry] of Object.entries(read.value.sessions)) {
+      if (!entry.background || !entry.token || !PLACE_TOKEN.test(entry.token)) continue
+      const token = entry.token
+      await this.claimLegacy(token, projectPath)
+      const kept = keptDirOf(token, this.options.configBase, host)
+      const problems = keptProblems(kept, host)
+      if (!problems.length) continue
+      const had = keptDoors(kept)
+      const at = placeEntryFor(read.value, id)
+      const place = at ? placeOf(at) : null
+      const kehikko = place?.kehikko && 'key' in place.kehikko ? place.kehikko.key : null
+      const asked = await this.startPlace({ projectPath, projectId: projectIdAt(projectPath), token, kehikko, messages: false }).catch(() => null)
+      /* A kept file names no module: the host's own door is the one under its name; a module's raw port says nothing of which module, and goes. */
+      const named = had.map((door) => (door.module || door.name !== HOST_DOOR_MODULE ? door : { ...door, module: HOST_DOOR_MODULE }))
+      const doors = asked?.answered && asked.doors ? asked.doors : withOwnDoor(onStartingHost(named, host, token), host, token) ?? []
+      try {
+        writeKeptConfig(doors, kept)
+        if (place) this.issue(token, { projectPath, projectId: projectIdAt(projectPath), place }, kept)
+        repaired += 1
+        this.moved.set(token, had.filter((door) => !isStableDoor(door.url, host)).map((door) => door.name))
+        this.log(`claude: ${id}'s kept doors named ${problems.length} address${problems.length === 1 ? '' : 'es'} not on ${host}; rewritten onto its stable doors — the conversation picks them up when it restarts`)
+      } catch (error) {
+        this.log(`claude: ${id}'s kept doors could not be rewritten — ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    return repaired
+  }
+
   /** Remember where a token was given out; a background conversation's also in its kept folder. */
   /**
    * What a session is started with from the host: its doors and the skills the person wrote for its
    * kehikko (protocol 2.53.0), in one ask (`hostPlace`). A test's stand-in `doors` is asked for the
    * doors, and its `place`, when it has one, for the skills.
    */
-  private async startPlace(asked: DoorsAsked): Promise<{ doors: SessionDoor[] | null; kehikkoSkills: KehikkoSkill[] | null }> {
+  private async startPlace(asked: DoorsAsked): Promise<{ doors: SessionDoor[] | null; kehikkoSkills: KehikkoSkill[] | null; answered: boolean }> {
     /* This module's own door is always among them, with the token (`withOwnDoor`, issue #80). */
+    const host = this.host()
     if (this.options.doors) {
       const doors = await this.options.doors(asked).catch(() => null)
       const placed = this.options.place ? await this.options.place(asked).catch(() => null) : null
-      return { doors: withOwnDoor(doors, this.port(), asked.token), kehikkoSkills: placed?.kehikkoSkills ?? null }
+      return { doors: withOwnDoor(doors && onStartingHost(doors, host, asked.token), host, asked.token), kehikkoSkills: placed?.kehikkoSkills ?? null, answered: doors !== null }
     }
     const got = await hostPlace(asked).catch(() => null)
-    return { doors: withOwnDoor(got?.doors ?? null, this.port(), asked.token), kehikkoSkills: got?.kehikkoSkills ?? null }
+    return { doors: withOwnDoor(got?.doors ?? null, host, asked.token), kehikkoSkills: got?.kehikkoSkills ?? null, answered: got !== null }
   }
 
   private issue(token: string, started: Started, kept: string | null = null): void {
@@ -2533,7 +2620,7 @@ export class Runs {
     const issued = this.issued.get(token)
     if (run) return { projectPath: run.projectPath, projectId: run.projectId, place: issued && placeKey(issued.place) === run.key ? issued.place : (run.at ?? run.place ?? issued?.place)! }
     if (issued) return issued
-    const kept = keptPlace(keptDirOf(token, this.options.configBase))
+    const kept = keptPlace(keptDirOf(token, this.options.configBase, this.host()))
     const place = kept ? readPlaceKey(kept.key) : null
     if (!kept || !place) return null
     return { projectPath: kept.projectPath, projectId: kept.projectId, place: { ...place, ...(kept.kehikkoName ? { kehikkoName: kept.kehikkoName } : {}), ...(kept.partNames ? { partNames: kept.partNames } : {}) } }
@@ -2543,7 +2630,7 @@ export class Runs {
   doorNamesOf(token: string): string[] | null {
     const run = [...this.runs.values()].find((one) => one.what === 'session' && one.token === token && !one.ended)
     if (run?.doors.length) return run.doors.map((door) => door.name)
-    const kept = keptDoors(keptDirOf(token, this.options.configBase))
+    const kept = keptDoors(keptDirOf(token, this.options.configBase, this.host()))
     return kept.length ? kept.map((door) => door.name) : null
   }
 
@@ -2551,14 +2638,14 @@ export class Runs {
   doorsHandedTo(token: string): { name: string; url: string; module?: string }[] | null {
     const run = [...this.runs.values()].find((one) => one.what === 'session' && one.token === token && !one.ended)
     if (run?.doors.length) return handedDoors(run.doors, this.port())
-    const kept = keptDoors(keptDirOf(token, this.options.configBase))
+    const kept = keptDoors(keptDirOf(token, this.options.configBase, this.host()))
     return kept.length ? handedDoors(kept, this.port()) : null
   }
 
   /** The skills the conversation behind a token has: what its plugin lists (`heldSkills`), from its run or its kept folder. Null when unknown. */
   skillsOf(token: string): string[] | null {
     const run = [...this.runs.values()].find((one) => one.what === 'session' && one.token === token && !one.ended)
-    return heldSkills(run?.plugin) ?? heldSkills(join(keptDirOf(token, this.options.configBase), 'plugin'))
+    return heldSkills(run?.plugin) ?? heldSkills(join(keptDirOf(token, this.options.configBase, this.host()), 'plugin'))
   }
 
   /**
@@ -2580,7 +2667,7 @@ export class Runs {
         doorsOf: (one) => this.doorNamesOf(one),
         handedDoors: (one) => this.doorsHandedTo(one),
         holdsOf: (one) => this.skillsOf(one),
-        toldFile: (one) => join(keptDirOf(one, this.options.configBase), 'told.json'),
+        toldFile: (one) => join(keptDirOf(one, this.options.configBase, this.host()), 'told.json'),
         told: (projectPath, assigned) => this.told(projectPath, assigned),
         log: this.log,
         later: (run, ms) => setTimeout(run, ms).unref?.(),
@@ -2598,12 +2685,12 @@ export class Runs {
     /* Bounded: the oldest tokens go first. */
     while (this.guardsKept.size > 256) this.guardsKept.delete(this.guardsKept.keys().next().value!)
     /* On disk too, so a restart of this module while the host is away still knows them (restarted.ts). Written when they change. */
-    if (JSON.stringify(before?.guards ?? null) !== JSON.stringify(guards)) writeKeptGuards(join(keptDirOf(token, this.options.configBase), 'guards.json'), guards)
+    if (JSON.stringify(before?.guards ?? null) !== JSON.stringify(guards)) writeKeptGuards(join(keptDirOf(token, this.options.configBase, this.host()), 'guards.json'), guards)
   }
 
   /** The guards kept for a token's session: this process's, else those a process before it kept on disk (old: the host is asked first). */
   private keptGuards(token: string): { at: number; guards: PlacedGuard[] } | null {
-    return this.guardsKept.get(token) ?? (PLACE_TOKEN.test(token) ? readKeptGuards(join(keptDirOf(token, this.options.configBase), 'guards.json')) : null)
+    return this.guardsKept.get(token) ?? (PLACE_TOKEN.test(token) ? readKeptGuards(join(keptDirOf(token, this.options.configBase, this.host()), 'guards.json')) : null)
   }
 
   /**
@@ -2627,7 +2714,7 @@ export class Runs {
   /** What the conversation behind a token was last told (context.ts), in words; null when nothing is kept. */
   toldOf(token: string): Said | null {
     if (!PLACE_TOKEN.test(token)) return null
-    return toldWords(join(keptDirOf(token, this.options.configBase), 'told.json'))
+    return toldWords(join(keptDirOf(token, this.options.configBase, this.host()), 'told.json'))
   }
 
   /**
@@ -2677,15 +2764,19 @@ export class Runs {
    * which it has that its kehikko no longer holds — by name, for the line that
    * offers a restart. Null when it was given none, or the host does not answer.
    */
-  async doorsChanged(id: string): Promise<{ added: string[]; removed: string[] } | null> {
+  async doorsChanged(id: string): Promise<{ added: string[]; removed: string[]; moved: string[] } | null> {
     const run = this.find(id)
     if (!run?.token || (!run.config && !run.kept)) return null
+    /* Doors its process holds that are not on the starting host's stable address (protocol 2.95.0): rewritten under it by `repairKept`, or started that way. */
+    const host = this.host()
+    const moved = [...new Set([...(this.moved.get(run.token) ?? []), ...(host ? run.doors.filter((door) => !isStableDoor(door.url, host)).map((door) => door.name) : [])])]
     const kehikko = run.at?.kehikko && 'key' in run.at.kehikko ? run.at.kehikko.key : null
     const now = await (this.options.doors ?? hostDoors)({ projectPath: run.projectPath, projectId: run.projectId, token: run.token, kehikko }).catch(() => null)
-    if (!now) return null
+    if (!now) return moved.length ? { added: [], removed: [], moved } : null
     const had = new Set(run.doors.map((door) => door.name))
-    const has = new Set(now.map((door) => door.name))
-    return { added: [...has].filter((name) => !had.has(name)), removed: [...had].filter((name) => !has.has(name)) }
+    /* As a session would be given them now: with this module's own (`startPlace`). */
+    const has = new Set((withOwnDoor(now, host, run.token) ?? now).map((door) => door.name))
+    return { added: [...has].filter((name) => !had.has(name)), removed: [...had].filter((name) => !has.has(name)), moved }
   }
 
   /**
@@ -2894,7 +2985,7 @@ export class Runs {
       /* Attached to again after a restart: its token, the doors its kept file gave it, for "Restart to load …", and the folders its saved options hold. */
       const token = owned ? tokenFor(projectPath, settled, freshToken) : null
       if (token) {
-        kept = keptDirOf(token, this.options.configBase)
+        kept = keptDirOf(token, this.options.configBase, this.host())
         woken = { token, doors: keptDoors(kept), folders: entry?.folders ?? [] }
       }
     }

@@ -201,7 +201,7 @@ class Watcher implements Viewer {
 /** Long enough for the emulator's write queue and the promises behind an open to have run. */
 const settle = () => new Promise((done) => setTimeout(done, 25))
 
-function world(options: { found?: string | null; able?: boolean; tells?: boolean; lists?: boolean; names?: boolean; configures?: boolean; plugins?: boolean; doors?: (asked: DoorsAsked) => Promise<SessionDoor[] | null>; place?: (asked: DoorsAsked) => Promise<HostPlace | null>; fetch?: typeof fetch; configBase?: string; runtime?: string; asking?: 'fails'; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number; watchEvery?: number | null; subagentOf?: RunsOptions['subagentOf']; services?: RunsOptions['services'] } = {}) {
+function world(options: { found?: string | null; able?: boolean; tells?: boolean; lists?: boolean; names?: boolean; configures?: boolean; plugins?: boolean; doors?: (asked: DoorsAsked) => Promise<SessionDoor[] | null>; place?: (asked: DoorsAsked) => Promise<HostPlace | null>; fetch?: typeof fetch; configBase?: string; runtime?: string; asking?: 'fails'; port?: number | null; line?: string; grace?: number; quiet?: number; stale?: number; heldWait?: number; watchEvery?: number | null; subagentOf?: RunsOptions['subagentOf']; services?: RunsOptions['services']; host?: string | null; answers?: (origin: string) => Promise<boolean> } = {}) {
   const logged: string[] = []
   const ptys: FakePty[] = []
   /* What the stand-in program holds a record for, by folder. */
@@ -233,6 +233,8 @@ function world(options: { found?: string | null; able?: boolean; tells?: boolean
   }
   const runs = new Runs({
     program,
+    ...(options.host !== undefined ? { host: options.host } : {}),
+    ...(options.answers ? { answers: options.answers } : {}),
     grace: options.grace ?? 60_000,
     quiet: options.quiet ?? 30 * 60_000,
     stale: options.stale,
@@ -2485,7 +2487,7 @@ describe('a conversation’s place, on every Kehikot door (protocol 2.4.0)', () 
     expect(statSync(file).mode & 0o777).toBe(0o600)
     expect(statSync(join(file, '..')).mode & 0o777).toBe(0o700)
     const config = JSON.parse(readFileSync(file, 'utf8'))
-    expect(Object.keys(config.mcpServers)).toEqual(['kehikko', 'notes'])
+    expect(Object.keys(config.mcpServers)).toEqual(['kehikko', 'notes', 'kehikko-claude'])
     expect(config.mcpServers.kehikko.url).toContain(`kehikot-place=${run.token}`)
     /* The token is not on the command line. */
     expect(args.join(' ')).not.toContain(run.token!)
@@ -2558,7 +2560,7 @@ describe('a conversation’s place, on every Kehikot door (protocol 2.4.0)', () 
     const w = world({ configures: false })
     await w.runs.open(ask(dir, null, KEYED), new Watcher())
     expect(w.ptys[0]!.args).toEqual(['--session-id', B])
-    const none = world({ configures: true, doors: async () => null })
+    const none = world({ configures: true, doors: async () => null, host: null })
     await none.runs.open(ask(project(), null, KEYED), new Watcher())
     expect(none.ptys[0]!.args).toEqual(['--session-id', B])
     expect(none.logged.join('\n')).toContain('no host gave this session its doors')
@@ -2576,9 +2578,9 @@ describe('a conversation’s place, on every Kehikot door (protocol 2.4.0)', () 
       ],
     })
     await w.runs.open(ask(dir, null, KEYED), new Watcher())
-    expect(await w.runs.doorsChanged(B)).toEqual({ added: [], removed: [] })
+    expect(await w.runs.doorsChanged(B)).toEqual({ added: [], removed: [], moved: [] })
     notes = true
-    expect(await w.runs.doorsChanged(B)).toEqual({ added: ['notes'], removed: [] })
+    expect(await w.runs.doorsChanged(B)).toEqual({ added: ['notes'], removed: [], moved: [] })
     /* Restarted for its doors: allowed in its own folder, refused while working. */
     expect(w.runs.restartIn(B, 'doors')).toBe(true)
   })
@@ -2822,7 +2824,8 @@ describe('a session started here knows its place and its kehikko’s modules, an
     const { w } = await started(h, dir)
     const args = w.ptys[0]!.args
     const plugin = args[args.indexOf('--plugin-dir') + 1]!
-    expect(readFileSync(join(plugin, 'kehikot', 'stable'), 'utf8')).toBe('http://127.0.0.1:4170/m/kehikot.claude')
+    /* On the host that started this module (the suite's KEHIKOT_ORIGINS), whatever address the doors were handed with (protocol 2.95.0). */
+    expect(readFileSync(join(plugin, 'kehikot', 'stable'), 'utf8')).toBe('http://127.0.0.1:9/m/kehikot.claude')
     const hooks = JSON.parse(readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8'))
     expect(hooks.hooks.PreToolUse[0].hooks[0].timeout).toBeGreaterThanOrEqual(25)
   })

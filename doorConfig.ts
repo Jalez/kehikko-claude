@@ -1,10 +1,10 @@
 import { NOTES_MESSAGES_MOST, agentMessageSchema, agentChangesSchema, hostChangesSchema, type HostChanges, kehikkoSkillsSchema, placedGuardsSchema, type PlacedGuard, type AgentMessage, type KehikkoSkill, oneLine, type AbsentModule, type SessionModule } from 'kehikot-module-protocol'
-import { createHash, randomBytes } from 'node:crypto'
-import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { frameOrigins } from 'kehikot-module-protocol/serve'
+import { askedHosts, loopbackOrigin, doorConfigProblems, doorUrl, keptFolderName, legacyKeptFolderName, stableDoors, startingHost, tokenOnDoor } from 'kehikot-module-protocol/serve'
 
 import { ID } from './manifest.ts'
 import { PLACE_TOKEN } from './record.ts'
@@ -54,17 +54,26 @@ export const OWN_DOOR = 'kehikko-claude'
  * handed no doors (none answered at the start) or left this module's out, Claude Code connected the
  * person's own entry for it instead — which carries no token, so the door could not tell which
  * conversation called and listed no message tools, while the session's hooks (which do carry the
- * token) said it could message. So this module adds its own door, at its own port, when the host's
- * list has none of this module's. The host's own door for this module is kept when it handed one: it
- * may be on the module's stable address, which outlives a port change. Null port (not bound yet) or a
+ * token) said it could message. So this module adds its own door when the host's list has none of
+ * this module's: at its stable address on the host that started it (`doorUrl`, protocol 2.95.0),
+ * never at its own port, which a restart onto a taken one moves. No starting host (run by hand) or a
  * token that is not one: the doors as they were.
  */
-export function withOwnDoor(doors: readonly SessionDoor[] | null, port: number | null, token: string): SessionDoor[] | null {
+export function withOwnDoor(doors: readonly SessionDoor[] | null, host: string | null, token: string): SessionDoor[] | null {
   if (doors?.some((door) => door.module === ID)) return [...doors]
-  if (port === null || !Number.isSafeInteger(port) || port <= 0 || !PLACE_TOKEN.test(token)) return doors ? [...doors] : null
-  const own: SessionDoor = { module: ID, name: OWN_DOOR, url: `http://127.0.0.1:${port}/mcp?kehikot-place=${token}`, transport: 'http' }
+  if (!host || !loopbackOrigin(host) || !PLACE_TOKEN.test(token)) return doors ? [...doors] : null
+  const own: SessionDoor = { module: ID, name: OWN_DOOR, url: doorUrl(host, ID, token), transport: 'http' }
   /* A door of another module under this name would be one server in the config: this module's own wins, as its notes name it. */
   return [...(doors ?? []).filter((door) => door.name !== OWN_DOOR), own]
+}
+
+/**
+ * The doors a session is written: every one on the stable address of the host that started this
+ * module (`stableDoors`, protocol 2.95.0), whatever address it was handed with — another host's, a
+ * module's own port — and the ones that name no module dropped. No starting host: as handed.
+ */
+export function onStartingHost(doors: readonly SessionDoor[], host: string | null, token: string): SessionDoor[] {
+  return host ? stableDoors(doors, host, token) : [...doors]
 }
 
 /**
@@ -88,18 +97,9 @@ export function handedDoors(doors: readonly SessionDoor[], port: number | null):
 /** A token for a conversation: 32 random bytes, URL-safe. */
 export const freshToken = (): string => randomBytes(32).toString('base64url')
 
-/** The host's origins on this machine, in the order a host is asked. */
+/** The hosts a session's place is asked of: the host that started this module alone, when it said so (`askedHosts`, protocol 2.95.0). */
 export function hostOrigins(env: Record<string, string | undefined> = process.env): string[] {
-  const out: string[] = []
-  for (const origin of frameOrigins(env)) {
-    try {
-      const url = new URL(origin)
-      if ((url.protocol === 'http:' || url.protocol === 'https:') && ['127.0.0.1', 'localhost'].includes(url.hostname)) out.push(url.origin)
-    } catch {
-      /* Not a URL. */
-    }
-  }
-  return [...new Set(out)]
+  return askedHosts(env)
 }
 
 /** What the host is asked: this module issued `token` for a conversation in a project, on a kehikko. */
@@ -179,7 +179,8 @@ export async function hostPlace(asked: DoorsAsked, options: { env?: Record<strin
       const said = (await response.json()) as { ok?: unknown; token?: unknown; doors?: unknown; modules?: unknown; absent?: unknown; messages?: unknown; messagesMore?: unknown; kehikkoSkills?: unknown; guards?: unknown; host?: unknown }
       if (said.ok !== true || said.token !== asked.token || !Array.isArray(said.doors)) continue
       return {
-        doors: said.doors.filter(isDoor).slice(0, 64),
+        /* On the starting host's stable address, whatever this host handed (protocol 2.95.0). */
+        doors: onStartingHost(said.doors.filter(isDoor).slice(0, 64), startingHost(options.env ?? process.env) ?? origin, asked.token),
         modules: Array.isArray(said.modules) ? said.modules.flatMap(moduleOn).slice(0, 64) : null,
         absent: Array.isArray(said.absent) ? said.absent.flatMap(absentOne).slice(0, 32) : null,
         messages: Array.isArray(said.messages) ? said.messages.flatMap((one) => { const read = agentMessageSchema.safeParse(one); return read.success ? [read.data] : [] }).slice(0, NOTES_MESSAGES_MOST) : null,
@@ -290,8 +291,86 @@ export function writeConfig(doors: readonly SessionDoor[], base = tmpdir()): str
  * wake, so what it holds is the doors of now; never removed while the conversation can be woken —
  * only by `sweepKept`, long after it was last written.
  */
-export function keptDirOf(token: string, base = tmpdir()): string {
-  return join(configDirOf(base), `session-${createHash('sha256').update(token).digest('hex').slice(0, 24)}`)
+export function keptDirOf(token: string, base = tmpdir(), host: string | null = startingHost()): string {
+  const fresh = join(configDirOf(base), keptFolderName(token, host))
+  if (!host) return fresh
+  const legacy = join(configDirOf(base), legacyKeptFolderName(token))
+  if (!existsSync(fresh) && existsSync(legacy) && keptOwner(legacy) === host) return legacy
+  return fresh
+}
+
+/**
+ * The folder a conversation started before 2.95.0 was kept in (named by its token alone), when it
+ * is there. Its saved options name it: a woken conversation reads its files from there, so a
+ * conversation this module holds keeps using it once it is claimed for this host (`claimKept`).
+ */
+export function legacyKeptDirOf(token: string, base = tmpdir()): string | null {
+  const legacy = join(configDirOf(base), legacyKeptFolderName(token))
+  return existsSync(legacy) ? legacy : null
+}
+
+/** The host a kept folder belongs to (`owner.json`), or null for one nobody claimed. */
+export function keptOwner(dir: string): string | null {
+  try {
+    const said = JSON.parse(readFileSync(join(dir, 'owner.json'), 'utf8')) as { host?: unknown }
+    return typeof said.host === 'string' ? said.host : null
+  } catch {
+    return null
+  }
+}
+
+/** Claim a kept folder for a host (`owner.json`, 0600). */
+export function writeKeptOwner(dir: string, host: string): void {
+  const file = join(dir, 'owner.json')
+  const temporary = `${file}.${process.pid}.tmp`
+  writeFileSync(temporary, JSON.stringify({ host }), { mode: 0o600 })
+  renameSync(temporary, file)
+}
+
+/**
+ * Whether a kept folder from before 2.95.0 is this host's conversation, to be claimed: claimed for
+ * this host already; or claimed by nobody and either started in this very project (its `place.json`)
+ * or naming doors only on hosts that are gone (`answers` says no for every one), which is a folder
+ * another host's copy of this module wrote over and left. A folder claimed by another host that
+ * still answers is that host's, and is left.
+ */
+export async function claimable(dir: string, projectPath: string, host: string, answers: (origin: string) => Promise<boolean>): Promise<boolean> {
+  const owner = keptOwner(dir)
+  if (owner === host) return true
+  if (owner) return !(await answers(owner))
+  if (keptPlace(dir)?.projectPath === projectPath) return true
+  const origins = [...new Set(keptDoors(dir).flatMap((door) => { try { return [new URL(door.url).origin] } catch { return [] } }))].filter((origin) => origin !== host)
+  if (!origins.length) return false
+  for (const origin of origins) if (await answers(origin)) return false
+  return true
+}
+
+/** Whether anything answers at an origin, within a moment: a host that is gone refuses the connection. */
+export async function answersAt(origin: string, options: { fetch?: typeof fetch; timeoutMs?: number } = {}): Promise<boolean> {
+  try {
+    await (options.fetch ?? fetch)(`${origin}/`, { method: 'HEAD', signal: AbortSignal.timeout(options.timeoutMs ?? 700) })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** What in a kept doors file is not on the starting host's stable address (`doorConfigProblems`, protocol 2.95.0); empty when it all is, or there is none. */
+export function keptProblems(dir: string, host: string): string[] {
+  try {
+    return doorConfigProblems(JSON.parse(readFileSync(join(dir, 'mcp.json'), 'utf8')), host)
+  } catch {
+    return []
+  }
+}
+
+/** The place token a kept doors file carries, or null. */
+export function keptToken(dir: string): string | null {
+  for (const door of keptDoors(dir)) {
+    const token = tokenOnDoor(door.url)
+    if (token && PLACE_TOKEN.test(token)) return token
+  }
+  return null
 }
 
 /** Write a background conversation's doors file in its kept folder, replacing what was there. */
