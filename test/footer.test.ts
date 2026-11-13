@@ -92,6 +92,10 @@ describe('the footer declared', () => {
     expect(byId(items, FOOT.DISMISS_MOVED)).toMatchObject({ kind: 'run', optional: true })
     expect(byId(items, 'doors')).toMatchObject({ text: 'Restart to load Paper’s tools.' })
     expect(byId(items, FOOT.RESTART_DOORS)).toMatchObject({ disabled: null })
+    /* Doors at an old address (protocol 2.95.0): said, with the same restart. */
+    const moved = parsed({ ...none, doors: { added: [], removed: [], moved: ['paper'], working: false } })
+    expect(byId(moved, 'doors')).toMatchObject({ text: 'paper is at an old address in this session. Restart it to reconnect.' })
+    expect(byId(moved, FOOT.RESTART_DOORS)).toMatchObject({ kind: 'run', label: 'Restart' })
     expect(byId(items, 'install-failed')).toMatchObject({ level: 'critical' })
     expect(byId(items, FOOT.TRY_AGAIN)).toMatchObject({ kind: 'run', label: 'Try again' })
     expect(byId(parsed({ ...none, ended: { why: 'the session ended (0)' } }), FOOT.RESUME)).toMatchObject({ kind: 'run', label: 'Resume', icon: 'play' })

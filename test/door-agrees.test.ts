@@ -23,6 +23,7 @@ const TOKEN = 'a'.repeat(40)
 const OTHER = 'b'.repeat(40)
 const SESSION = '11111111-1111-4111-8111-111111111111'
 const PORT = 8021
+const HOST = 'http://127.0.0.1:4170'
 
 let asked: { method: string; params: Record<string, unknown> }[] = []
 let host: 'up' | 'down' = 'up'
@@ -79,25 +80,25 @@ describe('the door', () => {
 describe('the doors a session is handed', () => {
   const host = (url: string, name = 'kehikko'): SessionDoor => ({ module: 'kehikko', name, url, transport: 'http' })
 
-  test('this module’s own door is added, with the token, when the host handed none or left it out', () => {
+  test('this module’s own door is added on the starting host’s stable address, with the token, when the host handed none or left it out — never at its own port', () => {
     for (const given of [null, [], [host(`http://127.0.0.1:4170/mcp?kehikot-place=${TOKEN}`)]]) {
-      const doors = withOwnDoor(given, PORT, TOKEN)!
+      const doors = withOwnDoor(given, HOST, TOKEN)!
       const own = doors.find((door) => door.module === ID)!
-      expect(own).toEqual({ module: ID, name: OWN_DOOR, url: `http://127.0.0.1:${PORT}/mcp?kehikot-place=${TOKEN}`, transport: 'http' })
+      expect(own).toEqual({ module: ID, name: OWN_DOOR, url: `${HOST}/m/${ID}/mcp?kehikot-place=${TOKEN}`, transport: 'http' })
     }
     expect(OWN_DOOR).toBe(SELF.door)
   })
 
   test('the host’s own door for this module is kept: it may be on the stable address', () => {
     const stable: SessionDoor = { module: ID, name: 'kehikko-claude', url: `http://127.0.0.1:4170/m/${ID}/mcp?kehikot-place=${TOKEN}`, transport: 'http' }
-    expect(withOwnDoor([stable], PORT, TOKEN)).toEqual([stable])
+    expect(withOwnDoor([stable], HOST, TOKEN)).toEqual([stable])
   })
 
-  test('another door under this module’s name gives way, and nothing is added without a port or a real token', () => {
+  test('another door under this module’s name gives way, and nothing is added without a starting host or a real token', () => {
     const squatter = host('http://127.0.0.1:7000/mcp', OWN_DOOR)
-    expect(withOwnDoor([squatter], PORT, TOKEN)!.filter((door) => door.name === OWN_DOOR).map((door) => door.module)).toEqual([ID])
+    expect(withOwnDoor([squatter], HOST, TOKEN)!.filter((door) => door.name === OWN_DOOR).map((door) => door.module)).toEqual([ID])
     expect(withOwnDoor(null, null, TOKEN)).toBeNull()
-    expect(withOwnDoor(null, PORT, 'not a token&kehikot-place=x')).toBeNull()
+    expect(withOwnDoor(null, HOST, 'not a token&kehikot-place=x')).toBeNull()
   })
 
   test('a kept doors file names no module: this module’s is known by its stable address or its port', () => {
@@ -125,7 +126,7 @@ describe('the notes say what the door has', () => {
     (await context({ event: 'SessionStart', session: SESSION, token: TOKEN }, needs(doors)))!.hookSpecificOutput.additionalContext
 
   test('a session handed this module’s tokened door is told the tools and its address — and the door lists them', async () => {
-    const doors = withOwnDoor(null, PORT, TOKEN)!
+    const doors = withOwnDoor(null, HOST, TOKEN)!
     const text = await notes(handedDoors(doors, PORT))
     expect(text).toContain('can message each other: send_message and read_messages on the Claude module’s MCP server (kehikko-claude)')
     expect(text).toContain(`Others reach this conversation at {"module":"${ID}","session":"${SESSION}"}`)
@@ -165,8 +166,8 @@ describe('one conversation cannot act as another', () => {
   })
 
   test('a token handed for a session is on its own door only: another session’s doors carry its own', () => {
-    const mine = withOwnDoor(null, PORT, TOKEN)!
-    const theirs = withOwnDoor(null, PORT, OTHER)!
+    const mine = withOwnDoor(null, HOST, TOKEN)!
+    const theirs = withOwnDoor(null, HOST, OTHER)!
     expect(new URL(mine[0]!.url).searchParams.get('kehikot-place')).toBe(TOKEN)
     expect(new URL(theirs[0]!.url).searchParams.get('kehikot-place')).toBe(OTHER)
   })

@@ -17,7 +17,7 @@ import { ToldPanel } from './view/told.tsx'
 import type { Told } from './api.ts'
 import { DISCONNECT, MAKE_OWN, NOT_CONNECTED, RESUME, TOLD, VIEW, connected, disconnectedLine, itemSession, resumeToggle, showStep, STATUS_LINE, statusLineToggle, viewHeader, NEW } from './view/conversations.ts'
 import { ElsewhereQuestion } from './view/elsewhere.tsx'
-import { FOOT, SAID_MS, USAGE_TICK_MS, WORKING, footerItems, type FooterState } from './view/footer.ts'
+import { FOOT, SAID_MS, USAGE_TICK_MS, WORKING, doorsWords, footerItems, type FooterState } from './view/footer.ts'
 import { ContextLine } from './view/meter.tsx'
 import {
   COPY,
@@ -735,18 +735,20 @@ export function Sessions({
   const tiled = Boolean(size.tile && terminal && view && !inPlace)
   /* The kehikko gained or lost a module since the session on screen was started: its doors are not
      the kehikko's any more. Asked when the containers change, and said in one line with a restart. */
-  const [doorsNow, setDoorsNow] = useState<{ session: string; added: string[]; removed: string[] } | null>(null)
+  const [doorsNow, setDoorsNow] = useState<{ session: string; added: string[]; removed: string[]; moved: string[] } | null>(null)
   const viewed = view?.session ?? null
-  const seenContainers = useRef(containers)
+  const seenContainers = useRef('')
   useEffect(() => {
-    if (seenContainers.current === containers) return
-    seenContainers.current = containers
+    /* Asked as well when a session comes on screen: its doors may be at an old address (protocol 2.95.0). */
+    const key = `${containers}|${viewed ?? ''}`
+    if (seenContainers.current === key) return
+    seenContainers.current = key
     if (!viewed || !api.doors) return
     let live = true
     void api
       .doors(viewed)
       .then((changed) => {
-        if (live) setDoorsNow(changed && (changed.added.length || changed.removed.length) ? { session: viewed, ...changed } : null)
+        if (live) setDoorsNow(changed && (changed.added.length || changed.removed.length || changed.moved?.length) ? { session: viewed, added: changed.added, removed: changed.removed, moved: changed.moved ?? [] } : null)
       })
       .catch(() => {})
     return () => {
@@ -868,7 +870,7 @@ export function Sessions({
           }
         : null,
     moved: terminal && view && movedTo && !ended && !cover ? { to: movedTo, notMoved, working, canRestart: Boolean(view.session && api.restart) } : null,
-    doors: terminal && view && doorsLine && !ended && !cover ? { added: doorsLine.added, removed: doorsLine.removed, working } : null,
+    doors: terminal && view && doorsLine && !ended && !cover ? { added: doorsLine.added, removed: doorsLine.removed, moved: doorsLine.moved, working } : null,
     folders: terminal && view && foldersLine && !ended && !cover ? { working } : null,
     ended: terminal && ended && !cover && view ? { why: ended.why } : null,
     installFailed: installing?.failed && !cover && here ? { failed: installing.failed, line: here.program.install.line } : null,
@@ -1223,8 +1225,7 @@ export function Sessions({
       {!drawsFooter && terminal && view && doorsLine && !ended && !cover && (
         <div className="flex items-center justify-between gap-2 border-t px-2 py-1" role="status" data-doors>
           <span className="text-muted-foreground min-w-0 text-[11px]">
-            {doorsLine.added.length ? `Restart to load ${doorsLine.added.join(', ')}’s tools.` : ''}
-            {doorsLine.removed.length ? ` ${doorsLine.removed.join(', ')} left this kehikko; its tools stay until a restart.` : ''}
+            {doorsWords(doorsLine.added, doorsLine.removed, doorsLine.moved)}
           </span>
           <Button
             size="sm"

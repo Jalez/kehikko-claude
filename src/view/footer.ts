@@ -66,7 +66,7 @@ export interface FooterState {
   /** The project's folder was renamed while the session ran. */
   moved: { to: string; notMoved: string | null; working: boolean; canRestart: boolean } | null
   /** The kehikko's modules changed while the session ran. */
-  doors: { added: string[]; removed: string[]; working: boolean } | null
+  doors: { added: string[]; removed: string[]; moved?: string[]; working: boolean } | null
   /** The project's other folders changed while the session ran (folders.ts): they apply when it restarts. */
   folders?: { working: boolean } | null
   /** The session on screen has ended, and why. */
@@ -181,8 +181,8 @@ export function footerItems(state: FooterState): FooterItemInput[] {
     })
   }
   if (state.doors) {
-    const { added, removed, working } = state.doors
-    const words = [added.length ? `Restart to load ${added.join(', ')}’s tools.` : '', removed.length ? `${removed.join(', ')} left this kehikko; its tools stay until a restart.` : ''].filter(Boolean).join(' ')
+    const { added, removed, moved = [], working } = state.doors
+    const words = doorsWords(added, removed, moved)
     if (words) {
       items.push({ kind: 'text', id: 'doors', text: said(words), tooltip: tip(words) })
       items.push({
@@ -226,4 +226,19 @@ export function footerItems(state: FooterState): FooterItemInput[] {
     }
   }
   return items
+}
+
+/**
+ * The line offering a restart for a session's doors: modules added to or gone from the kehikko, and
+ * doors whose connection moved (protocol 2.95.0) — its process holds an address that is not where
+ * the host's door is now, and Claude Code reconnects only to what it read when it started.
+ */
+export function doorsWords(added: readonly string[], removed: readonly string[], moved: readonly string[] = []): string {
+  return [
+    moved.length ? `${moved.join(', ')} ${moved.length === 1 ? 'is' : 'are'} at an old address in this session. Restart it to reconnect.` : '',
+    added.length ? `Restart to load ${added.join(', ')}’s tools.` : '',
+    removed.length ? `${removed.join(', ')} left this kehikko; its tools stay until a restart.` : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
 }
