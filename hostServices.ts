@@ -14,10 +14,11 @@ import {
   type ConversationsBringResult,
   type ConversationsFindParams,
 } from 'kehikot-module-protocol'
-import { vouchHost, type Before } from 'kehikot-module-protocol/serve'
+import { acceptTask, vouchHost, type Before } from 'kehikot-module-protocol/serve'
 
 import { freshToken } from './doorConfig.ts'
 import { NOWHERE, theRuns } from './live.ts'
+import { ID } from './manifest.ts'
 import { isKehikkoKey, placeKey, sortedParts } from './place.ts'
 import { PROGRAM, headOf, type Program, type Recorded } from './program.ts'
 import { assign, disconnect, homeOf, projectRoot, readPlaces, recordedIds, tokenFor, type NamedPlace, type PlaceEntry, type Places } from './record.ts'
@@ -31,7 +32,13 @@ import { assign, disconnect, homeOf, projectRoot, readPlaces, recordedIds, token
  *   that change; `bring`: file one of them under a place, what `/kehikot-here` does (`here.ts`), as a
  *   compare-and-set so another place's conversation is never taken.
  * - `agent.tasks` — `start`: a NEW conversation fed a brief as its first prompt, the way a
- *   conversation is started for a message (`startTask` in live.ts, beside `resumeFor`).
+ *   conversation is started for a message (`startTask` in live.ts, beside `resumeFor`). It ANSWERS at
+ *   once (protocol 2.99.0): the project and Claude Code being installed are checked, the task is
+ *   accepted under a handle (`pending`), and Claude Code is started after the answer — `--bg` boots a
+ *   process, the host is asked for the session's doors, the skills are gathered, `agents --json` is
+ *   asked until it lists the session. That took longer than the host waits, and the person was told
+ *   Claude did not answer while the conversation started anyway. What it came to is reported to the
+ *   host (`tasks.report`, `acceptTask`): a failure is said in the person's Inbox.
  *
  * Only the host's own server may call them: every route is held to `vouchHost` before its body is
  * read, and anything else is a 403. They are a `Before` door (the protocol's `beforeDoors` on Vite,
@@ -172,8 +179,10 @@ export interface HostNeeds {
   holds(session: string): boolean
   /** The record changed under this project: what `here.ts` tells (`Runs.told`). */
   told(projectPath: string, assigned?: { key: string; session: string }): void
-  /** Start a new conversation with a first prompt (`Runs.startTask`). */
-  start(projectPath: string, place: NamedPlace, brief: string, title: string): Promise<{ ok: true; session: string } | { ok: false; why: string }>
+  /** Start a new conversation with a first prompt (`Runs.startTask`); `handle`, what `start` answered, is followed to it. */
+  start(projectPath: string, place: NamedPlace, brief: string, title: string, handle?: string): Promise<{ ok: true; session: string } | { ok: false; why: string }>
+  /** Where `tasks.report` goes, for a test (the host this module was started by, otherwise). */
+  report?: { env?: Record<string, string | undefined>; fetch?: typeof fetch; log?: (line: string) => void }
   /** Whether the host's server sent this request (`vouchHost`). */
   vouch(headers: Headers): Promise<{ ok: true } | { ok: false; why: string }>
 }
@@ -250,7 +259,8 @@ export async function bringConversation(asked: ConversationsBringParams, needs: 
   const root = projectRoot(asked.project)
   if (!root.ok) return { outcome: 'declined', place: null, resumed: false, why: clip(root.error, LIMITS.REASON) }
   const project = root.value
-  const id = asked.session
+  /* A handle `start` answered (protocol 2.99.0) stands for the conversation it started. */
+  const id = theRuns().sessionOf(asked.session)
   if (!needs.program.isId(id)) return { outcome: 'no-such-session', place: null, resumed: false, why: 'That is not a Claude Code conversation’s id.' }
   const read = readPlaces(project)
   if (!read.ok) return { outcome: 'declined', place: null, resumed: false, why: clip(read.error, LIMITS.REASON) }
@@ -280,12 +290,25 @@ export async function bringConversation(asked: ConversationsBringParams, needs: 
   return { outcome: 'brought', place: conversationPlaceOf(written.value.places[placeKey(place)]), resumed, why: '' }
 }
 
-/** `start`: a new conversation in the project, fed the brief, filed under the place (the project itself for null). */
-export async function startTask(asked: AgentTaskStartParams, needs: Pick<HostNeeds, 'start'>): Promise<AgentTaskStartResult> {
+/**
+ * `start`: a new conversation in the project, fed the brief, filed under the place (the project itself
+ * for null). Answered at once (protocol 2.99.0): declined when the folder is no project or Claude Code
+ * is not installed, else accepted under a handle while Claude Code starts after the answer.
+ */
+export async function startTask(asked: AgentTaskStartParams, needs: Pick<HostNeeds, 'start' | 'program' | 'report'>): Promise<AgentTaskStartResult> {
   const root = projectRoot(asked.project)
-  if (!root.ok) return { outcome: 'declined', session: null, why: clip(root.error, LIMITS.REASON) }
-  const started = await needs.start(root.value, namedPlace(asked.place), asked.brief, asked.title)
-  return started.ok ? { outcome: 'started', session: started.session, why: '' } : { outcome: 'declined', session: null, why: clip(started.why, LIMITS.REASON) }
+  if (!root.ok) return { outcome: 'declined', session: null, why: clip(root.error, LIMITS.REASON), pending: false }
+  if (!needs.program.find().file) return { outcome: 'declined', session: null, why: `${needs.program.name} is not installed on this computer.`, pending: false }
+  const handle = needs.program.newId()
+  const place = namedPlace(asked.place)
+  return acceptTask(
+    handle,
+    async () => {
+      const started = await needs.start(root.value, place, asked.brief, asked.title, handle)
+      return started.ok ? { ok: true, conversation: started.session } : { ok: false, why: clip(started.why, LIMITS.REASON) }
+    },
+    { module: ID, ...needs.report, log: needs.report?.log ?? ((line) => console.log(`claude: ${line}`)) },
+  )
 }
 
 /* ------------------------------------------------------------------ the door */
@@ -343,7 +366,7 @@ export const HOST_DOOR: Before = hostDoor(() => {
       return Boolean(run && !run.ended)
     },
     told: (projectPath, assigned) => runs.told(projectPath, assigned),
-    start: (projectPath, place, brief, title) => runs.startTask(projectPath, place, brief, title),
+    start: (projectPath, place, brief, title, handle) => runs.startTask(projectPath, place, brief, title, handle),
     vouch: (headers) => vouchHost(headers),
   }
 })

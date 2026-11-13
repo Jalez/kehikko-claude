@@ -240,15 +240,34 @@ function machine(options: { backgrounds: boolean }) {
       return pty
     },
   })
-  return { runs, ptys, bg, minted }
+  return { runs, ptys, bg, minted, program }
 }
 
 describe('start', () => {
-  test('a new conversation in the background, the brief its first prompt, filed under the place with its title', async () => {
+  /**
+   * `start` through `startTask` (protocol 2.99.0): the answer is an acceptance, given before Claude Code
+   * is started; what the start came to is reported to the host (`tasks.report`), captured here.
+   */
+  async function started(m: ReturnType<typeof machine>, asked: Parameters<typeof startTask>[0]) {
+    let reported: (body: { method: string; params: Record<string, unknown> }) => void = () => {}
+    const report = new Promise<{ method: string; params: Record<string, unknown> }>((done) => (reported = done))
+    const fetch = (async (_url: string, init?: RequestInit) => {
+      reported(JSON.parse(String(init?.body)))
+      return Response.json({ ok: true, data: { outcome: 'told', why: '' } })
+    }) as unknown as typeof globalThis.fetch
+    const said = await startTask(asked, { program: m.program, start: (p, place, brief, title, handle) => m.runs.startTask(p, place, brief, title, handle), report: { env: { KEHIKOT_HOST: 'http://127.0.0.1:4170' }, fetch, log: () => {} } })
+    return { said, report }
+  }
+
+  test('accepted at once; then a new conversation in the background, the brief its first prompt, filed under the place with its title', async () => {
     const dir = project()
     const m = machine({ backgrounds: true })
-    const said = await startTask({ project: dir, brief: 'Review !4721 and say what is missing.', place: AT_WRITING, title: 'Review !4721' }, { start: (p, place, brief, title) => m.runs.startTask(p, place, brief, title) })
-    expect(said).toEqual({ outcome: 'started', session: m.minted, why: '' })
+    const { said, report } = await started(m, { project: dir, brief: 'Review !4721 and say what is missing.', place: AT_WRITING, title: 'Review !4721' })
+    expect(said).toEqual({ outcome: 'started', session: m.minted, why: '', pending: true })
+    /* Nothing is started before the answer. */
+    expect(m.bg).toHaveLength(0)
+    expect((await report).params).toEqual({ session: m.minted, conversation: m.minted, outcome: 'started', why: '' })
+    expect((await report).method).toBe('tasks.report')
     expect(m.bg).toHaveLength(1)
     expect(m.bg[0]![0]).toBe('Review !4721 and say what is missing.')
     /* Nothing was typed: the brief went on launch. */
@@ -256,7 +275,7 @@ describe('start', () => {
     const after = read(dir)
     expect(homeOf(after, m.minted)).toBe(placeKey(WRITING))
     expect(after.sessions[m.minted]?.label).toBe('Review !4721')
-    /* The view finds it by its id. */
+    /* The view finds it by the handle it was answered. */
     expect(m.runs.taskAt(m.minted)).toMatchObject({ projectPath: dir })
     for (const run of m.runs.sessions()) m.runs.end(run.id)
   })
@@ -264,25 +283,46 @@ describe('start', () => {
   test('at the project itself (no place): filed under no epic, no parts and no kehikko', async () => {
     const dir = project()
     const m = machine({ backgrounds: true })
-    const said = await startTask({ project: dir, brief: 'Look around.', place: null, title: 'Look around' }, { start: (p, place, brief, title) => m.runs.startTask(p, place, brief, title) })
+    const { said, report } = await started(m, { project: dir, brief: 'Look around.', place: null, title: 'Look around' })
     expect(said.outcome).toBe('started')
+    await report
     expect(homeOf(read(dir), m.minted)).toBe(placeKey(NOWHERE))
     for (const run of m.runs.sessions()) m.runs.end(run.id)
   })
 
-  test('a copy that cannot run in the background starts it in a terminal of this module, under the id it minted', async () => {
+  test('a copy that cannot run in the background starts it in a terminal of this module, under the id it minted, the brief typed at its prompt', async () => {
     const dir = project()
     const m = machine({ backgrounds: false })
-    const said = await startTask({ project: dir, brief: 'Do the thing.', place: AT_WRITING, title: 'Thing' }, { start: (p, place, brief, title) => m.runs.startTask(p, place, brief, title) })
-    expect(said).toEqual({ outcome: 'started', session: m.minted, why: '' })
+    const { said } = await started(m, { project: dir, brief: 'Do the thing.', place: AT_WRITING, title: 'Thing' })
+    expect(said).toEqual({ outcome: 'started', session: m.minted, why: '', pending: true })
+    /* Reported once it is at its prompt with the brief typed (up to a minute): here, that it is under way. */
+    while (!m.ptys[0]) await new Promise((done) => setTimeout(done, 5))
     expect(m.ptys[0]!.args).toEqual(['--session-id', m.minted])
     expect(homeOf(read(dir), m.minted)).toBe(placeKey(WRITING))
     for (const run of m.runs.sessions()) m.runs.end(run.id)
   })
 
-  test('a folder that is no project is declined', async () => {
+  test('one that ends before its prompt did not start: reported failed, in words', async () => {
+    const dir = project()
+    const m = machine({ backgrounds: false })
+    const { report } = await started(m, { project: dir, brief: 'Do the thing.', place: AT_WRITING, title: 'Thing' })
+    while (!m.ptys[0]) await new Promise((done) => setTimeout(done, 5))
+    m.ptys[0].kill()
+    expect((await report).params).toEqual({ session: m.minted, conversation: null, outcome: 'failed', why: 'Claude Code ended before it was ready for the task' })
+    expect(m.runs.handled(m.minted)).toEqual({ session: null, failed: 'Claude Code ended before it was ready for the task' })
+  })
+
+  test('a folder that is no project is declined at once', async () => {
     const m = machine({ backgrounds: true })
-    expect(await startTask({ project: join(tmpdir(), 'no-such-folder-here'), brief: 'x', place: null, title: 'x' }, { start: (p, place, brief, title) => m.runs.startTask(p, place, brief, title) })).toMatchObject({ outcome: 'declined', session: null })
+    const { said } = await started(m, { project: join(tmpdir(), 'no-such-folder-here'), brief: 'x', place: null, title: 'x' })
+    expect(said).toMatchObject({ outcome: 'declined', session: null, pending: false })
+  })
+
+  test('Claude Code not installed is declined at once, in words', async () => {
+    const m = machine({ backgrounds: true })
+    const program = { ...m.program, find: () => ({ file: null, looked: [], usual: [] }) }
+    const said = await startTask({ project: project(), brief: 'x', place: null, title: 'x' }, { program, start: async () => ({ ok: false, why: 'never asked' }) })
+    expect(said).toEqual({ outcome: 'declined', session: null, why: 'Claude Code is not installed on this computer.', pending: false })
   })
 })
 
@@ -298,7 +338,13 @@ describe('the door answers only the host', () => {
     })
   const door = (dir: string) => {
     const started: string[] = []
-    const fn = hostDoor(() => ({ ...needs(), vouch, start: async (_p, _place, brief) => (started.push(brief), { ok: true, session: randomUUID() }) }))
+    const fn = hostDoor(() => ({
+      ...needs(),
+      program: { ...PROGRAM, find: () => ({ file: '/fake/bin/claude', looked: [], usual: [] }) },
+      report: { env: { KEHIKOT_HOST: 'http://127.0.0.1:9' }, log: () => {} },
+      vouch,
+      start: async (_p, _place, brief) => (started.push(brief), { ok: true, session: randomUUID() }),
+    }))
     return { fn, started, dir }
   }
   const post = (path: string, body: unknown, headers: Record<string, string> = { [SERVICE_CALLER_HEADER]: HOST_CALLER, [SERVICE_PASS_HEADER]: PASS }) => {
@@ -318,7 +364,9 @@ describe('the door answers only the host', () => {
     const bring = post(BRING_PATH, { project: dir, session: id, to: AT_WRITING, from: null })
     expect(await (await d.fn(bring.request, bring.info))!.json()).toMatchObject({ outcome: 'brought' })
     const start = post(START_PATH, { project: dir, brief: 'the brief', place: null, title: 'A task' })
-    expect(await (await d.fn(start.request, start.info))!.json()).toMatchObject({ outcome: 'started' })
+    expect(await (await d.fn(start.request, start.info))!.json()).toMatchObject({ outcome: 'started', pending: true })
+    /* Started after the answer (protocol 2.99.0). */
+    await new Promise((done) => setTimeout(done, 20))
     expect(d.started).toEqual(['the brief'])
   })
 

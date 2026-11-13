@@ -28,18 +28,29 @@ export function TaskPage({ session, api = realApi }: { session: string; api?: Ap
   const [said, setSaid] = useState<string | null>(null)
   useEffect(() => {
     let left = false
-    void (async () => {
+    let again: ReturnType<typeof setTimeout> | null = null
+    const look = async (): Promise<void> => {
       try {
         const at = await api.task?.(session)
         if (left) return
         if (!at) return setSaid('This conversation is not running here, and no task started it.')
-        setTarget({ what: 'session', projectPath: at.projectPath, place: at.place, session })
+        /* Accepted and still starting (protocol 2.99.0): said, and asked again until Claude Code names the conversation. */
+        if (at.failed) return setSaid(`Claude Code could not start this conversation: ${at.failed}`)
+        if (at.session === null) {
+          setSaid('Claude Code is starting this conversation…')
+          again = setTimeout(() => void look(), 1000)
+          return
+        }
+        setSaid(null)
+        setTarget({ what: 'session', projectPath: at.projectPath, place: at.place, session: at.session ?? session })
       } catch (error) {
         if (!left) setSaid(error instanceof Error ? error.message : String(error))
       }
-    })()
+    }
+    void look()
     return () => {
       left = true
+      if (again) clearTimeout(again)
     }
   }, [api, session])
   return (
