@@ -1,11 +1,11 @@
 import { PROJECT_ID, doorContext, doorSpace, epicPartsOf, manifestSchema, readTellFinished, tellFinishedTool, type Manifest } from 'kehikot-module-protocol'
-import { answerMessageTool, messageToolsFor, establishBuild, hostHasProject, hostVouches, refuseTicket, sameTicket, settingsDoor, type Reply, type Stream } from 'kehikot-module-protocol/serve'
+import { answerMessageTool, deliveryReply, messageToolsFor, establishBuild, hostHasProject, hostVouches, refuseTicket, sameTicket, settingsDoor, type Reply, type Stream } from 'kehikot-module-protocol/serve'
 import { foldersIssue } from './folders.ts'
 import { SETTINGS, SETTINGS_FILE } from './settings.ts'
 import { isSetupKey, readSetup, writeSetup } from './setup.ts'
 
 import { TICKET, elsewhereOf, sameProject, theRuns, type Elsewhere, type Run, type Runs } from './live.ts'
-import { ID, MANIFEST as DECLARED, VERSION } from './manifest.ts'
+import { ADOPT, DELIVER_PATH, ID, MANIFEST as DECLARED, VERSION } from './manifest.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, readPlaceKey, type Place } from './place.ts'
 import { PROGRAM, headOf, home, type Program, type Recorded, type Running, type State } from './program.ts'
 import { PLACE_TOKEN, WHERE, assign, detach, follow, homeOf, isDetached, ownOf, projectRoot, readPlaces, readSettings, recordedIds, rekey, sessionsAt, writeSettings, type Places } from './record.ts'
@@ -691,7 +691,7 @@ async function mcp(rpc: Rpc, token: string | null = null): Promise<Reply> {
     try {
       const name = String(rpc.params?.name ?? '')
       /* send_message and read_messages: a thin adapter over the host's messages (protocol 2.41.0). */
-      const messaged = await answerMessageTool(name, rpc.params?.arguments ?? {}, { module: ID, token, act })
+      const messaged = await answerMessageTool(name, rpc.params?.arguments ?? {}, { module: ID, token, act, adopt: ADOPT })
       if (messaged) return text(messaged.text, messaged.isError)
       if (name === 'tell_finished') return text(tellFinished(rpc.params?.arguments ?? {}, token))
       return text(await call(name, rpc.params?.arguments ?? {}))
@@ -777,6 +777,11 @@ export async function answer(
     if (!PLACE_TOKEN.test(token)) return ok({ ok: true, place: null })
     return ok({ ok: true, place: theRuns().placeOf(token, query.get('project')) })
   }
+
+  /* `agent.delivery` (protocol 2.96.0): the host knocks after it keeps a message in a project, and the
+     module delivers to the conversations it runs there that have messages waiting (`messageDelivery`).
+     The knock grants nothing: what a session may read is the host's to say when this module asks. */
+  if (path === DELIVER_PATH) return deliveryReply(method, body, async () => (await theRuns().delivery?.tick()) ?? 0)
 
   /* Claude Code's SessionStart hook, through `started.sh`: a session started somewhere, in a
      folder. Listed at once in that project as not yet assigned — when the host holds the folder
