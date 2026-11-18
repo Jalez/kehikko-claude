@@ -4131,6 +4131,16 @@ export function keptProjects(runs: Pick<Runs, 'know'>, options: Partial<Omit<Kno
   })
 }
 
+/**
+ * This module's message delivery loop (protocol `messageDelivery`): what it types into a session, and
+ * whether its program takes a line typed during a turn. The protocol's loop does not poll the host (2.103.0):
+ * it asks when the host knocks (`agent.delivery`), when a session is first listed, and every few minutes as a
+ * safety. `sessions` is the runs' own list; the conformance test hands it one session to watch the loop idle.
+ */
+export function deliveryOf(runs: Runs, log: (line: string) => void = () => {}, sessions: () => DeliverySession[] = () => runs.deliverySessions()) {
+  return messageDelivery({ module: 'kehikot.claude', queues: true, sessions, type: (key, text) => runs.deliver(key, text), resume: (key, text) => runs.resumeFor(key, text), log })
+}
+
 export function theRuns(log: (line: string) => void = () => {}): Runs {
   const held = globalThis as { [HELD]?: Runs }
   if (held[HELD]) return held[HELD]
@@ -4149,7 +4159,7 @@ export function theRuns(log: (line: string) => void = () => {}): Runs {
   held[HELD] = runs
   /* A message to a session idle at its prompt wakes it (protocol 2.43.0): the protocol's rule, typed through `wake`. */
   /* Claude Code takes a line typed during a turn as its next prompt: a working session is typed into at once. */
-  const delivery = messageDelivery({ module: 'kehikot.claude', queues: true, sessions: () => runs.deliverySessions(), type: (key, text) => runs.deliver(key, text), resume: (key, text) => runs.resumeFor(key, text), log })
+  const delivery = deliveryOf(runs, log)
   /* The host's knock (`agent.delivery`, protocol 2.96.0) runs a look at once instead of waiting for the next one. */
   runs.delivery = delivery
   delivery.start()
