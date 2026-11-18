@@ -34,7 +34,7 @@ import { configDir } from './program.ts'
  * port is followed, and exits 0 whatever happens. Written when a person
  * presses "Report sessions started outside Kehikot", and at no other time;
  * the press says what it writes first. The rest of the file is kept as it is.
- * `enabled` reads it; nothing here removes it (the person deletes the entry).
+ * `enabled` reads it. `disable` removes it, and only it, when the module is uninstalled (`uninstall.ts`).
  *
  * ## When this module moves
  *
@@ -133,4 +133,39 @@ export function enable(env: NodeJS.ProcessEnv = process.env, command = hookComma
   writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`)
   renameSync(temporary, file)
   return { ok: true, already: false, file }
+}
+
+/**
+ * Take this module's entries out, keeping everything else (Uninstall, protocol 2.108.0): every hook of
+ * ours in `SessionStart`, a group left with no hook dropped, and `SessionStart` itself dropped when
+ * nothing is left in it. A person's own entry beside ours is never touched. `removed` counts the hooks
+ * taken out; zero writes nothing.
+ */
+export function disable(env: NodeJS.ProcessEnv = process.env): { ok: true; removed: number; file: string } | { ok: false; error: string; file: string } {
+  const file = settingsFile(env)
+  if (!existsSync(file)) return { ok: true, removed: 0, file }
+  const got = read(file)
+  if (!got.ok) return { ...got, file }
+  const hooks = got.settings.hooks
+  if (typeof hooks !== 'object' || hooks === null || Array.isArray(hooks)) return { ok: true, removed: 0, file }
+  const start = (hooks as Record<string, unknown>).SessionStart
+  if (!Array.isArray(start)) return { ok: true, removed: 0, file }
+  let removed = 0
+  const next = start.flatMap((group: unknown) => {
+    if (!ours([group]) || typeof group !== 'object' || group === null) return [group]
+    const inner = (group as { hooks?: unknown }).hooks
+    if (!Array.isArray(inner)) return [group]
+    const kept = inner.filter((one: unknown) => {
+      if (!ours([one])) return true
+      removed += 1
+      return false
+    })
+    return kept.length ? [{ ...(group as Record<string, unknown>), hooks: kept }] : []
+  })
+  if (!removed) return { ok: true, removed: 0, file }
+  const { SessionStart: _gone, ...rest } = hooks as Record<string, unknown>
+  const temporary = `${file}.${process.pid}.tmp`
+  writeFileSync(temporary, `${JSON.stringify({ ...got.settings, hooks: next.length ? { ...rest, SessionStart: next } : rest }, null, 2)}\n`)
+  renameSync(temporary, file)
+  return { ok: true, removed, file }
 }
