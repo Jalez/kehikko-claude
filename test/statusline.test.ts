@@ -6,6 +6,8 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { settled } from 'kehikot-module-protocol/testing'
+
 import { PROGRAM, ownStatusLine } from '../program.ts'
 import { sessionPlugin, statusScriptIn, writeComposer, writeOwnStatusLine } from '../skills.ts'
 import { compose } from '../statusline-line.mjs'
@@ -68,8 +70,7 @@ async function plugin(own: string | null, runtime: string | null = null): Promis
 const jobs: string[] = []
 afterEach(async () => {
   const pending = jobs.splice(0)
-  const end = Date.now() + 10_000
-  while (pending.some((dir) => readdirSync(dir).length > 0) && Date.now() < end) await new Promise((done) => setTimeout(done, 20))
+  await settled(() => pending.some((dir) => readdirSync(dir).length > 0), { what: 'the status line script’s background post to end' })
 })
 
 /** Run a command line as Claude Code would (bash, the JSON on stdin), and what came out, as bytes. */

@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
+import { MACHINE } from './setup.ts'
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -92,7 +93,7 @@ describe('what a place holds', () => {
     expect(said.program.found).toBeNull()
     expect(said.program.looked.length).toBeGreaterThan(2)
     /* For the one sentence: PATH as one word, then where an install usually lands, the home folder as ~. */
-    expect(said.program.where).toBe('PATH, ~/.local/bin, ~/.claude/local, /opt/homebrew/bin')
+    expect(said.program.where).toBe(`PATH, ~/.local/bin, ~/.claude/local, ${MACHINE}/opt/homebrew/bin`)
     expect(lookedIn(['/Users/someone/.local/bin', '/opt/homebrew/bin'], '/Users/someone')).toBe('PATH, ~/.local/bin, /opt/homebrew/bin')
     expect(said.program.install.line).toContain('install.sh')
     expect(said.running).toEqual([])

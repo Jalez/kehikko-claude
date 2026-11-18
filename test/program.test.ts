@@ -6,7 +6,7 @@ import { delimiter, dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 import { PROGRAM, configDir, firstPrompt, headOf, home, readActive, recordDirs, recordFile, sessionName, tailOf, type Recorded } from '../program.ts'
-import { CONFIG, HOME } from './setup.ts'
+import { CONFIG, HOME, MACHINE } from './setup.ts'
 
 /**
  * The adapter, against a stand-in `claude` and a scratch config folder.
@@ -55,7 +55,7 @@ describe('finding the binary', () => {
     const none = PROGRAM.find({ HOME, PATH: '/usr/bin:/bin' })
     expect(none.file).toBeNull()
     expect(none.looked.slice(0, 3)).toEqual(['/usr/bin', '/bin', join(HOME, '.local', 'bin')])
-    expect(none.looked).toContain('/opt/homebrew/bin')
+    expect(none.looked).toContain(join(MACHINE, '/opt/homebrew/bin'))
 
     mkdirSync(join(HOME, '.local', 'bin'), { recursive: true })
     copyFileSync(STAND_IN, join(HOME, '.local', 'bin', 'claude'))
