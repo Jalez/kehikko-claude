@@ -391,13 +391,23 @@ export function home(env: NodeJS.ProcessEnv = process.env): string {
  * launcher (see `INSTALL` below), so it is the one that must be here for
  * "install, then carry on" to work under the desktop app.
  */
+/**
+ * A place outside the home folder (Homebrew's prefixes). `KEHIKOT_CLAUDE_ROOT` puts them under a folder of
+ * its own, so a test looks in places that are empty rather than in this machine's real Homebrew (the home
+ * folder is already the test's own). Unset, as it is in the app, they are the real places.
+ */
+function onThisMachine(env: NodeJS.ProcessEnv, path: string): string {
+  const root = env.KEHIKOT_CLAUDE_ROOT ?? process.env.KEHIKOT_CLAUDE_ROOT
+  return root ? join(root, path) : path
+}
+
 function usualDirs(env: NodeJS.ProcessEnv): string[] {
   const at = home(env)
   return [
     join(at, '.local', 'bin'),
     join(at, '.claude', 'local'),
-    '/opt/homebrew/bin',
-    '/usr/local/bin',
+    onThisMachine(env, '/opt/homebrew/bin'),
+    onThisMachine(env, '/usr/local/bin'),
     join(at, '.npm-global', 'bin'),
     join(at, '.bun', 'bin'),
   ]
