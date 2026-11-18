@@ -35,6 +35,15 @@ import { configDir } from './program.ts'
  * presses "Report sessions started outside Kehikot", and at no other time;
  * the press says what it writes first. The rest of the file is kept as it is.
  * `enabled` reads it; nothing here removes it (the person deletes the entry).
+ *
+ * ## When this module moves
+ *
+ * The entry names the folder this module ran from when it was pressed. Kehikot
+ * may later run the module from another one — its installed release instead of
+ * the person's own checkout, or back — and the old folder may then be removed.
+ * So at every start `repair` points an entry of ours at the folder running now
+ * (and the registration this module has now), leaving every other entry, and
+ * every other key of the file, as it was. It never adds an entry nobody pressed.
  */
 
 /** The settings file the entry goes in. */
@@ -69,6 +78,44 @@ function ours(entries: unknown): boolean {
 export function enabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const got = read(settingsFile(env))
   return got.ok && ours(got.settings.hooks?.SessionStart)
+}
+
+/**
+ * Point an entry of ours at this folder (`command`) when it names another one: what a press wrote
+ * from a folder Kehikot no longer runs this module from. Only the commands of our own entries are
+ * rewritten, and only when they differ; nothing is added and the rest of the file is kept.
+ * `repaired` counts the commands rewritten; zero writes nothing.
+ */
+export function repair(env: NodeJS.ProcessEnv = process.env, command = hookCommand()): { ok: true; repaired: number; file: string } | { ok: false; error: string } {
+  const file = settingsFile(env)
+  if (!existsSync(file)) return { ok: true, repaired: 0, file }
+  const got = read(file)
+  if (!got.ok) return got
+  const hooks = got.settings.hooks
+  if (typeof hooks !== 'object' || hooks === null || Array.isArray(hooks)) return { ok: true, repaired: 0, file }
+  const start = (hooks as Record<string, unknown>).SessionStart
+  if (!Array.isArray(start)) return { ok: true, repaired: 0, file }
+  let repaired = 0
+  const next = start.map((group: unknown) => {
+    if (!ours([group]) || typeof group !== 'object' || group === null) return group
+    const inner = (group as { hooks?: unknown }).hooks
+    if (!Array.isArray(inner)) return group
+    return {
+      ...(group as Record<string, unknown>),
+      hooks: inner.map((one: unknown) => {
+        if (typeof one !== 'object' || one === null) return one
+        const said = (one as { command?: unknown }).command
+        if (typeof said !== 'string' || !ours([one]) || said === command) return one
+        repaired += 1
+        return { ...(one as Record<string, unknown>), command }
+      }),
+    }
+  })
+  if (!repaired) return { ok: true, repaired: 0, file }
+  const temporary = `${file}.${process.pid}.tmp`
+  writeFileSync(temporary, `${JSON.stringify({ ...got.settings, hooks: { ...(hooks as Record<string, unknown>), SessionStart: next } }, null, 2)}\n`)
+  renameSync(temporary, file)
+  return { ok: true, repaired, file }
 }
 
 /** Add the entry, keeping everything else. `already` when it was there. */

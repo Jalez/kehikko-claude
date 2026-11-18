@@ -21,6 +21,7 @@ import { cutOffs, cutOffWords, lastPrompt, midTurn, type CutOff } from './cutoff
 import { PROGRAM, headOf, home, recordFile, sessionName, type Active, type ActiveStatus, type Able, type Program, type Running, type State } from './program.ts'
 import { PLACE_TOKEN, assign, attach, born, byToken, follow, homeOf, isDetached, markSession, markSessions, note, ownOf, projectRoot, readPlaces, readSettings, recordedIds, sighted, stayDetached, tokenFor, type NamedPlace, type PlaceEntry, type Places, type SessionEntry } from './record.ts'
 import { readKeptGuards, writeKeptGuards } from './restarted.ts'
+import { repair as repairHook } from './hook.ts'
 import { heldSkills, removePlugin, sessionPlugin, statusScriptIn, sweepKits, writeComposer, writeOwnStatusLine, writeUnguarded } from './skills.ts'
 import { WorkQueueLookup, askedProviders, type FindProviders } from './workQueue.ts'
 import { answersAt, claimable, configDirOf, freshToken, handedDoors, hostDoors, hostPlace, keptDirOf, keptDoors, keptPlace, keptProblems, legacyKeptDirOf, onStartingHost, removeConfig, sweepKept, writeConfig, withOwnDoor, writeKeptConfig, writeKeptOwner, writeKeptPlace, type DoorsAsked, type HostPlace, type SessionDoor } from './doorConfig.ts'
@@ -4173,6 +4174,12 @@ export function theRuns(log: (line: string) => void = () => {}): Runs {
   } catch {
     /* Swept at the next start. */
   }
+
+  /* The hook a press wrote into the person's Claude Code settings names the folder this module ran
+     from then: pointed at the folder running now, so a folder Kehikot no longer runs it from can go (hook.ts). */
+  const hook = repairHook()
+  if (!hook.ok) log(`claude: the session hook in your Claude Code settings could not be checked — ${hook.error}`)
+  else if (hook.repaired) log(`claude: the session hook in ${hook.file} named another folder of this module; it now runs ${import.meta.dirname}`)
 
   /* Stopping, however it is asked. `exit` covers Vite's own handling of
      SIGTERM; the signals are here for when nothing else is listening. */
