@@ -9,7 +9,7 @@ import { PROJECT_ID, projectFile, readProjectFile } from 'kehikot-module-protoco
 import type { RunSockets } from 'kehikot-module-protocol/run'
 import { HOST_DOOR_MODULE, isStableDoor, messageDelivery, mintTicket, pasted, sameTicket, startingHost, watchKnownProjects, type DeliverySession, type KnownProjects, type KnownProjectsOptions } from 'kehikot-module-protocol/serve'
 import type { DeliveryState, KehikkoSkill } from 'kehikot-module-protocol'
-import { DECISION_EVENT, REFUSED_EVENT, RESEARCH_COMPLETE_EVENT, STALLED_EVENT, TURN_EVENTS, TURN_KINDS, refusalEnd, refusalOf, refusalWords, toldReply, turnEnd, turnQuestion, type ActivityQuestion, type Refusal as Refused, type TurnEnd, type TurnKind } from 'kehikot-module-protocol'
+import { DECISION_EVENT, REFUSED_EVENT, RESUME_WINDOW_MS, cutOffByRestart, keepsCutOffMark, restartOf, resumeLine, RESEARCH_COMPLETE_EVENT, STALLED_EVENT, TURN_EVENTS, TURN_KINDS, refusalEnd, refusalOf, refusalWords, toldReply, turnEnd, turnQuestion, type ActivityQuestion, type Refusal as Refused, type TurnEnd, type TurnKind } from 'kehikot-module-protocol'
 
 import { emptyPrompt, promptAfter, typedByPerson, type Prompt } from './input.ts'
 import { Gauges } from './gauges.ts'
@@ -330,10 +330,11 @@ const TAKEN_AFTER = 5_000
 
 /**
  * The one sentence this module ever sends a conversation, and only one that a restart cut off
- * mid-turn (see `recover`): once per interruption, behind the person's setting "Resume
- * conversations cut off by a restart", which is on unless they turned it off.
+ * (see `recover`): once per interruption, behind the person's setting "Resume conversations cut off
+ * by a restart", which is on unless they turned it off. Since protocol 2.110.0 it says why when the
+ * host did (`resumeLine(restartOf())`: an update, a restart); this is the one with no reason.
  */
-export const RESUME_LINE = 'Kehikot restarted while you were working. Some background work may have been cut off: check your task notifications and resume anything unfinished.'
+export const RESUME_LINE = resumeLine()
 /** The setting's words, as the page draws them. */
 export const RESUME_SETTING = 'Resume conversations cut off by a restart'
 /**
@@ -341,7 +342,7 @@ export const RESUME_SETTING = 'Resume conversations cut off by a restart'
  * grown to be judged by its transcript instead (`midTurn`): the update that brought this release
  * ended the sessions the old one held, and only their records say where they were.
  */
-const LEGACY_WINDOW = 30 * 60_000
+const LEGACY_WINDOW = RESUME_WINDOW_MS
 /** How far back a conversation's cut-off tasks are told the first time its transcript is read. */
 const FIRST_LOOK = 24 * 60 * 60_000
 /** How often the transcripts of the watched projects' conversations are read for cut-off work, at most. */
@@ -1475,6 +1476,9 @@ export class Runs {
    * Then every conversation's transcript is read for background tasks that were cut off or failed
    * (`readCutOffs`), so what happened while this module was down is told too.
    */
+  /** The conversations this process has begun to wake after a restart: each once. */
+  private readonly wakingNow = new Set<string>()
+
   async recover(projectPath: string): Promise<void> {
     if (!this.swept) {
       this.swept = true
@@ -1499,7 +1503,8 @@ export class Runs {
         continue
       }
       const at = placeEntryFor(read.value, id)
-      if (at && (entry.working || (await this.wasCut(projectPath, id, entry)))) candidates.push([id, at])
+      /* Whether it is still running is asked of the program below, once, for every candidate. */
+      if (at && cutOffByRestart({ running: false, background: entry.background, marked: Boolean(entry.working), legacy: entry.working ? null : await this.legacyOf(projectPath, id, entry) })) candidates.push([id, at])
     }
     const file = candidates.length ? this.program.find().file : null
     const running = file ? await this.running(file) : ({ known: false, why: 'failed' } as const)
@@ -1508,7 +1513,9 @@ export class Runs {
       const settings = readSettings(projectPath)
       const live = new Set(running.active.map((one) => one.session))
       for (const [id, at] of candidates) {
-        if (live.has(id) || this.find(id)) continue
+        if (live.has(id) || this.find(id) || this.wakingNow.has(id)) continue
+        /* Two checks of one start can overlap (the project known, and asked again): one wake each. */
+        this.wakingNow.add(id)
         /* Once per interruption: the mark goes before anything else is tried. */
         markSession(projectPath, id, (one) => {
           if (!one.working) return false
@@ -1523,7 +1530,7 @@ export class Runs {
           this.log(`claude: ${id} was working when it was cut off by a restart; this ${this.program.name} cannot run it in the background, so it is left for the person to open`)
           continue
         }
-        const woke = await this.launch(file, able, projectPath, projectIdAt(projectPath), id, placeOf(at), RESUME_LINE)
+        const woke = await this.launch(file, able, projectPath, projectIdAt(projectPath), id, placeOf(at), resumeLine(restartOf()))
         if (!woke.ok) {
           this.log(`claude: ${id} was working when it was cut off by a restart, and could not be woken — ${woke.why}`)
           continue
@@ -1543,16 +1550,19 @@ export class Runs {
    * never read by this release (no `cutOff`), never run in the background, its transcript grown in
    * the last half hour, and its last turn not ended.
    */
-  private async wasCut(projectPath: string, id: string, entry: SessionEntry): Promise<boolean> {
-    if (entry.cutOff || entry.background || entry.resumed) return false
+  private async legacyOf(projectPath: string, id: string, entry: SessionEntry): Promise<{ grewAgoMs: number; midTurn: boolean } | null> {
+    if (entry.cutOff || entry.background || entry.resumed) return null
     const file = await recordFile(projectPath, id)
-    if (!file) return false
+    if (!file) return null
+    let grewAgoMs: number
     try {
-      if (this.now() - (await stat(file)).mtimeMs > LEGACY_WINDOW) return false
+      grewAgoMs = this.now() - (await stat(file)).mtimeMs
     } catch {
-      return false
+      return null
     }
-    return midTurn(await tailOfFile(file, CUTOFF_TAIL))
+    /* Not read at all when it is older than the window: the rule would say no anyway. */
+    if (grewAgoMs > LEGACY_WINDOW) return null
+    return { grewAgoMs, midTurn: midTurn(await tailOfFile(file, CUTOFF_TAIL)) }
   }
 
   /**
@@ -1596,7 +1606,7 @@ export class Runs {
         if (!(entry.cutOff && grown <= since && !pending)) {
           const tail = await tailOfFile(file, CUTOFF_TAIL)
           fresh = cutOffs(tail).filter((one) => one.at > since)
-          this.heardPrompt(id, lastPrompt(tail, [RESUME_LINE]))
+          this.heardPrompt(id, lastPrompt(tail))
         }
       }
       const open: CutOff[] = [...owed, ...fresh].slice(-8)
@@ -1785,11 +1795,13 @@ export class Runs {
    * gone when its turn ends or it stops for the person. Nothing is said of "no state": that is also
    * what a conversation cut off looks like, and the mark is what tells that apart (`recover`).
    */
-  private markWorking(projectPath: string, id: string | null, state: State | null, held = true): void {
+  private markWorking(projectPath: string, id: string | null, state: State | null, held = true, waking = 0): void {
     if (!id || state === null) return
     /* Only a conversation whose process this module holds can be cut off by this module stopping:
-       one it is a view of, or one nobody here views, runs on in its own process. */
-    const working = state === 'working' && held
+       one it is a view of, or one nobody here views, runs on in its own process. Marked while it
+       works, and while its turn ended waiting on its own background work, which runs in that same
+       process (protocol 2.110.0, `keepsCutOffMark`). */
+    const working = keepsCutOffMark({ held, working: state === 'working', waking: state === 'finished' ? waking : 0 })
     /* A question seen is not news until it is asked again: moving on clears the mark (`saw`). */
     const moved = state !== 'needs-you'
     const written = markSession(projectPath, id, (entry) => {
@@ -3728,7 +3740,7 @@ export class Runs {
     if (state === 'working' || state === 'finished') run.turned = true
     run.seen = run.looking.size > 0 || (state === 'needs-you' && this.lookedAt(run.projectPath, run.settled))
     if (state === 'finished' && run.secret !== null) run.idleAt = Math.max(run.idleAt, run.stateSince)
-    this.markWorking(run.projectPath, run.settled, state, !run.joined)
+    this.markWorking(run.projectPath, run.settled, state, !run.joined, (run.background || 0) + (run.crons || 0))
     /* Seen because somebody has it on screen as it comes to wait: written, so that it stays seen. */
     if (run.looking.size > 0) this.keepLooked(run)
     this.tell(run)

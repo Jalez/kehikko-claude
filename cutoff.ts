@@ -1,3 +1,5 @@
+import { isResumeLine } from 'kehikot-module-protocol'
+
 /**
  * What a conversation's own record says about its background work: the tasks that were cut off
  * or failed, whether the person has moved on since, and whether its last turn ended.
@@ -175,7 +177,7 @@ export function lastPrompt(text: string, except: readonly string[] = []): number
     if (kind !== undefined && kind !== 'human') continue
     if (isToolResult(row)) continue
     const said = contentOf(row).trim()
-    if (!said || said.startsWith('<task-notification>') || typedNotice(said) || except.some((line) => said === line)) continue
+    if (!said || said.startsWith('<task-notification>') || typedNotice(said) || isResumeLine(said) || except.some((line) => said === line)) continue
     const at = timeOf(row)
     if (Number.isFinite(at) && at > last) last = at
   }

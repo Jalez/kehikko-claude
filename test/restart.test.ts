@@ -295,6 +295,54 @@ describe('a conversation a restart cut off mid-turn', () => {
     expect(third.runs.activity(dir).some((one) => one.id === `resumed:${A}`)).toBe(false)
   })
 
+  test('one whose turn ended waiting on its own background work keeps its mark and is woken too (protocol 2.110.0)', async () => {
+    const m = machine()
+    const dir = project()
+    const { first, run } = await heldAndLost(m, dir)
+    /* The turn ends with two background tasks still running in its process. */
+    expect(first.runs.heard(run.id, run.secret, 'Stop', 2)).toBe(true)
+    expect(entryOf(dir, A)?.working).toBeString()
+    first.runs.endAll()
+    await settle()
+    const second = m.module()
+    second.runs.know(dir)
+    await second.runs.recovered(dir)
+    expect(m.calls.bg.at(-1)?.slice(0, 2)).toEqual(['--resume', A])
+  })
+
+  test('a turn that ended with nothing running loses its mark: a finished conversation is never woken', async () => {
+    const m = machine()
+    const dir = project()
+    const { first, run } = await heldAndLost(m, dir)
+    /* Said done, as a turn ends; a stop with nothing said would be sent back once instead. */
+    run.token = run.token ?? 'kp_0123456789abcdef0123'
+    first.runs.tellFinished(run.token, 'done', 'methods tightened')
+    expect(first.runs.heard(run.id, run.secret, 'Stop', 0, null, { again: true })).toBe(true)
+    expect(entryOf(dir, A)?.working).toBeUndefined()
+  })
+
+  test('the sentence says why when the host said: an update, with its version (protocol 2.110.0)', async () => {
+    const m = machine()
+    const dir = project()
+    const { first } = await heldAndLost(m, dir)
+    first.runs.endAll()
+    await settle()
+    const was = { reason: process.env.KEHIKOT_RESTART_REASON, version: process.env.KEHIKOT_RESTART_VERSION }
+    process.env.KEHIKOT_RESTART_REASON = 'app-update'
+    process.env.KEHIKOT_RESTART_VERSION = '0.7.36'
+    try {
+      const second = m.module()
+      second.runs.know(dir)
+      await second.runs.recovered(dir)
+      expect(m.calls.bg.at(-1)?.[2]).toStartWith('Kehikot restarted to update to 0.7.36 while you were working. Carry on where you left off.')
+    } finally {
+      if (was.reason === undefined) Reflect.deleteProperty(process.env, 'KEHIKOT_RESTART_REASON')
+      else process.env.KEHIKOT_RESTART_REASON = was.reason
+      if (was.version === undefined) Reflect.deleteProperty(process.env, 'KEHIKOT_RESTART_VERSION')
+      else process.env.KEHIKOT_RESTART_VERSION = was.version
+    }
+  })
+
   test('not when the person turned the setting off: the mark goes, nothing is woken', async () => {
     const m = machine()
     const dir = project()
