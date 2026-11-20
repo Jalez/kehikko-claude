@@ -1476,6 +1476,9 @@ export class Runs {
    * Then every conversation's transcript is read for background tasks that were cut off or failed
    * (`readCutOffs`), so what happened while this module was down is told too.
    */
+  /** The conversations this process has begun to wake after a restart: each once. */
+  private readonly wakingNow = new Set<string>()
+
   async recover(projectPath: string): Promise<void> {
     if (!this.swept) {
       this.swept = true
@@ -1510,7 +1513,9 @@ export class Runs {
       const settings = readSettings(projectPath)
       const live = new Set(running.active.map((one) => one.session))
       for (const [id, at] of candidates) {
-        if (live.has(id) || this.find(id)) continue
+        if (live.has(id) || this.find(id) || this.wakingNow.has(id)) continue
+        /* Two checks of one start can overlap (the project known, and asked again): one wake each. */
+        this.wakingNow.add(id)
         /* Once per interruption: the mark goes before anything else is tried. */
         markSession(projectPath, id, (one) => {
           if (!one.working) return false
