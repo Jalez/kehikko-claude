@@ -156,6 +156,17 @@ export function cutOffs(text: string): CutOff[] {
  * another session and a subagent's thread are not the person; nor is a line of this module's own
  * (`except`). Negative infinity for none.
  */
+/**
+ * A prompt Kehikot typed into the conversation for a module or another session (`typedMessages`,
+ * under `⟦…⟧`), and not for the person: a module's report of a test run or a tracker, another session's note. It
+ * wakes the conversation, and is not the person saying something. A batch that holds one of the
+ * person's own (`⟦Your person via …⟧`, an answer from the Inbox) is theirs.
+ */
+export const PERSON_FRAME = '\u27e6Your person via '
+export function typedNotice(said: string): boolean {
+  return said.startsWith('\u27e6') && !said.includes(PERSON_FRAME)
+}
+
 export function lastPrompt(text: string, except: readonly string[] = []): number {
   let last = Number.NEGATIVE_INFINITY
   for (const row of rows(text)) {
@@ -164,7 +175,7 @@ export function lastPrompt(text: string, except: readonly string[] = []): number
     if (kind !== undefined && kind !== 'human') continue
     if (isToolResult(row)) continue
     const said = contentOf(row).trim()
-    if (!said || said.startsWith('<task-notification>') || except.some((line) => said === line)) continue
+    if (!said || said.startsWith('<task-notification>') || typedNotice(said) || except.some((line) => said === line)) continue
     const at = timeOf(row)
     if (Number.isFinite(at) && at > last) last = at
   }
