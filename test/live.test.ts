@@ -1763,7 +1763,7 @@ describe('the activity list a page passes to the host', () => {
       const secret = secretOf(w.ptys[0]!)
       const hear = (event: string, background: number | null = null, more: Parameters<typeof w.runs.heard>[5] = {}) => w.runs.heard(B, secret, event, background, null, more)
       hear('UserPromptSubmit')
-      return { dir, w, lists_, run, viewer, hear, row: () => lists_.at(-1)!.find((one) => one.id === B), refusedRow: () => lists_.at(-1)!.find((one) => one.id === `${B}:refused`) }
+      return { dir, w, lists_, run, viewer, hear, row: () => lists_.at(-1)!.find((one) => one.id === B), refusedRow: () => lists_.at(-1)!.find((one) => one.id === `${B}:refused`), decisionRow: () => lists_.at(-1)!.find((one) => one.id === `${B}:decision`) }
     }
 
     test('declared done is a done item; research names its event', async () => {
@@ -1778,22 +1778,69 @@ describe('the activity list a page passes to the host', () => {
       expect(row()).toMatchObject({ state: 'done', label: 'Protocol audit', event: 'research-complete' })
     })
 
-    test('a decision is attention, shows the question, carries it for the Inbox, and goes when the person answers', async () => {
-      const { w, run, hear, row, dir } = await going()
+    test('a decision is attention, shows the question and carries it for the Inbox, as an item of its own', async () => {
+      const { w, run, hear, row, decisionRow, dir } = await going()
       expect(w.runs.tellFinished(run.token!, 'needs-decision', 'Force-push the rebased branch to origin?')).toContain('Force-push')
       hear('Stop')
-      expect(row()).toMatchObject({ state: 'attention', event: 'needs-decision', label: 'Force-push the rebased branch to origin?', question: { text: 'Force-push the rebased branch to origin?', to: { module: 'kehikot.claude', session: B } }, project: dir })
-      /* The person answers (typed, or delivered from the Inbox): the next prompt withdraws it. */
+      expect(decisionRow()).toMatchObject({ state: 'attention', event: 'needs-decision', label: 'Force-push the rebased branch to origin?', question: { text: 'Force-push the rebased branch to origin?', to: { module: 'kehikot.claude', session: B } }, project: dir })
+      /* The turn that asked it is that item, said once. */
+      expect(row()).toBeUndefined()
+    })
+
+    test('a decision stays through the turns that follow until the person answers (#108)', async () => {
+      const { w, run, hear, row, decisionRow } = await going()
+      w.runs.tellFinished(run.token!, 'needs-decision', 'Merge now?', ['yes', 'no'])
+      hear('Stop')
+      /* A background task's notice wakes it, and that turn ends some other way: the question stays. */
       hear('UserPromptSubmit')
-      expect(row()).toMatchObject({ state: 'working' })
-      expect(row()!.question).toBeUndefined()
+      expect(decisionRow()).toMatchObject({ state: 'attention', label: 'Merge now?' })
+      hear('Stop', 1)
+      expect(decisionRow()).toMatchObject({ state: 'attention', label: 'Merge now?', question: { text: 'Merge now?', choices: ['yes', 'no'] } })
+      expect(row()).toMatchObject({ state: 'done', detail: 'turn ended; 1 background task still running' })
+      /* A module's note typed into it (a Queue report) is not the person: it stays. */
+      expect(w.runs.deliver(B, '⟦Queue · report #1⟧ Run "bun test" passed')).toBe(true)
+      expect(decisionRow()).toBeDefined()
+      hear('Stop')
+      expect(decisionRow()).toBeDefined()
+      /* The person types an answer and sends it: it goes. */
+      w.runs.type(run, 'y')
+      expect(decisionRow()).toBeDefined()
+      w.runs.type(run, 'es\r')
+      expect(decisionRow()).toBeUndefined()
+    })
+
+    test('a reply the person sends from the Inbox answers a decision; a newer decision replaces it', async () => {
+      const { w, run, hear, decisionRow } = await going()
+      w.runs.tellFinished(run.token!, 'needs-decision', 'Which branch?')
+      hear('Stop')
+      hear('UserPromptSubmit')
+      w.runs.tellFinished(run.token!, 'needs-decision', 'Which remote?')
+      hear('Stop')
+      expect(decisionRow()).toMatchObject({ label: 'Which remote?' })
+      expect(w.runs.deliver(B, '⟦Your person via Kehikot · reply⟧ origin')).toBe(true)
+      expect(decisionRow()).toBeUndefined()
+    })
+
+    test('a conversation placed after it started keeps its decision through its later turns too (#108)', async () => {
+      const { dir, w, lists_ } = await going()
+      assign(dir, HERE, A)
+      const token = tokenFor(dir, A, freshToken)!
+      expect(w.runs.tellAdopted(token, 'needs-decision', 'Ship it?', ['yes', 'no'])).not.toBeNull()
+      const rows = () => lists_.at(-1)!.filter((one) => one.id === A || one.id === `${A}:decision`)
+      expect(rows()).toEqual([expect.objectContaining({ id: `${A}:decision`, state: 'attention', label: 'Ship it?', question: expect.objectContaining({ text: 'Ship it?' }) })])
+      /* A later turn, woken by something else, ends as done: that is its own line, and the question stays. */
+      w.runs.tellAdopted(token, 'done', 'checked the queue')
+      expect(rows().map((one) => one.id).sort()).toEqual([A, `${A}:decision`])
+      /* A newer decision replaces it. */
+      w.runs.tellAdopted(token, 'needs-decision', 'Ship it now?')
+      expect(rows().find((one) => one.id === `${A}:decision`)).toMatchObject({ label: 'Ship it now?' })
     })
 
     test('a decision’s choices are on its question', async () => {
-      const { w, run, hear, row } = await going()
+      const { w, run, hear, decisionRow } = await going()
       w.runs.tellFinished(run.token!, 'needs-decision', 'Which branch?', ['main', 'release'])
       hear('Stop')
-      expect(row()!.question).toEqual({ text: 'Which branch?', choices: ['main', 'release'], to: { module: 'kehikot.claude', session: B } })
+      expect(decisionRow()!.question).toEqual({ text: 'Which branch?', choices: ['main', 'release'], to: { module: 'kehikot.claude', session: B } })
     })
 
     test('background tasks or scheduled wake-ups still pending are a pause, not a stall — and keep it from being put away', async () => {
@@ -1817,7 +1864,7 @@ describe('the activity list a page passes to the host', () => {
     })
 
     test('a refusal is the specific ask at once, answerable from the Inbox, until the person answers', async () => {
-      const { hear, row, refusedRow, dir } = await going()
+      const { w, run, hear, row, refusedRow, dir } = await going()
       const denied = { session_id: B, hook_event_name: 'PermissionDenied', tool_name: 'mcp__queue__queue_run', tool_input: { command: ['git', 'push', '--force'] }, tool_use_id: 't', reason: '[Irreversible Remote Change]' }
       expect(hear('PermissionDenied', null, { payload: denied })).toBe(true)
       expect(refusedRow()).toMatchObject({
@@ -1834,9 +1881,13 @@ describe('the activity list a page passes to the host', () => {
       hear('Stop')
       expect(row()).toMatchObject({ state: 'attention', event: 'action-refused', label: 'Allow queue_run (queue): git push --force?' })
       expect(refusedRow()).toBeUndefined()
+      /* Something else wakes it (a background task's notice): the ask is still the person's, an item of its own. */
       hear('UserPromptSubmit')
-      expect(refusedRow()).toBeUndefined()
+      expect(refusedRow()).toMatchObject({ label: 'Allow queue_run (queue): git push --force?' })
       expect(row()).toMatchObject({ state: 'working' })
+      /* The person answers in the session: it goes. */
+      w.runs.type(run, 'no\r')
+      expect(refusedRow()).toBeUndefined()
       /* A payload too large to pass is still a refusal, said without its words. */
       hear('PermissionDenied', null, { payload: null })
       expect(refusedRow()).toMatchObject({ label: 'Allow an action?' })

@@ -95,6 +95,16 @@ describe('whether the person has moved on', () => {
   })
 })
 
+describe('Kehikot’s typed notices are not the person (#108)', () => {
+  test('a module’s or another session’s note typed in is not moving on; the person’s reply from the Inbox is', () => {
+    const before = notified(T0, 'stopped', SHELL_CUT)
+    expect(movedOn([before, typed(T0 + 1, '⟦Queue · report #12⟧ Run "bun test" passed')].join('\n'), T0)).toBe(false)
+    expect(movedOn([before, typed(T0 + 1, '⟦Trackers · report #3⟧ !41 was approved')].join('\n'), T0)).toBe(false)
+    expect(movedOn([before, typed(T0 + 1, '⟦Your person via Kehikot · reply⟧ yes')].join('\n'), T0)).toBe(true)
+    expect(movedOn([before, typed(T0 + 1, '⟦Queue · report #12⟧ passed\n⟦Your person via Kehikot⟧ go on')].join('\n'), T0)).toBe(true)
+  })
+})
+
 describe('whether a turn was under way', () => {
   test('a turn that ended is not; one waiting on a tool, or a prompt with no answer, is', () => {
     expect(midTurn([typed(T0), asked(T0 + 1, 'end_turn'), turnEnded(T0 + 2)].join('\n'))).toBe(false)

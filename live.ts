@@ -9,7 +9,7 @@ import { PROJECT_ID, projectFile, readProjectFile } from 'kehikot-module-protoco
 import type { RunSockets } from 'kehikot-module-protocol/run'
 import { HOST_DOOR_MODULE, isStableDoor, messageDelivery, mintTicket, pasted, sameTicket, startingHost, watchKnownProjects, type DeliverySession, type KnownProjects, type KnownProjectsOptions } from 'kehikot-module-protocol/serve'
 import type { DeliveryState, KehikkoSkill } from 'kehikot-module-protocol'
-import { REFUSED_EVENT, RESEARCH_COMPLETE_EVENT, STALLED_EVENT, TURN_EVENTS, TURN_KINDS, refusalEnd, refusalOf, refusalWords, toldReply, turnEnd, turnQuestion, type ActivityQuestion, type Refusal as Refused, type TurnEnd, type TurnKind } from 'kehikot-module-protocol'
+import { DECISION_EVENT, REFUSED_EVENT, RESEARCH_COMPLETE_EVENT, STALLED_EVENT, TURN_EVENTS, TURN_KINDS, refusalEnd, refusalOf, refusalWords, toldReply, turnEnd, turnQuestion, type ActivityQuestion, type Refusal as Refused, type TurnEnd, type TurnKind } from 'kehikot-module-protocol'
 
 import { emptyPrompt, promptAfter, typedByPerson, type Prompt } from './input.ts'
 import { Gauges } from './gauges.ts'
@@ -17,7 +17,7 @@ import { contextOf, readStatus, type Context, type Status } from './meter.ts'
 import { limitsNow, mergeLimits, readLimits, type Limits } from './usage.ts'
 import { isKehikkoKey, kehikkoOf, placeKey, sortedParts, type Kehikko } from './place.ts'
 import { readSpace, type SpaceStep } from './spaces.ts'
-import { cutOffs, cutOffWords, lastPrompt, midTurn, type CutOff } from './cutoff.ts'
+import { PERSON_FRAME, cutOffs, cutOffWords, lastPrompt, midTurn, type CutOff } from './cutoff.ts'
 import { PROGRAM, headOf, home, recordFile, sessionName, type Active, type ActiveStatus, type Able, type Program, type Running, type State } from './program.ts'
 import { PLACE_TOKEN, assign, attach, born, byToken, follow, homeOf, isDetached, markSession, markSessions, note, ownOf, projectRoot, readPlaces, readSettings, recordedIds, sighted, stayDetached, tokenFor, type NamedPlace, type PlaceEntry, type Places, type SessionEntry } from './record.ts'
 import { readKeptGuards, writeKeptGuards } from './restarted.ts'
@@ -626,6 +626,13 @@ export interface Run {
    * (`PermissionDenied`, tell.sh): an Inbox item of its own, the specific ask, until they answer.
    */
   refused: (Refused & { at: number }) | null
+  /**
+   * The decision its agent asked the person for (`needs-decision`) and they have not answered: an
+   * Inbox item of its own, kept through the turns that follow — a background task's notice, a module's report
+   * typed in, all wake it and end some other way. It goes when the person answers (types in the
+   * session, or sends a reply from the Inbox), when the agent asks a newer one, or when they dismiss it.
+   */
+  decision: (TurnEnd & { at: number }) | null
   /** Whether its `Stop` hook already sent a stalled turn back once since the last prompt (`remindTurnEnd`). */
   sentBack: boolean
   /** Its subagents running now, by agent id, with when each started (`SubagentStart`). */
@@ -963,6 +970,24 @@ export function activityRows(runs: Iterable<Run>, project: string | null = null,
         ...(question && run.settled ? { question } : {}),
         project: run.projectPath,
       })
+    }
+    /* A decision it asked for and the person has not answered (`decision`): an item of its own, kept
+       whatever its later turns ended with, and while it works on one. */
+    if (run.decision) {
+      const question = turnQuestion(run.decision, to)
+      rows.push({
+        id: `${run.settled ?? run.id}:decision`,
+        state: 'attention',
+        label: clip(run.decision.label ?? '', ACTIVITY_LABEL),
+        ...(Object.keys(place).length > 0 ? { place: { ...place, ...(place.parts ? { parts: [...place.parts] } : {}) } } : {}),
+        since: run.decision.at,
+        detail: clip(run.decision.detail, ACTIVITY_DETAIL),
+        event: DECISION_EVENT,
+        ...(question && run.settled ? { question } : {}),
+        project: run.projectPath,
+      })
+      /* The turn that asked it: that item is the decision's, said once. */
+      if (end?.event === DECISION_EVENT) continue
     }
     if (!run.state) continue
     /* A question the person has already seen, or a conversation with no turn yet, is no Inbox line. */
@@ -2195,6 +2220,8 @@ export class Runs {
     setTimeout(() => {
       if (!run.ended) run.pty.write('\r')
     }, ENTER_AFTER).unref?.()
+    /* A reply the person sent from the Inbox answers it; a module's or another session's note does not. */
+    if (text.includes(PERSON_FRAME)) this.answered(run)
     this.log(`claude: a message came for ${run.settled ?? run.id}, ${state === 'idle' ? 'idle at its prompt' : 'working'}; typed into it`)
     return true
   }
@@ -3158,6 +3185,7 @@ export class Runs {
       told: null,
       turnEnd: null,
       refused: null,
+      decision: null,
       sentBack: false,
       agents: new Map(),
       found: [],
@@ -3476,9 +3504,14 @@ export class Runs {
       if (at?.kehikko && 'key' in at.kehikko) place.kehikko = at.kehikko.key
       const entry = read.value.sessions[hit.id]
       const question = turnQuestion(end, { module: ID, session: hit.id })
-      this.toldAdopted.delete(hit.id)
-      this.toldAdopted.set(hit.id, {
-        id: hit.id,
+      /* A decision is its own item (`:decision`), kept through the turns that follow until the person is
+         in the conversation (`outlived`) or the agent asks a newer one; how a later turn ended is the other. */
+      const decided = end.event === DECISION_EVENT
+      const key = decided ? `${hit.id}:decision` : hit.id
+      if (decided) this.toldAdopted.delete(hit.id)
+      this.toldAdopted.delete(key)
+      this.toldAdopted.set(key, {
+        id: key,
         state: end.state,
         label: clip((end.label ?? entry?.label ?? '').replace(/\s+/g, ' ').trim() || 'Claude session', ACTIVITY_LABEL),
         ...(Object.keys(place).length > 0 ? { place } : {}),
@@ -3631,14 +3664,14 @@ export class Runs {
       this.notice(run, 'needs-you', clip(`Action refused: ${refusalWords(refusal).label}`, ACTIVITY_LABEL))
       return true
     }
-    /* A new prompt: what the last turn was tagged with, or was about to be, is over — and so is a
-       refusal it was waiting on: the person answered. */
+    /* A new prompt: what the last turn was tagged with, or was about to be, is over. A refusal or a
+       decision it was waiting on is not: a background task's notice or a typed-in report is a prompt
+       too, and only the person answers (`answered`). */
     if (event === 'UserPromptSubmit') {
       run.told = null
       run.sentBack = false
-      if (run.turnEnd || run.refused) {
+      if (run.turnEnd) {
         run.turnEnd = null
-        run.refused = null
         this.changed()
       }
     }
@@ -3657,6 +3690,7 @@ export class Runs {
         return 'send-back'
       }
       run.turnEnd = end
+      if (end.event === DECISION_EVENT) run.decision = { ...end, at: this.now() }
       run.told = null
     }
     const state = this.program.signal(event)
@@ -3776,7 +3810,7 @@ export class Runs {
    * never closes it on its own. Going to work counts where the record is kept (`readCutOffs`).
    */
   private outlived(row: ActivityRow): boolean {
-    const session = row.id.startsWith('cut-off:') ? row.id.slice(8) : row.id.startsWith('resumed:') ? row.id.slice(8) : row.state === 'attention' && !row.id.includes(':') ? row.id : null
+    const session = row.id.startsWith('cut-off:') ? row.id.slice(8) : row.id.startsWith('resumed:') ? row.id.slice(8) : row.id.endsWith(':decision') ? row.id.slice(0, -9) : row.id.endsWith(':refused') ? row.id.slice(0, -8) : row.state === 'attention' && !row.id.includes(':') ? row.id : null
     return session !== null && this.engagedAfter(row.project, session, row.since, false)
   }
 
@@ -3940,8 +3974,18 @@ export class Runs {
          dismisses the question without answering it, and the session still
          needs them. */
       if (run.state === 'needs-you' && data !== '\x1b') this.become(run, 'working')
+      /* The person sent what they typed: whatever it was waiting on them for is answered. */
+      if (data.includes('\r')) this.answered(run)
     }
     run.pty.write(data)
+  }
+
+  /** The person answered the session: the refusal and the decision it was waiting on go. */
+  private answered(run: Run): void {
+    if (!run.refused && !run.decision) return
+    run.refused = null
+    run.decision = null
+    this.changed()
   }
 
   /**
@@ -4000,6 +4044,7 @@ export class Runs {
       told: null,
       turnEnd: null,
       refused: null,
+      decision: null,
       sentBack: false,
       agents: new Map(),
       found: [],
